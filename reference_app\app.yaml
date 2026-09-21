@@ -1,0 +1,13 @@
+command:
+  - python
+  - app.py
+
+env:
+  - name: DATABRICKS_HOST
+    valueFrom: runtime
+  - name: DATABRICKS_TOKEN
+    valueFrom: runtime
+  - name: DATA_VOLUME_PATH
+    value: /dbfs/Volumes/dvlp_11/ia_dart/tne_exco/
+  - name: LLM_MODEL_NAME
+    value: databricks-claude-sonnet-4-5
