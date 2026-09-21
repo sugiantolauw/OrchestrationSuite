@@ -471,6 +471,74 @@ confirms them at sign-off.
 
 **Regenerate** in the UI re-runs narration and synthesis. It never re-runs rule selection.
 
+### 4.7 Exports — the PPTX pack
+
+The PPTX pack is the workpaper an executive actually reads. `src/pptx_export.py` (596 lines) is a
+reasonable foundation — it builds **native PowerPoint charts** rather than pasted images, so they
+stay editable and on-brand, and it uses the Optus template with consistent design tokens. Keep
+both properties. What is wrong is structure and robustness, not the approach.
+
+**Defects to fix:**
+
+1. **It is a data dump, not a deck.** `generate_pptx` emits one slide per finding, all of them:
+   cover + exec summary + 3 charts + coverage + N high findings + divider + M medium/low findings
+   + methodology + end. Fourteen findings produces ~23 slides. The UI already knows better —
+   `_render_filtered_findings` (`app.py:1552`) shows the top 3 and collapses the rest. The deck
+   does not.
+2. **Fixed-height text boxes with variable-length content.** `_add_text(slide, left, top, width,
+   height, …)` (`pptx_export.py:92`) sets an explicit height and never enables autofit. A long
+   observation silently overflows the shape or runs off the slide. **This is the single most
+   visible defect and the cheapest to fix.**
+3. **No written narrative.** Every word is mechanical — the "Executive Summary" slide
+   (`:176`) is computed counts. This is the one slide read verbatim by an executive, and after P6
+   it must carry the generated `exec_summary`.
+4. **The headline exposure figure is the double-counted one.** `_build_risk_chart` (`:433`) sums
+   `financial_exposure` across findings — the same overlapping-population error as `app.py:919`.
+   Fixed once in P3; the exporter must read the corrected value, not recompute it.
+5. **Zero findings produces a broken deck** — a "Detailed Findings" divider followed by nothing.
+   A clean audit is a legitimate and important outcome; say so explicitly on a slide.
+6. **Private API use.** `generate_pptx` (`:545`) manipulates `prs.slides._sldIdLst` and drops
+   relationships by hand with a fallback attribute loop. It will break on a `python-pptx` version
+   bump. Ship a template that contains no content slides instead.
+
+**Target structure** — roughly ten slides, mirroring how the UI already thinks:
+
+```
+Cover                     run id, Skill + version, audit period, data mode, date
+Executive summary         LLM-written (P6), 3 short paragraphs, one number callout
+What we found             the themes from §4.6 synthesis — not a finding list
+Top matters (3–5 slides)  one per priority finding: observation, evidence, recommendation,
+                          management question, source files
+Risk and exposure         one chart, honest arithmetic, methodology note on what exposure means
+── Appendix ──
+All findings              compact table, one row per finding
+Test coverage             the existing coverage slide
+Methodology & limitations the existing slide, plus threshold provenance (§0.4)
+```
+
+**Rules for the rebuild:**
+
+- **Load the `dataviz` skill before writing or changing any chart code.** Do not choose chart
+  types, colours or layouts without it.
+- Keep native `add_chart` output. Never paste a rendered image — it loses editability and scales badly.
+- Every text frame: `word_wrap = True` and `MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE`, or measure and
+  truncate with an explicit ellipsis. Never let content overflow silently.
+- Slide count must be bounded and deterministic for a given finding count. State the rule.
+- Every number on every slide comes from `RunState` — never recomputed in the exporter. This is
+  what **G13** asserts.
+- Stamp `run_id` and generation timestamp in the footer of every slide. An export must be
+  traceable to the run that produced it (§9A.2).
+- Where a severity rests on an analyst-set threshold (§0.4), the finding slide says so.
+- The exporter takes a completed run as input. It does not read module globals.
+
+**Phasing.** The narrative does not exist until P6 and the numbers are not trustworthy until P3,
+so a full rebuild before then is rework. Split it:
+
+- **P4** — fix autofit/overflow (defect 2), the zero-findings case (5), and the private-API use
+  (6). Wire G13. Small, and immediately visible.
+- **P6** — the structural rebuild: new slide order, themes slide, LLM exec summary, bounded slide
+  count, footer stamping, threshold-provenance labels.
+
 ---
 
 ## 5. Evaluation
@@ -613,9 +681,9 @@ Each phase ends with **stop and report**. Do not auto-start the next.
 | **P1** | `RunState` + Delta persistence | JSON round-trip test green; migrations create all tables; `LocalPersistence` + `DeltaPersistence` both pass the same contract test; reaper test green |
 | **P2** | Primitives + T&E Skill | Surface 2 ≥0.98/≥0.95 per test on planted data; G8 green; **zero memorised constants** (grep test); contract describes raw sources |
 | **P3** | Pipeline loop + nodes + ThreadExecutor | G6, G7, G9, G10 green; full run on fixtures → findings in Delta; `/trace` shows real events; MLflow per-node spans; exposure double-count fixed |
-| **P4** | App rewired to run-scoped data | Surface 1 vs hand-verified oracle; G13 green; no module-level globals; `/workspace/tne` functionally identical; all routes unchanged |
+| **P4** | App rewired to run-scoped data | Surface 1 vs hand-verified oracle; G13 green; no module-level globals; `/workspace/tne` functionally identical; all routes unchanged; PPTX overflow, zero-findings and private-API defects fixed (§4.7) |
 | **P5** | JobsExecutor + UC + Volume upload | `run_now` round-trip works; a run survives an App redeploy (reaper + resume); real file uploads and profiles; deployment ID reported |
-| **P6** | LLM layer | G11 100% on a 30-case golden set; G14, G15 green; degraded mode works; per-endpoint parameter matrix recorded in §6; `classify` via `ai_query` |
+| **P6** | LLM layer + export rebuild | G11 100% on a 30-case golden set; G14, G15 green; degraded mode works; per-endpoint parameter matrix recorded in §6; `classify` via `ai_query`; PPTX restructured per §4.7 with bounded slide count, written exec summary, themes slide and run-id footer |
 | **P7** | HITL gates | Paused run resumes across browser refresh **and** App restart; export blocked until sign-off; both events in `trace_events` |
 | **P8** | GST Skill + Explorer | GST end-to-end on synthetic data via primitives (no bespoke test functions); Explorer proposes → validates → confirms → runs → saves draft Skill; planner cannot emit code (schema test) |
 | **P9** | Eval harness + hardening | Tier A in CI; nightly green 3 consecutive nights; judge κ recorded; migration checklist written |
