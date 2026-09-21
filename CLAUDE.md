@@ -89,6 +89,43 @@ is counted in `hv_amount`, `daily_over_amount` and possibly `missing_receipt_amo
 The risk score `sev*30 + recurrence*0.4 + exposure_pct*0.3` (`app.py:926`) has no stated basis.
 Both are fixed in P3.
 
+### 0.4 The findings are frozen LLM output, not a designed rule set
+
+`build_all_findings` (`app.py:528–895`) looks like a rules engine. It is not. It is the output of
+an agentic coding tool that looked at the data once, decided what an auditor should care about,
+and wrote that judgement into Python as f-strings. The app has never called a model at runtime
+because model serving was unavailable when it was built.
+
+This matters in two ways.
+
+**It is not a problem.** An LLM authoring a rule set, which a human then reviews and versions, is
+sound — it is reproducible, inspectable and defensible. It is exactly what Explorer Mode
+(§4.5) automates. Do not "fix" it by moving finding selection to runtime.
+
+**But the thresholds have no source.** `>10% missing receipts = High` (`app.py:574`),
+`>30% no-receipt-viewed = High` (`app.py:547`), `>50 daily exceedances = High` (`app.py:869`)
+and the rest were invented by the authoring model. They are not from any T&E policy. In P2 every
+threshold moves to `thresholds.yaml` and must carry either a real policy reference or
+`provenance: analyst-set` with `pending_policy_confirmation: true` — and the UI must display that
+label wherever the threshold drives a severity. A finding whose severity rests on an unattributed
+number is not defensible in a CAO meeting.
+
+### 0.5 Data-model problems to fix when porting
+
+- **`EXCO_MEMBERS` is a list of human names** (`data_loader.py:242`) and every population filter
+  joins on it (`app.py:235`, `computation.py:45`, `:93`, `:111`). Name matching is fragile —
+  formatting differences, duplicates, and name changes all silently drop or duplicate rows.
+  `contract.yaml` must key on an employee ID, with name as a display attribute only.
+- **Currency is unhandled.** The amount column is `"Expense Amount (reimbursement currency)"` —
+  the name says the currency varies — yet everything sums it as if it were AUD and
+  `contract.yaml` in v1 declared `currency: AUD`. Either the contract requires a single
+  currency and the test fails when it is violated, or the pipeline converts at a stated rate
+  with the rate recorded in the run. Decide in P2; do not sum mixed currencies.
+- **Audit-period boundaries have no timezone.** `filter_by_dates` (`app.py:985`) compares naive
+  timestamps. An audit period is a business-calendar concept in a stated timezone; `RunState`
+  stores ISO dates and the contract must state the timezone. Off-by-one-day at a period boundary
+  is a reproducibility failure and a reconciliation failure.
+
 ---
 
 ## 1. Product vision
@@ -190,9 +227,12 @@ are blocked in the target environment.
 Change none of these without stopping and proposing to the user first.
 
 1. **No orchestration framework for the core pipeline.** Plain Python loop (§2.2).
-2. **Deterministic computation, LLM narration.** Every number — amounts, counts, ratios,
-   thresholds, categories — comes from Python computing on data. LLMs write prose *around*
-   numbers the node fills into template slots. `execute` never calls an LLM.
+2. **The LLM authors rules; it does not decide results at runtime.** An LLM may author a
+   Skill's tests, finding rules, thresholds and prose templates — reviewed by a human and
+   versioned (§4.6). At runtime, every number and every finding's existence comes from Python
+   evaluating those rules against data. The runtime LLM writes prose around numbers the node
+   already fixed, and synthesises themes across findings. It never invents a finding, a number
+   or a severity. `execute` never calls an LLM.
 3. **Two HITL gates** (§2.4). Findings sign-off is mandatory in both modes.
 4. **Skills are data.** A Skill is YAML (manifest, contract, plan, thresholds, prompts) plus a
    small `custom.py` escape hatch and a `workspace.py`. Not a pile of bespoke functions.
@@ -327,7 +367,9 @@ skills/tne_exco/
 ├── manifest.yaml      # id, name, domain, version, owner, status: draft|published
 ├── contract.yaml      # required sources + columns + types + nullability + PII class
 ├── plan.yaml          # ordered [{primitive, params, control_objective, risk_rule}]
-├── thresholds.yaml    # every threshold, with policy reference + effective date
+├── findings.yaml      # which findings can exist, severity rules, title/observation/
+│                      #   recommendation/question templates, metrics_cited
+├── thresholds.yaml    # every threshold, with provenance + effective date
 ├── prompts/           # overrides of platform defaults
 ├── custom.py          # tests no primitive expresses
 └── workspace.py       # render_workspace(run_id)
@@ -361,12 +403,73 @@ objective + profile + primitive schemas + 1–2 reference Skills
 The planner sees **aggregates only** — schemas, counts, null rates, cardinality, inferred semantic
 types, PII columns masked. Never rows. It has no tools and cannot query data.
 
+**Explorer authors `findings.yaml` as well as `plan.yaml`.** A test that flags exceptions nobody
+writes up is useless, so the `PlanProposal` schema carries a `findings[]` block in the same shape
+as §4.6, validated the same way: every `metrics_cited` entry must be a metric the proposed tests
+actually produce, every threshold must be numeric and land in `thresholds.yaml` with
+`provenance: analyst-set`, and every `trigger`/`severity.when` must parse under the restricted
+evaluator. This is the product feature that replaces "ask a coding agent to write the findings".
+
 Promotion `draft → published` requires Surface 2 precision/recall on planted synthetic data plus
 a named reviewer.
 
 **Do not build:** a tool-using planner, a planner that emits SQL or pandas, a multi-agent swarm,
 a supervisor pattern, a planner/skeptic pair, or a conversational companion agent. If a phase
 seems to need one, stop and ask — the answer is usually a better prompt or a rule change.
+
+### 4.6 Authoring time vs run time
+
+The single most important distinction in this system. Both moments involve an LLM; only one of
+them is allowed to vary per run.
+
+| | **Authoring time** | **Run time** |
+|---|---|---|
+| Who | Explorer Mode planner, or a human with a coding agent | The `find` node |
+| Produces | `plan.yaml`, `findings.yaml`, `thresholds.yaml` — which tests run, which findings can exist, what severity rules apply, prose templates | This run's numbers, filled narratives, cross-finding synthesis |
+| Human review | Once, at Skill confirmation. Then versioned | Per run, at the sign-off gate |
+| Varies per run | Never | Prose may; membership and numbers never |
+| Testable by | Surface 2 (precision/recall of the rule set) | G11, judge |
+| Answer to "why does this finding exist?" | "SKILL-001 v1.2 §findings.T4_1, confirmed by <name> on <date>" | — |
+
+**`findings.yaml` shape** (port `build_all_findings` into this, do not port it into Python):
+
+```yaml
+findings:
+  - id: T4_1
+    test_id: T4.1
+    title: Missing Receipt Documentation
+    trigger: missing_receipt_count > 0
+    severity:
+      - when: missing_receipt_pct > 10   # threshold ref: thresholds.missing_receipt_high
+        then: High
+      - when: missing_receipt_pct > 5
+        then: Medium
+      - else: Low
+    metrics_cited: [missing_receipt_count, missing_receipt_pct, missing_receipt_amount]
+    observation: >
+      {missing_receipt_count} claims ({missing_receipt_pct}% of total) are missing receipt
+      documentation, representing {missing_receipt_amount} in unsupported spend.
+    recommendation: >
+      Enforce mandatory receipt attachment before expense report submission.
+    management_questions:
+      - What is the current policy for handling claims without receipts?
+```
+
+`trigger` and `severity.when` are evaluated by a small, explicitly-scoped expression evaluator
+over the metrics dict — **not** `eval()`. Restrict to comparison and boolean operators over
+known metric names; reject anything else at Skill load time.
+
+**Run-time synthesis (the one place the LLM adds judgement to findings).** After the rules
+produce the finding set, `find` makes one call that may:
+- group findings into themes and propose a root-cause hypothesis per theme
+- flag cross-test patterns no single rule can see
+- propose a severity *alongside* the computed one, with a reason
+
+It may not add a finding outside the rule set, remove one, change a computed severity, or emit a
+number. Themes are stored on `RunState.findings[].theme_id` plus a `themes` list, and the auditor
+confirms them at sign-off.
+
+**Regenerate** in the UI re-runs narration and synthesis. It never re-runs rule selection.
 
 ---
 
@@ -380,7 +483,7 @@ Tiered. Build Tier A now; do not attempt all sixteen gates at once.
 |---|---|---|
 | **G6 Reconciliation** | tested-population rows, Σamount, min/max date == source totals; variance 0; persisted per run | P3 |
 | **G7 Contract conformance** | contract violation → `status=failed`. No fuzzy column matching, no defaults | P3 |
-| **G8 Threshold consistency** | catalogue thresholds == `thresholds.yaml` == code; every threshold has a policy ref | P2 |
+| **G8 Threshold provenance** | catalogue thresholds == `thresholds.yaml` == code; every threshold has either a policy reference or `provenance: analyst-set`; every analyst-set threshold that drives a severity is labelled as such in the UI | P2 |
 | **G10 Negative control** | clean dataset → zero findings, and no risk language in LLM output | P3 |
 | **G11 Cited-metric faithfulness** | every number in a finding's prose maps to a metric in *that finding's* `metrics_cited`, unit-aware; every cited metric appears; quantifiers flagged | P6 |
 | **G13 Export fidelity** | every number in PPTX/XLSX == `RunState` value, same rounding | P4 |
@@ -542,6 +645,47 @@ governed views satisfy the same contract with no orchestration change.
 **`build_demo_data` (`app.py:229–287`) is deleted in P3.** Random `RF_*` flags are noise, not
 synthetic data. Demo mode becomes "a completed run over a realistic dataset, persisted in Delta
 like any other run, clearly labelled".
+
+---
+
+## 9A. Open questions — answer before the corporate migration, not after
+
+These are unresolved and shape the schema or the deployment. Raise them early; several need a
+platform owner's decision, not a code change. `docs/DATABRICKS_ARCHITECTURE.md` is the version of
+this list written for a Databricks Solutions Architect.
+
+1. **Whose identity runs the audit?** A Databricks App can run as its service principal, or on
+   behalf of the signed-in user. This is the biggest open governance question:
+   - As a service principal, every auditor sees whatever the SP can see. Unity Catalog row filters
+     and column masks on executive expense data are bypassed, and `runs.run_owner` is a value the
+     app asserts rather than an identity the platform verified.
+   - On behalf of the user, UC permissions apply per auditor and the identity is real — but a
+     serverless Job triggered by the app runs as the job's own identity, so the user context has
+     to be carried into `RunState` and re-checked, or the job inherits the SP's reach anyway.
+   Decide before P5. `RunState` must carry a verified `run_owner` either way.
+2. **Can a run be retracted?** Findings leave the system as PPTX and XLSX. If a run is later found
+   wrong, there is currently no way to mark it superseded, and no way to tell which exports came
+   from it. Add `runs.superseded_by` and stamp every export with `run_id` + timestamp. Cheap now,
+   very expensive later.
+3. **Where does CI run?** Tier A gates need to execute somewhere that can reach a workspace for
+   the Delta-backed tests. GitHub Actions will not reach a corporate Databricks workspace. Either
+   the gates run against `LocalPersistence` only in CI (and the Delta path is covered by a nightly
+   job inside the workspace), or CI moves into Databricks. Decide in P9; design `PersistenceAdapter`
+   in P1 so the first option is possible.
+4. **Delta time travel vs data deletion.** Executive expense data is personal information. Delta
+   retains history, so a deleted row remains readable via time travel until `VACUUM`. A retention
+   and vacuum policy must exist before real data lands. This is a platform-owner decision.
+5. **Export egress.** A PPTX naming executives and their spend downloads to a laptop. Whatever DLP
+   or classification regime applies to that is out of this codebase's control, but the exports must
+   at least carry a classification label and the run ID.
+6. **Model endpoint region and cross-geo processing.** If pay-per-token endpoints are not served in
+   the workspace's region, inference may cross geography. For this data that is a governance
+   decision with lead time, not a config flag. Establish it before P6.
+7. **Rate limits and quotas.** AI Gateway can rate-limit an endpoint. `classify` submits batch work
+   via `ai_query`; behaviour under throttling must be defined — queue, degrade, or fail the run.
+   Whatever it is, it must not be a silent partial result.
+8. **Secrets in the Job.** The App reads env vars, but a serverless Job should read a Databricks
+   secret scope, not environment variables. Wire this in P5.
 
 ---
 
