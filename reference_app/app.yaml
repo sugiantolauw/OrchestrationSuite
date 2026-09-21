@@ -8,6 +8,6 @@ env:
   - name: DATABRICKS_TOKEN
     valueFrom: runtime
   - name: DATA_VOLUME_PATH
-    value: /dbfs/Volumes/dvlp_11/ia_dart/tne_exco/
+    valueFrom: runtime
   - name: LLM_MODEL_NAME
-    value: databricks-claude-sonnet-4-5
+    valueFrom: runtime

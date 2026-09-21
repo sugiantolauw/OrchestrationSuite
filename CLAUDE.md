@@ -1,815 +1,623 @@
-# AI Audit Analyst — Coding Agent Brief
+# AI Audit Analyst — Build Brief v2
 
-You are building the next iteration of a working prototype called **AI Audit Analyst**, a domain-agnostic Internal Audit analytics platform running on Databricks Apps. The current version is a polished front-end shell with fixture data. Your job is to make it real by adding a working **LangGraph-based backend** that executes audit runs against synthetic/governed Databricks data, while preserving everything that works today.
+**Status:** supersedes v1 entirely. v1 specified a LangGraph backend and preserved behaviour
+that turned out to be unsafe to preserve. If you have seen v1, discard it.
 
-Read this brief in full before proposing a plan. Do not skip sections. Ask clarifying questions only where a decision blocks progress; otherwise choose the sensible default and note it.
+You are building a domain-agnostic Internal Audit analytics platform on Databricks.
+A polished Dash front end already exists. Your job is to put a real, governed, auditable
+execution engine underneath it without losing the UI.
 
----
-
-## 0. How to work on this codebase
-
-Before making any changes:
-
-- In this handoff bundle, the working app lives under `reference_app/`.
-- **Read** `reference_app/app.py`, `reference_app/src/platform/pages.py`, `reference_app/src/platform/adapters.py`, `reference_app/src/platform/methodology.py`, `reference_app/src/test_catalogue.py`, and any existing `reference_app/src/orchestrator/` code in full. Do not rebuild from scratch — the existing prototype is the starting point.
-- Preserve every existing UI component, route path, and design token. The workspace at `/workspace/tne` must remain functionally identical.
-- Do not add features, refactor, or "improve" code that isn't required by the current phase.
-- Do not add docstrings, comments, or type annotations to code you are not changing.
-- Do not create new markdown documentation files unless the user asks.
-
-While working:
-
-- Commit at every stable checkpoint. Conventional commits: `feat(orchestrator): …`, `test(skills): …`, `fix(app): …`.
-- Prefix every commit message with the phase number, e.g. `[P2] feat(orchestrator): add SqliteSaver checkpointer`.
-- Run `python -m py_compile` on every changed Python file before commit.
-- Run `pytest` before every commit. If tests fail, fix them before committing.
-- Do not push to any remote unless explicitly asked.
-- Do not connect to any Databricks workspace other than the one configured in `.env`.
-- Ask before installing new dependencies or editing `requirements.txt`.
-- When you finish a phase, **stop and report**. Do not automatically start the next phase.
-
-Recommended Claude Code model workflow:
-
-- **Phase kickoff and phase review** → Claude Fable 5.1 (top-tier planning and root-cause reasoning).
-- **Phase implementation (writing code, tests, fixes)** → Claude Sonnet 4.6 (fast, cheap enough for sustained autonomous work).
-- Switch model in Claude Code with `/model claude-sonnet-4-6` or `/model claude-fable-5-1`.
-- Never leave Fable running through mechanical implementation work — burns Max quota unnecessarily.
+Read this file in full before proposing anything. Where it conflicts with code comments,
+docstrings, or the README, **this file wins** — several docstrings in the repo are factually
+wrong (see §2.3).
 
 ---
 
-## 1. Product vision (do not lose sight of this)
+## 0. Ground truth about the current repository
 
-One governed application that supports multiple audit use cases through:
+Read these before writing code:
 
-- Reusable **Skills** (versioned audit methodologies)
-- **Playbook Mode** for established tests · **Explorer Mode** for new audits
-- Governed data discovery from Unity Catalog + business-provided file upload
-- LangGraph orchestration executing deterministic audit tests
+- `reference_app/app.py` (2,468 lines — the whole app)
+- `reference_app/src/computation.py` (the real detection logic)
+- `reference_app/src/test_catalogue.py` (14 test definitions)
+- `reference_app/src/platform/adapters.py` (the service interface you will implement)
+- `reference_app/src/platform/pages.py`, `components.py`, `methodology.py`
+
+### 0.1 What actually works
+
+- Dash app with routes `/`, `/workspace/tne`, `/runs`, `/skills`, `/skills/<id>`, `/actions`, `/trace`.
+- A complete design system (`assets/theme.css`, ~760 lines) and Optus PPTX template.
+- Excel and PPTX exporters.
+- A test catalogue with 14 T&E control tests.
+- `src/computation.py` — genuine detection logic (groupby duplicates, split claims, per-diem).
+
+### 0.2 What does NOT work — read this twice
+
+**The app does not compute most of its audit tests. It counts flags it did not produce.**
+
+`app.py:compute_evidence_payload` (line 315) derives most metrics by summing pre-existing
+`RF_*` columns — `flag_count("RF_CS_SplitClaims_SameDay")` and similar (lines 324–362).
+The detection logic that produced those columns lived in an upstream notebook that is **not
+in this repository**. In demo mode the flags are random: `rng.random(n) < p` (lines 243–261).
+
+**`src/computation.py` is never imported by `app.py`.** Check the import block at lines 24–49.
+Neither are `narrative.py` or `guardrail.py`. All three are orphans.
+
+**The two implementations disagree** where they overlap:
+- T6.1d daily spend: per-diem-rate-driven in `computation.py:568`; hardcoded `$1,000` in `app.py:415`.
+- T3.3a late booking: `Advance Purchase Days` in `computation.py:147`; `RF_CS_LateBooking` flag in `app.py:388`.
+
+**`computation.py` contains memorised results from a prior audit, presented as computation:**
+- `compute_test_4_3_cached()` returns `flagged: 132` (line 288)
+- `compute_test_6_1c()` returns `exceptions: 0`, "Based on audit findings" (line 529)
+- `intl_exceptions: 2, # From audit findings` (line 590)
+- `total_records: 152_921`, `total_files: 8` (lines 641–642)
+- `aus_rate = 500  # Fallback reasonable ATO rate` (line 576)
+
+**`app.py` silently fabricates data when columns are missing.** `_standardise_combined`,
+`_standardise_pre`, `_standardise_approval` (lines 107–226) insert `"Unknown"`, `0`, and
+`2025-01-01` so the UI never breaks. `_find_col` (lines 65–77) matches any column whose name
+*contains* a candidate substring — so `"amount"` can match the wrong column. In an audit tool,
+a silent default is a fabricated record.
+
+**Genuine bug:** `computation.py:390` — `same_day_splits if 'same_day_splits' in dir() else ...`
+works by accident. Fix it when you port.
+
+**Hardcoded values that violate the portability contract (§3.16).** `app.yaml` was fixed in P0;
+these remain and are yours to remove in the phase that touches each file:
+- `src/platform/adapters.py:71` — `_UPLOAD_BASE = "/Volumes/sdpt_gia/ep_temp/taxgovernance"`.
+  Must come from `DBX_VOLUME`. Fix in **P5** when you implement the real upload.
+- `src/platform/fixtures.py` — `sdpt_gia.*` table names, `data-engineering@optus.com.au` owners
+  throughout the demo data. Fix in **P3** when fixtures are replaced by real Delta reads.
+- `src/narrative.py:23` — `"You are an internal audit analyst for Optus."` This module is
+  orphaned; it is kept only as reference for the T&E prompt content and the test-ID framework
+  when you write the real prompts in **P6**. Do not import it. Delete it in P6.
+
+A CI grep test for these patterns is part of P9. Until then, the scan is:
+`grep -rniE 'dvlp_11|ia_dart|sdpt_gia|optus|adb-[0-9]' --include=*.py --include=*.yaml .`
+
+**Wrong docstring:** `src/eval_gate.py` claims the pipeline uses
+`narrative.generate_findings()` + `guardrail.verify_all_findings()` "directly from app.py".
+It does not. That file is deleted in P0.
+
+### 0.3 The exposure number on the executive brief is wrong
+
+`app.py:1625` shows "Potential financial exposure of $X" where X is
+`sum(financial_exposure)` across findings, and each finding's exposure is
+`max(amount over cited metrics)` (`app.py:919`). Populations overlap — the same $6,000 claim
+is counted in `hv_amount`, `daily_over_amount` and possibly `missing_receipt_amount`.
+The risk score `sev*30 + recurrence*0.4 + exposure_pct*0.3` (`app.py:926`) has no stated basis.
+Both are fixed in P3.
+
+---
+
+## 1. Product vision
+
+One governed application serving multiple audit use cases through:
+
+- Reusable **Skills** — versioned audit methodologies, mostly declarative
+- **Playbook Mode** (run a saved Skill) and **Explorer Mode** (author a new one)
+- Governed data discovery from Unity Catalog plus business file upload
+- A deterministic pipeline with LLM narration at bounded points
 - Evidence-linked findings with source-file traceability
-- Persistent audit runs and management actions in governed Delta tables
-- Excel, PowerPoint, and HTML exports
-- Jira integration with an explicit approval step
+- Persistent runs and management actions in Delta
+- Excel / PowerPoint / HTML exports
+- Jira integration behind an explicit approval step (deferred — not built now)
 
-The existing ExCo T&E prototype is the first working Skill. Future examples: T4.8 Input GST, Emergency Change, User Access Review, Software Licence Compliance.
-
-The UX must be identical regardless of Skill. The Skill supplies domain-specific data sources, tests, metrics, charts, findings, and actions.
+The UX is identical regardless of Skill. The Skill supplies sources, tests, thresholds,
+prompts and the workspace layout. T&E ExCo is SKILL-001; T4.8 Input GST is SKILL-002.
 
 ---
 
-## 2. Current state (what already exists — do not rebuild)
+## 2. Architecture
 
-### Repository structure
+### 2.1 Runtime — three components, one channel
 
 ```
-reference_app/
-├── app.py                       # Dash entry point, URL routing, T&E workspace layout
-├── app.yaml                     # Databricks Apps runtime config
-├── requirements.txt             # Includes vendored Linux wheels
-├── assets/
-│   ├── theme.css                # Complete design system (~760 lines)
-│   └── optus_template.pptx      # Optus-branded PPTX template
-├── src/
-│   ├── data_loader.py           # FILE_REGISTRY, EXCO_MEMBERS, ExCo population builders
-│   ├── test_catalogue.py        # 14 T&E tests with rules and thresholds
-│   ├── computation.py           # Metric calculators
-│   ├── excel_export.py          # Styled Excel workbook generator
-│   ├── pptx_export.py           # Optus-branded PowerPoint generator (uses vendored python-pptx)
-│   ├── narrative.py             # Deterministic narrative builder
-│   ├── guardrail.py             # Metric guardrails
-│   ├── eval_gate.py             # Findings gate
-│   ├── charts.py                # Plotly chart builders
-│   └── platform/
-│       ├── adapters.py          # Service interfaces (mostly mocked) — YOU WILL REPLACE THESE
-│       ├── fixtures.py          # Demo data for Skills, runs, actions, trace events
-│       ├── components.py        # Reusable UI components (kpi_card, skill_card, run_card, etc.)
-│       ├── pages.py             # Platform pages: landing, skill library, methodology, runs, trace, actions
-│       └── methodology.py       # Skill methodology assembly (real for T&E, stubs for others)
-├── vendor/                      # Pre-built Linux wheels: lxml, pillow, python_pptx, typing_extensions, xlsxwriter
-└── tests/                       # pytest suite for computation, eval_gate, guardrail
+Databricks App (Dash)  ──run_now(run_id, phase)──▶  Job run (serverless)
+  • UI, routing, forms                                • the pipeline loop
+  • start_audit_run                                   • nodes, Skill tests, LLM calls
+  • polls Delta, renders                              • exports to Volume
+  • plan confirm / findings sign-off
+        │ read                                                  │ write
+        ▼                                                       ▼
+   Delta: runs · run_state · findings · management_actions · trace_events
+          uploaded_files · llm_calls · llm_cache · narrative_edits · evaluation_runs
+   Volume: uploads · exports      MLflow: per-node spans      Model Serving: 2 endpoints
 ```
 
-### Routes wired (all working)
+**The App never runs a node. The Job never renders anything. They communicate only through Delta.**
 
-| Path | Content |
-|---|---|
-| `/` | Platform landing page (Start an Audit) |
-| `/workspace/tne` | Full working T&E ExCo audit workspace (executive brief, findings, exports) |
-| `/runs` | Audit Runs list |
-| `/skills` | Skill Library |
-| `/skills/<skill_id>` | Skill methodology viewer |
-| `/actions` | Cross-Skill Management Actions |
-| `/trace` | Platform Trace (observable execution events) |
+The App does run Python — Dash callbacks, chart filtering, building export bytes on download.
+The rule: *nothing that takes more than a couple of seconds, and nothing that produces audit
+evidence, runs in the App.* Evidence is produced by a job run with a run number, or it is not evidence.
 
-### Existing adapter interface (mocked today — you will implement)
+### 2.2 No orchestration framework
 
-`reference_app/src/platform/adapters.py` already exposes these function signatures. Keep the signatures stable. Replace the implementations.
+**Do not use LangGraph, Prefect, Dagster, or any agent framework.** v1 mandated LangGraph; that
+was wrong given this runtime. Databricks Jobs is the durable executor, Delta is the state store,
+MLflow is the tracer. The pipeline is a plain Python loop:
 
 ```python
-list_skills(filters)
-get_skill(skill_id)
-search_governed_data(query)
-upload_audit_file(filename, content, run_id)
-get_upload_base_path()
-profile_sources(run_config)
-propose_plan(run_config)
-start_audit_run(run_config)     # ← today returns a mock run_id
-get_run_status(run_id)
-load_run(run_id)
-list_audit_runs(filters)
-list_management_actions(filters)
-list_trace_events(run_id)
-create_jira_preview(run_id)
-is_demo_mode()
-get_environment_label()
+state = persistence.load_state(run_id)
+for node in NODES_FOR_PHASE[phase][state.next_node_index:]:
+    state = node(skill, state)
+    persistence.save_state(state)
+    if state.status in ("awaiting_confirmation", "awaiting_signoff"):
+        return
 ```
 
-Keep every existing UI component and page working. Do not redesign the T&E workspace. Do not change route paths.
+Nine nodes, linear, no cycles, no conditional routing, no fan-out. A framework would add a second
+persistence layer that fights Delta, 40+ transitive dependencies, and nothing else.
+
+If a future phase needs a genuine loop (an interactive Explorer refinement, a multi-round critic),
+introduce a framework **for that node only**, and ask first.
+
+### 2.3 Executor abstraction
+
+`Executor.start(run_id, phase)` with two implementations:
+
+- `ThreadExecutor` — `ThreadPoolExecutor`, semaphore(2), for local dev and pytest.
+- `JobsExecutor` — `w.jobs.run_now(job_id, job_parameters={"run_id":…, "phase":…})`, for deployed.
+
+The pipeline function is identical under both. Selected by env var. This is what lets you build
+and test the whole engine with no workspace access, and it is the fallback if Job permissions
+are blocked in the target environment.
+
+**Three rules that make either executor safe:**
+1. Every node is idempotent — re-running it for the same `run_id` overwrites its own outputs, never appends.
+2. A reaper runs on App start: any run still `running` was orphaned by a restart → mark `interrupted`, offer resume.
+3. Concurrency is capped; further runs sit in Delta as `queued`.
+
+### 2.4 Human-in-the-loop gates — process boundaries, not interrupts
+
+| Phase parameter | Nodes | Ends with |
+|---|---|---|
+| `plan` | discover → profile → plan | `awaiting_confirmation` |
+| `execute` | execute → classify → find → prioritise → act | `awaiting_signoff` |
+| `export` | export | `completed` |
+
+- Plan confirmation: **mandatory in Explorer**, optional in Playbook.
+- **Findings sign-off before export: mandatory in both modes.** This is the control that matters
+  for a defensible workpaper — a human signs off on what leaves the system. v1 only had the plan
+  gate; that was the wrong gate.
+- Sign-off records approver identity and timestamp in `trace_events`.
 
 ---
 
-## 2a. Cloud Claude build context (this specific stage)
+## 3. Non-negotiables
 
-This handoff is intended for **Claude Code running through the Claude website**, not for direct work on the original local laptop. Real Optus data is still not accessible here. The immediate goal is to extend the current working prototype into a governed Databricks-backed build without relying on the separate synthetic-data package.
+Change none of these without stopping and proposing to the user first.
 
-Implications:
-
-- All environment-specific values (workspace host, catalog, schema, volume, model endpoint, app name) are **configuration**, never hardcoded. Read from env vars via `src/orchestrator/config.py`.
-- **Do not** hardcode any Optus URLs, catalog names, volume paths, or model endpoints anywhere in the source. The migration to Optus must be an environment change, not a code change.
-- Fixture data (`src/platform/fixtures.py`), existing demo content, and any governed/uploaded data you add later are the only inputs during this stage.
-- Adopt six adapter interfaces so the Optus environment can supply its own implementations later: `DataSourceAdapter`, `ModelClient`, `PersistenceAdapter`, `PromptRepository`, `TracingAdapter`, `ExportStorageAdapter`.
-- Each Skill commits a **data contract** at `src/orchestrator/skills/<skill_id>/contract.yaml` — required columns, types, keys, nullability, PII class. Later data sources should satisfy the contract without changing the orchestration code.
-- `.env` is gitignored. Ship `.env.example` with placeholders.
-
----
-
-## 3. Databricks environment (target workspace)
-
-This section describes the eventual target workspace for the cloud-Claude build. All values below are placeholders read from environment variables.
-
-| Setting | Env var | Personal (this build) | Optus (later migration) |
-|---|---|---|---|
-| Workspace host | `DATABRICKS_HOST` | target workspace URL | Optus workspace URL |
-| CLI profile | `DATABRICKS_PROFILE` | e.g. `target` | e.g. `optus-dev` |
-| Auth | `DATABRICKS_TOKEN` (PAT) or OAuth | target token | corporate SSO/PAT |
-| Catalog | `DBX_CATALOG` | chosen governed catalog | Optus governed catalog |
-| Schema | `DBX_SCHEMA` | `ai_audit_analyst` | `ai_audit_analyst` |
-| Volume | `DBX_VOLUME` | `/Volumes/<catalog>/ai_audit_analyst/uploads` | Optus governed volume |
-| App name | `DBX_APP_NAME` | e.g. `ai-audit-analyst` | Optus app name |
-| Sync path | `DBX_SYNC_PATH` | `/Workspace/Users/<you>/…` | Optus workspace path |
-| Model endpoint host | `MODEL_ENDPOINT_HOST` | `<workspace-host>/serving-endpoints` | Optus endpoint host |
-| Model routing | `NODE_MODELS_JSON` | JSON overrides (see §4b) | JSON overrides |
-
-### Deployment sequence
-
-```powershell
-# 1. Sync
-databricks sync ./tne_exco_app $env:DBX_SYNC_PATH --full --profile $env:DATABRICKS_PROFILE
-
-# 2. Deploy
-databricks apps deploy $env:DBX_APP_NAME --mode SNAPSHOT --source-code-path $env:DBX_SYNC_PATH --profile $env:DATABRICKS_PROFILE
-
-# 3. Verify
-databricks apps get $env:DBX_APP_NAME --profile $env:DATABRICKS_PROFILE -o json
-```
-
-If you later add a deployment wrapper, keep it thin and env-driven.
-
-### Known Databricks Apps constraints
-
-- **No C-extension compilation at deploy time** — heavy deps must be vendored as pre-built `manylinux2014_x86_64` wheels in `vendor/`.
-- **Databricks Model Serving IS available** — LLM inference is a first-class part of the pipeline (see §4b). Endpoint config-driven and swappable.
-- **Concurrent Delta writes fail** — `CREATE OR REPLACE TABLE` in overlapping runs triggers `ConcurrentAppendException`. Guard with a locking pattern or run-scoped table names.
-- **App must be started before deploy** — if in `UNAVAILABLE` state, `databricks apps start $env:DBX_APP_NAME --profile $env:DATABRICKS_PROFILE` first.
-- Do not assume any specific local shell or laptop path layout in generated instructions.
-
-### Environment restrictions
-
-- **MCP is not permitted** in the target Optus environment. Do not add MCP dependencies. Use terminal-driven Databricks CLI and REST API only.
-- **LLM inference is in scope** via Databricks Model Serving. Endpoint via `MODEL_ENDPOINT_HOST`. Assume an OpenAI-compatible chat completion API surface.
-- **No real Optus data is available in this handoff.** If a task requires real data to progress, stop and report the dependency clearly.
+1. **No orchestration framework for the core pipeline.** Plain Python loop (§2.2).
+2. **Deterministic computation, LLM narration.** Every number — amounts, counts, ratios,
+   thresholds, categories — comes from Python computing on data. LLMs write prose *around*
+   numbers the node fills into template slots. `execute` never calls an LLM.
+3. **Two HITL gates** (§2.4). Findings sign-off is mandatory in both modes.
+4. **Skills are data.** A Skill is YAML (manifest, contract, plan, thresholds, prompts) plus a
+   small `custom.py` escape hatch and a `workspace.py`. Not a pile of bespoke functions.
+5. **Delta is the system of record.** `RunState` is the in-flight working set; Delta is the truth.
+   There is no second checkpoint store.
+6. **`RunState` is JSON-serialisable — refs only.** No DataFrames, no objects. Volume paths,
+   table names, row counts. Enforced by a round-trip test.
+7. **Every LLM call is logged** to `llm_calls` synchronously before the call returns: prompt,
+   response, endpoint, served model version, params, token counts, latency, node, run_id.
+   AI Gateway inference tables provide an independent second copy.
+8. **Reproducibility comes from the Delta response cache,** not from `temperature`. Cache key:
+   `(prompt_sha256, endpoint, served_model_version, params_json)`. Sampling parameters are
+   per-endpoint config, tested, never assumed.
+9. **Model routing is config-driven.** Two endpoints (§6). No model names in node code.
+10. **Every metric carries source-file provenance** — `{value, unit, source_file}`, per the
+    existing `EVIDENCE_PAYLOAD["metrics"]` pattern.
+11. **No chain-of-thought exposed.** Trace shows execution events only — timestamps, stages,
+    statuses, durations. Reasoning (including any `reasoning_content` from GPT-OSS) is logged
+    to `llm_calls` and never rendered.
+12. **Narrative traceability.** Every LLM paragraph in the UI shows which `RunState` fields
+    supplied its numbers.
+13. **No fake successful integrations.** UC search fails → demo indicator. Jira not connected →
+    "Preview — not submitted". Endpoint misconfigured → deterministic output only, labelled
+    "LLM unavailable". Never silently fabricate.
+14. **No silent defaults for missing data.** Contract violation → run fails. `_find_col` and the
+    `_standardise_*` defaulting behaviour are deleted, not ported.
+15. **`/workspace/tne` stays functionally identical on the same data.** LLM narration is additive.
+    Note "functionally", not "bit-for-bit": v1 said bit-for-bit, which would have fossilised the
+    fabricated constants in §0.2.
+16. **No hardcoded workspace, catalog, volume, endpoint, or organisation names anywhere in source.**
+    Migration to another workspace is an environment change, not a code change.
 
 ---
 
-## 4. What you are building — the LangGraph backend
+## 4. The pipeline
 
-### Architecture at a glance
+### 4.1 RunState
 
-**Shape:** Skill-driven pipeline graph. A single fixed LangGraph DAG whose node bodies are supplied by whichever Skill the user selected. Not a multi-agent swarm. Not a monolithic tool-using agent. A deterministic pipeline with LLM narration and LLM-assisted planning at specific, bounded points.
-
-### Architecture defaults — challenge only with strong reasons
-
-Two lists. **Non-negotiables** are commitments the rest of the design depends on; do not change without stopping and proposing to the user first. **Starting proposals** are working defaults you can revise silently while implementing, as long as the non-negotiables stay intact.
-
-**Non-negotiables (propose before changing):**
-
-1. **LangGraph as the orchestration framework.** No custom framework. No agent swarm. No supervisor pattern for the core pipeline. Confine LangGraph imports to `graph.py`; keep `state.py`, nodes, skills, LLM client, and persistence pure Python so the framework is thinly coupled.
-2. **Deterministic computation + LLM narration boundary.** Numbers, thresholds, categories, and audit decisions come from Python computing on data. LLMs write prose *around* those numbers. `execute` never uses an LLM.
-3. **One HITL gate between `plan` and `execute`.** Mandatory for Explorer Mode, optional for Playbook Mode. Implemented as `interrupt_before("execute")`.
-4. **`Skill` protocol pattern.** Skills supply node bodies. The graph shape is universal across audits.
-5. **`RunState` as the single source of truth.** Checkpointed at every node.
-6. **Delta as system of record.** Runs, findings, actions, events, and LLM calls persisted to Delta. In-memory or fixture fallback only for demo mode, clearly labelled.
-7. **MLflow observability.** Every graph run and every LLM call is traced via `mlflow.langchain.autolog()` plus manual per-node spans. Also the substrate for evaluation (§6).
-8. **Model routing is config-driven.** Node → model mapping lives in `config.NODE_MODELS`, overridable by env var. No model names hardcoded in nodes.
-
-**Starting proposals (open to alternatives with brief justification in the commit or PR):**
-
-- The 9-node breakdown (`discover → profile → plan → execute → classify → find → prioritise → act → export`). If merging two nodes or splitting one is genuinely simpler, do it and explain why in the commit.
-- `RunState` as `@dataclass`. Pydantic is fine if validation-heavy inputs justify it — same shape, different implementation.
-- Checkpointer: `MemorySaver` for tests, `SqliteSaver` for dev, `PostgresSaver` (Databricks Lakebase) later. Swap freely as long as the persistence contract holds.
-- Node retry policy. Choose per node.
-- Prompt template format. `.txt` with `str.format` slots is a suggestion, not a mandate.
-- Response cache backend. Dict is fine; upgrade if needed.
-
-### Overall architecture
-
-Introduce a new package `src/orchestrator/` implementing a LangGraph state machine that executes an audit run. Wire this behind the existing `start_audit_run(run_config)` adapter so the front end does not change.
-
-```
-src/orchestrator/
-├── __init__.py
-├── config.py            # NODE_MODELS, env-var-driven settings, adapter wiring
-├── state.py             # RunState dataclass (typed run state) — no LangGraph imports
-├── graph.py             # LangGraph StateGraph definition — the only LangGraph-importing module
-├── nodes/
-│   ├── discover.py      # Node: resolve data sources
-│   ├── profile.py       # Node: profile sources, compute quality metrics + LLM narration
-│   ├── plan.py          # Node: build execution plan (Playbook: config; Explorer: LLM)
-│   ├── execute.py       # Node: run deterministic tests (NO LLM)
-│   ├── classify.py      # Node: rules-first, LLM for ambiguous residual
-│   ├── find.py          # Node: generate evidence-linked findings + narratives (+ optional critic)
-│   ├── prioritise.py    # Node: risk scoring + optional 1-line rank tooltip
-│   ├── act.py           # Node: draft management actions + remediation email drafts
-│   └── export.py        # Node: PPTX / Excel / Jira previews + exec summary + chart captions
-├── skills/              # Skill registry — Python modules per Skill
-│   ├── __init__.py
-│   ├── base.py          # Skill protocol / abstract base
-│   ├── tne_exco/        # SKILL-001: T&E
-│   │   ├── skill.py
-│   │   ├── contract.yaml
-│   │   └── prompts/     # per-Skill prompt overrides
-│   └── gst_t48/         # SKILL-002: T4.8 Input GST
-│       ├── skill.py
-│       ├── contract.yaml
-│       └── prompts/
-├── adapters/            # Six adapter interfaces for portability (§10)
-│   ├── data_source.py
-│   ├── model_client.py
-│   ├── persistence.py
-│   ├── prompt_repository.py
-│   ├── tracing.py
-│   └── export_storage.py
-├── persistence.py       # Delta table read/write for runs, findings, actions, events, llm_calls
-├── llm.py               # LLMClient — one call surface; logs every request to Delta
-├── prompts/             # Default prompt templates (Skills override in their own prompts/)
-│   ├── profile_narrative.txt
-│   ├── finding_narrative.txt
-│   ├── exec_summary.txt
-│   ├── chart_caption.txt
-│   ├── remediation_draft.txt
-│   ├── priority_rationale.txt
-│   ├── classification_reasoning.txt
-│   └── plan_suggestion.txt
-└── events.py            # Emits observable trace events during execution
-```
-
-### Non-negotiable design rules
-
-1. **Deterministic computation, LLM narration.** All *numbers* in a finding — dollar amounts, counts, ratios, thresholds, categories — come from Python computing on data. LLMs produce the *prose that wraps* those numbers, using template slots the node fills from `RunState`. LLMs never generate figures.
-2. **Every LLM call is logged.** Prompt, response, model endpoint, temperature, token counts, latency, node name, run_id → Delta table `llm_calls`. This is the audit trail; non-negotiable.
-3. **Temperature = 0 by default.** The only exception is the Explorer Mode `plan` node where a modest temperature (~0.3) helps the model suggest diverse tests. Reproducible workpapers depend on this.
-4. **Response caching keyed on `(prompt_hash, model, temperature)`** — for demo stability and to make re-runs identical unless data changed.
-5. **Every metric carries source-file provenance.** Follow the existing pattern in `app.py` where `EVIDENCE_PAYLOAD["metrics"]` values include `{value, unit, source_file}`.
-6. **Human-in-the-loop is mandatory.** Explorer Mode plans must halt before execution until an auditor confirms. Playbook Mode plans should offer a "review approach" checkpoint. Every LLM-generated narrative in the UI has "regenerate" and "edit" affordances.
-7. **No chain-of-thought exposed.** Platform Trace shows execution events only — timestamps, stages, statuses, short operational messages, durations. LLM reasoning is stored in `llm_calls` for audit but not shown in Trace.
-8. **Narrative traceability.** Every LLM-generated paragraph shown in the UI must display which `RunState` fields (test results, metrics) supplied its numbers. A reviewer clicks a sentence and sees the source.
-9. **Persistence must be Delta-backed.** Runs, findings, management actions, events, and LLM calls go to Delta tables in `${DBX_CATALOG}.${DBX_SCHEMA}`. Session-only fallback for demo mode is acceptable but must be clearly labelled.
-10. **No fake successful integrations.** If Unity Catalog search fails, show a demo indicator. If Jira is not connected, show "Preview — not submitted". If the model endpoint is misconfigured, show the deterministic output alone and flag the narrative as "LLM unavailable" — never silently fabricate.
-11. **Preserve existing T&E behaviour bit-for-bit.** The workspace at `/workspace/tne` must remain identical to what runs today. LLM narration is *additive* — it does not replace any existing computed content.
-12. **Idempotent runs.** Restarting a failed run should not double-write. Use run_id partitioning. Cached LLM responses are reused on resume.
-13. **Backwards-compatible fixtures.** The fixture data in `src/platform/fixtures.py` must still power the demo when Delta tables are empty or unavailable.
-
-### LangGraph state contract
+Defined in `orchestrator/state.py`. No framework imports. JSON round-trip tested.
 
 ```python
 @dataclass
 class RunState:
     run_id: str
-    skill_id: str | None                  # None for Explorer
+    skill_id: str | None                 # None for Explorer
+    skill_version: str | None
     mode: Literal["playbook", "explorer"]
-    audit_period: tuple[date, date]
+    phase: Literal["plan", "execute", "export"]
+    next_node_index: int
+    audit_period: tuple[str, str]        # ISO dates
     objective: str
-    data_assets: list[dict]               # Unity Catalog references
-    uploaded_files: list[dict]            # Volume references
     business_unit: str | None
     materiality: float | None
-    options: dict                         # preview_plan, gen_actions, jira_preview
+    options: dict
 
-    # populated as the graph progresses
+    data_assets: list[dict]              # UC refs
+    uploaded_files: list[dict]           # Volume refs
     profile_result: dict | None
-    plan: dict | None
+    plan: dict | None                    # resolved primitive instances
     plan_confirmed: bool
+    plan_edits: list[dict]               # auditor diffs against the proposal
+
+    # results — REFS AND SCALARS ONLY, never DataFrames
     test_results: list[dict]
+    flagged_table: str | None            # Delta table name holding RF_* rows
+    reconciliation: dict | None          # rows, sum, min/max date, variance
     exceptions: list[dict]
     findings: list[dict]
     management_actions: list[dict]
-    exports: dict                          # paths / artefact metadata
+    exports: dict
+    signoff: dict | None                 # approver, timestamp
 
-    # LLM-generated narrative (never contains raw numbers — always template-filled)
+    # LLM narration — never contains raw numbers the model invented
     profile_narrative: str | None
-    plan_rationale: dict[str, str]         # test_id -> why suggested (Explorer Mode)
-    classification_reasoning: dict[str, str]  # row_id -> why classified this way
-    finding_narratives: dict[str, str]     # finding_id -> narrative paragraph
-    priority_rationale: dict[str, str]     # finding_id -> why this rank
-    remediation_drafts: dict[str, str]     # finding_id -> draft email
+    plan_rationale: dict[str, str]
+    classification_reasoning: dict[str, str]
+    finding_narratives: dict[str, str]
+    priority_rationale: dict[str, str]
+    remediation_drafts: dict[str, str]
     exec_summary: str | None
-    chart_captions: dict[str, str]         # chart_id -> caption
+    chart_captions: dict[str, str]
 
-    # observability
-    events: list[dict]                     # trace events emitted per node
-    llm_calls: list[dict]                  # audit trail of every model call
+    events: list[dict]
     errors: list[dict]
-    status: Literal["running", "awaiting_confirmation", "completed", "failed"]
+    status: Literal["queued","running","awaiting_confirmation",
+                    "awaiting_signoff","completed","failed","interrupted"]
 ```
 
-### Node responsibilities
+### 4.2 Nodes
 
-| Node | Reads | Writes | LLM use | Emits event |
-|---|---|---|---|---|
-| `discover` | `data_assets`, `uploaded_files` | resolved source refs | — | "Sources selected" |
-| `profile` | resolved sources | row counts, schemas, quality flags | Narrate profile in plain English | "Data profiled" |
-| `plan` | Skill definition + profile | ordered test plan | Explorer Mode only: suggest tests + rationale (temp > 0) | "Plan generated" |
-| *(gate)* | `plan_confirmed` | halts if false | — | "Awaiting confirmation" |
-| `execute` | plan + sources | test outputs | **Never** — pure Python | "Tests executed" |
-| `classify` | test outputs | classified exceptions | Ambiguous rows only; deterministic rules first | "Exceptions classified" |
-| `find` | classified exceptions | findings with evidence refs | Draft finding narrative around computed numbers | "Findings generated" |
-| `prioritise` | findings | risk-scored, ordered findings | 1-line "why this rank" per finding | "Findings prioritised" |
-| `act` | prioritised findings | draft management actions | Draft remediation email | "Actions drafted" |
-| `export` | findings, actions, run metadata | PPTX/Excel/Jira previews | Exec summary + chart captions | "Exports prepared" |
-
-Every node writes its event to Delta and appends to `RunState.events`. Every LLM call is logged to Delta and appended to `RunState.llm_calls`.
-
-### 4b. Model routing per node
-
-Goal: match model tier to task difficulty so cost stays reasonable without sacrificing narrative quality where it matters.
-
-| Node | Model tier | Model (default) | Rationale |
+| Node | LLM | Writes | Event |
 |---|---|---|---|
-| `discover` | none | — | Deterministic; resolve UC references from Skill config. |
-| `profile` | Standard | Haiku 4.5 / Llama 3.3 70B | Structured, low-stakes prose. |
-| `plan` (Playbook) | none | — | Skill supplies the test list from config. |
-| `plan` (Explorer) | Premium | Sonnet 4.6 / Fable 5.1 | Only place where genuine reasoning about test selection is required. `temperature ~0.3`. |
-| `execute` | none | — | Pure SQL/pandas. **Never** LLM. |
-| `classify` | Standard (ambiguous rows only) | Haiku 4.5 | Rules-based classifier first; LLM handles the residual with reasoning + confidence. |
-| `find` | Premium | Sonnet 4.6 | Finding narrative goes to the CAO briefing. Small volume × high visibility. |
-| `prioritise` | Cheap or none | Llama 3.1 8B | Ranking is deterministic. LLM only used for optional 1-line "why this rank" tooltips. |
-| `act` | Standard | Haiku 4.5 | Remediation email drafts. Auditor edits before sending. |
-| `export` — exec summary | Premium | Sonnet 4.6 | Read by executives verbatim. |
-| `export` — chart captions | Cheap | Llama 3.1 8B | One sentence per chart, highly templated. |
+| `discover` | — | resolved source refs | "Sources selected" |
+| `profile` | narrator | schemas, row counts, null rates, cardinality, quality flags | "Data profiled" |
+| `plan` | Explorer only | ordered primitive instances | "Plan generated" |
+| *(gate)* | — | halts unless `plan_confirmed` | "Awaiting confirmation" |
+| `execute` | **never** | metrics payload **and** row-level `RF_*` flags → Delta | "Tests executed" |
+| `classify` | residual only | classified exceptions with confidence | "Exceptions classified" |
+| `find` | narrator + bounded critic | findings with evidence refs | "Findings generated" |
+| `prioritise` | 1-line rationale | risk-scored ordering | "Findings prioritised" |
+| `act` | narrator | draft management actions | "Actions drafted" |
+| *(gate)* | — | halts until sign-off | "Awaiting sign-off" |
+| `export` | exec summary + captions | PPTX / XLSX / Jira preview | "Exports prepared" |
 
-Routing rule of thumb per node:
+`execute` emitting **both** the metrics payload and the row-level `RF_*` flags is what keeps the
+existing UI, charts, exception drill-down and `BREACH_FLAG_GROUPS` working while the engine
+underneath is replaced. Do not skip it.
 
-1. Does an executive read the output verbatim? → Premium.
-2. Does an auditor read and edit before it goes anywhere? → Standard.
-3. Is it templated boilerplate or short structured text? → Cheap or no LLM.
+### 4.3 Primitives
 
-Routing lives in `src/orchestrator/config.py`:
+The 14 T&E tests are instances of ~8 domain-agnostic primitives. Build the registry, not 14
+bespoke functions — this is what makes GST cheap and Explorer possible.
 
-```python
-NODE_MODELS: dict[str, str] = {
-    "profile":         os.environ.get("MODEL_PROFILE",         "databricks-claude-haiku-4-5"),
-    "plan_explorer":   os.environ.get("MODEL_PLAN_EXPLORER",   "databricks-claude-sonnet-4-6"),
-    "classify":        os.environ.get("MODEL_CLASSIFY",        "databricks-claude-haiku-4-5"),
-    "find":            os.environ.get("MODEL_FIND",            "databricks-claude-sonnet-4-6"),
-    "prioritise":      os.environ.get("MODEL_PRIORITISE",      "databricks-meta-llama-3-1-8b-instruct"),
-    "act":             os.environ.get("MODEL_ACT",             "databricks-claude-haiku-4-5"),
-    "export_summary":  os.environ.get("MODEL_EXPORT_SUMMARY",  "databricks-claude-sonnet-4-6"),
-    "export_caption":  os.environ.get("MODEL_EXPORT_CAPTION",  "databricks-meta-llama-3-1-8b-instruct"),
-}
-```
+| Primitive | Params | T&E | GST T4.8 |
+|---|---|---|---|
+| `threshold_exceedance` | column, limit, direction | T4.4, T6.1d | invoice > delegation limit |
+| `duplicate_detection` | key columns, amount tolerance, date window | T5.2 | duplicate invoices |
+| `split_detection` | group keys, window days, aggregate threshold | T5.1 | split POs under a limit |
+| `anti_join_gap` | left source, right source, join keys | T3.1a, T3.1b | invoice with no PO |
+| `list_membership` | column, allowed list, negate | T3.2a | vendor not on ABN register |
+| `date_lag` | start col, end col, threshold days | T3.3a | payment before invoice date |
+| `ratio_per_group` | numerator, denominator, group, limit | T3.3b | GST ≠ 10% of ex-GST |
+| `attribute_missing` | column, condition | T4.1, T4.2 | missing tax invoice |
 
-The model names above are placeholders. Confirm each against the endpoints actually available on the user's Databricks Free Edition workspace before committing. Do not silently substitute a different family (e.g. Mistral) — ask.
+Each primitive has a JSON Schema for its params and returns `(metrics, flagged_rows)`.
+Anything that genuinely does not fit (T6.1a approver review) goes in the Skill's `custom.py`.
 
-**Fallback policy:** on retry failure, fall back to the Cheap tier with a warning logged to MLflow. **Never** fall back upward — that's a cost leak. If cheap tier also fails, return `LLMResponse(text=None, error=...)` and let the UI show "LLM unavailable".
-
-### 4c. Multi-agent scope (what to build, what NOT to build)
-
-The primary Audit Agent is the single LangGraph pipeline described above. In this brief, "agent" = one LangGraph state machine.
-
-**In scope now:**
-
-- **One pipeline agent** — the 9-node DAG. This is *the* Audit Agent.
-
-**Optional (default OFF, enable via config only when metrics justify it):**
-
-- **Findings critic** — a second LLM call inside the `find` node that reviews each generated narrative for grounding (every number in the prose must appear in `RunState`). Standard tier. Controlled by `FINDINGS_CRITIC_ENABLED=true`. Only enable if narrative-faithfulness evaluation (§6) shows failures the regex-based check misses.
-
-**Out of scope (do NOT build, do NOT propose):**
-
-- Multi-agent swarm.
-- Supervisor/worker pattern across the pipeline.
-- Explorer Mode planner + skeptic pair.
-- Post-run conversational companion agent. (May come later; not now.)
-- Any agent that decides which node runs next. The DAG is fixed.
-
-If a phase seems to "need" a second agent, stop and ask before building it. In most cases the answer is: it doesn't; a different prompt or a rule change will solve it.
-
-### LLM client contract (`src/orchestrator/llm.py`)
-
-One module. One class. Every node imports from it.
-
-```python
-class LLMClient:
-    def __init__(self, endpoint_host: str | None = None):
-        # endpoint_host from env MODEL_ENDPOINT_HOST; None => degraded mode
-        ...
-
-    def complete(
-        self,
-        prompt: str,
-        *,
-        node: str,             # e.g. "find", "export_summary" — used to look up NODE_MODELS
-        run_id: str,
-        model: str | None = None,   # explicit override; defaults to NODE_MODELS[node]
-        temperature: float = 0.0,
-        max_tokens: int = 800,
-        cache: bool = True,
-    ) -> LLMResponse: ...
-```
-
-- Uses the Databricks Model Serving OpenAI-compatible endpoint via the `openai` client pointed at the workspace serving URL.
-- If the endpoint is unset or the call fails on both primary and cheap-tier fallback, return `LLMResponse(text=None, error=...)`. Nodes must handle this gracefully and leave the narrative field `None`. UI shows "LLM unavailable — deterministic output only".
-- Every call inserts a row into `${DBX_CATALOG}.${DBX_SCHEMA}.llm_calls` synchronously before returning.
-- Response cache is an in-process dict keyed on `(sha256(prompt), model, temperature)`. Optional Delta-backed cache later.
-
-### Prompt template contract
-
-Prompts live in `src/orchestrator/prompts/` as plain `.txt` files with Python `str.format`-style slots. Each node loads its template, fills slots from `RunState`, and calls the client. Skills override by placing a same-named file in `src/orchestrator/skills/<skill_id>/prompts/`.
-
-Example slot convention — `finding_narrative.txt`:
+### 4.4 Skill layout
 
 ```
-You are drafting the narrative for one audit finding. Use the numbers exactly as given.
-Do not invent figures. Do not speculate about causes not present in the evidence.
-
-Skill: {skill_name}
-Finding title: {finding_title}
-Materiality threshold: {materiality}
-Computed metrics: {metrics_json}
-Supporting test IDs: {test_ids}
-
-Write 2–3 sentences suitable for a Chief Audit Officer briefing.
+skills/tne_exco/
+├── manifest.yaml      # id, name, domain, version, owner, status: draft|published
+├── contract.yaml      # required sources + columns + types + nullability + PII class
+├── plan.yaml          # ordered [{primitive, params, control_objective, risk_rule}]
+├── thresholds.yaml    # every threshold, with policy reference + effective date
+├── prompts/           # overrides of platform defaults
+├── custom.py          # tests no primitive expresses
+└── workspace.py       # render_workspace(run_id)
 ```
 
-The node computes `metrics_json` from `RunState.test_results`; the model cannot introduce numbers of its own.
+The Skill protocol is `load()`, `validate()`, `custom_tests()`, `render_workspace()`. Building the
+test plan, running tests and building findings are **generic pipeline code reading `plan.yaml`** —
+not per-Skill methods.
 
-### Delta persistence schema
+`contract.yaml` describes the **raw** sources (`Lead Traveller Name`, `Advance Purchase Days`),
+because that is what `execute` now consumes.
 
-All DDL is templated on `${DBX_CATALOG}` and `${DBX_SCHEMA}` env vars. Do not hardcode `sdpt_gia` or any Optus name. Provide migrations as idempotent `CREATE TABLE IF NOT EXISTS` statements in `src/orchestrator/migrations/`.
+### 4.5 Explorer Mode — a Skill-authoring workflow
 
-Required tables:
+Explorer does not generate code or SQL. It **composes primitives**.
 
-- `runs` — one row per audit run, partitioned by `skill_id`.
-- `findings` — evidence-linked findings, keyed by `run_id` + `finding_id`.
-- `management_actions` — cross-Skill actions.
-- `trace_events` — one row per node execution event.
-- `uploaded_files` — provenance for volume uploads.
-- `llm_calls` — full audit trail: prompt, response, model, temperature, tokens, latency, node, run_id.
-- `evaluation_runs` — MLflow-linked evaluation results per prompt/model version (see §6).
-
-Example skeleton:
-
-```sql
-CREATE SCHEMA IF NOT EXISTS ${DBX_CATALOG}.${DBX_SCHEMA};
-
-CREATE TABLE IF NOT EXISTS ${DBX_CATALOG}.${DBX_SCHEMA}.runs (
-  run_id STRING NOT NULL,
-  skill_id STRING,
-  skill_name STRING,
-  mode STRING,
-  audit_period_start DATE,
-  audit_period_end DATE,
-  run_owner STRING,
-  data_mode STRING,
-  status STRING,
-  findings_count INT,
-  high_risk_count INT,
-  potential_exposure DOUBLE,
-  open_actions INT,
-  run_config STRING,   -- JSON
-  started_at TIMESTAMP,
-  updated_at TIMESTAMP
-) USING DELTA
-PARTITIONED BY (skill_id);
+```
+objective + profile + primitive schemas + 1–2 reference Skills
+        │
+        ▼  one Sonnet call, strict JSON schema
+   PlanProposal { tests[{primitive, params, control_objective, risk_hypothesis, rationale}],
+                  data_gaps[], assumptions[] }
+        │
+        ▼  Python validator: primitive exists? columns in profile? params satisfy schema?
+   ≤1 repair round (GPT-OSS, same schema)  →  invalid tests greyed out, never a third call
+        │
+        ▼  structured edit UI (dropdowns of real columns — not a chat box)
+   auditor confirms  →  identical pipeline to Playbook  →  optionally saved as a draft Skill
 ```
 
-Design the remaining schemas from the field lists shown in the existing UI cards (`run_card`, `action_row`, `trace_event_row`, `data_asset_card`) and from the `RunState` narrative fields.
+The planner sees **aggregates only** — schemas, counts, null rates, cardinality, inferred semantic
+types, PII columns masked. Never rows. It has no tools and cannot query data.
 
-### Skill protocol
+Promotion `draft → published` requires Surface 2 precision/recall on planted synthetic data plus
+a named reviewer.
 
-```python
-class Skill(Protocol):
-    skill_id: str
-    name: str
-    domain: str
-    version: str
-
-    def required_sources(self) -> list[dict]: ...
-    def build_test_plan(self, run_config, profile_result) -> list[TestDef]: ...
-    def run_tests(self, sources, plan) -> list[TestResult]: ...
-    def classify_exceptions(self, test_results) -> list[Exception]: ...
-    def build_findings(self, exceptions, metrics) -> list[Finding]: ...
-    def draft_actions(self, findings) -> list[ManagementAction]: ...
-    def render_workspace(self, run_id) -> dash.html.Div: ...  # returns the run-scoped workspace layout
-```
-
-For `SKILL-001` (T&E), `render_workspace` returns the existing `tne_workspace_layout` from `app.py` parameterised by run_id. Extract that function from `app.py` into `src/orchestrator/skills/tne_exco.py`.
+**Do not build:** a tool-using planner, a planner that emits SQL or pandas, a multi-agent swarm,
+a supervisor pattern, a planner/skeptic pair, or a conversational companion agent. If a phase
+seems to need one, stop and ask — the answer is usually a better prompt or a rule change.
 
 ---
 
-## 5. Governed data discovery
+## 5. Evaluation
 
-The implementation must speak Unity Catalog APIs so it works cleanly once connected to a real governed workspace.
+Tiered. Build Tier A now; do not attempt all sixteen gates at once.
+
+### Tier A — in CI from the phase that introduces them
+
+| Gate | Asserts | Phase |
+|---|---|---|
+| **G6 Reconciliation** | tested-population rows, Σamount, min/max date == source totals; variance 0; persisted per run | P3 |
+| **G7 Contract conformance** | contract violation → `status=failed`. No fuzzy column matching, no defaults | P3 |
+| **G8 Threshold consistency** | catalogue thresholds == `thresholds.yaml` == code; every threshold has a policy ref | P2 |
+| **G10 Negative control** | clean dataset → zero findings, and no risk language in LLM output | P3 |
+| **G11 Cited-metric faithfulness** | every number in a finding's prose maps to a metric in *that finding's* `metrics_cited`, unit-aware; every cited metric appears; quantifiers flagged | P6 |
+| **G13 Export fidelity** | every number in PPTX/XLSX == `RunState` value, same rounding | P4 |
+| **Surface 2** | per test: precision ≥ 0.98, recall ≥ 0.95 against planted exceptions | P2 |
+
+**G11 replaces v1's "Surface 3".** v1 asserted `narrative_numbers ⊆ all_payload_numbers` and
+claimed it catches ~90%. It does not. With several hundred numbers in the payload, a subset check
+on small integers is nearly always satisfied — `months_covered: 16` will "support" "16 duplicate
+claims". `guardrail.py`'s own docstring admits it: *"checks that a quantity is supported, not that
+it is used with the right sense."* Scope to the finding's own cited metrics, match units, and
+require coverage in both directions.
+
+### Tier B — before any migration to a corporate workspace
+
+- **Surface 1 parity against a hand-verified oracle** (~100 rows, metrics worked independently by a
+  human). **Not** parity against legacy `app.py` — that would enshrine the flag-counting in §0.2.
+- **G9 cross-process determinism** — same config + same data snapshot, two separate processes,
+  byte-identical non-narrative output. Catches `abs(hash(x))` (`app.py:269`, PYTHONHASHSEED),
+  dict ordering, float summation order.
+- **G14 Edit audit trail** — every narrative regenerate/edit versioned: who, when, before/after diff.
+- **G15 PII egress** — columns marked `pii: true` never enter a prompt unless the Skill whitelists
+  them; whitelist recorded per `llm_calls` row.
+
+### Tier C — steady state
+
+- **Surface 4 narrative quality**, dual judge: GPT-OSS scores grounding and citation
+  (cross-family, avoids self-preference), Sonnet scores clarity and tone. Disagreements go to the
+  weekly human sample. Golden set ≈50 examples per Skill as a versioned Delta table, including
+  zero-finding and near-threshold cases.
+- **G16 Judge reliability** — Cohen's κ ≥ 0.6 against the human sample before judge scores drive
+  any decision.
+- **G12 Semantic drift** — no unhedged causal/intent language ("intentional structuring",
+  "to circumvent"); no "Policy requires…" without citing the catalogue's `control_objective`.
+
+### Deleted from v1
+
+- **The model-routing decision loop (v1 Phase 7c).** It optimised ~40 cents per run using a 1–5
+  rubric on n≈50 that cannot resolve a 5% difference. Replaced by one rule: *promote a node to a
+  stronger endpoint when the judge shows a gap; never downgrade to save cents.*
+- **"Surface 5 end-to-end"** as a separate surface — it is Surface 1 + G9 run end to end.
+- **"Within tolerance"** on deterministic outputs. Deterministic means exact.
+
+---
+
+## 6. Model serving
+
+Two Databricks Foundation Model endpoints. Names from config, never literals in nodes.
+
+| Task | Endpoint | Settings | Why |
+|---|---|---|---|
+| Explorer `plan` | Sonnet | structured JSON schema | The one genuine reasoning task; 1 call/run |
+| Finding narratives | Sonnet | — | CAO reads these |
+| Exec summary | Sonnet | — | Executives read verbatim |
+| Profile / priority / remediation | Sonnet | — | Auditor-edited prose; consistent voice |
+| `classify` T4.3 residual | **GPT-OSS via `ai_query()`** | low reasoning effort, structured JSON + confidence | The only node scaling with rows. Batch in SQL; rows stay in Delta |
+| Chart captions | GPT-OSS | low effort | One templated sentence |
+| Plan repair round | GPT-OSS | medium effort | Mechanical schema fixing |
+| Judge — grounding | GPT-OSS | high effort | Cross-family, avoids self-preference bias |
+| Judge — clarity/tone | Sonnet | — | Needs the stronger model |
+
+**Fallback:** if Sonnet is unavailable, degrade `profile`/`prioritise`/`act` to GPT-OSS; for
+`find`, exec summary and `plan`, show **"LLM unavailable — deterministic output only"**.
+Never silently degrade what an executive reads.
+
+`NODE_MODELS`:
+```
+plan_explorer, find, export_summary, profile, prioritise, act, judge_quality → ${MODEL_SONNET}
+classify, export_caption, plan_repair, judge_grounding                        → ${MODEL_GPT_OSS}
+```
+
+Opus may be added later for Explorer `plan` and exec summary — that is a config change only.
+
+**Client:** `WorkspaceClient().serving_endpoints.get_open_ai_client()`. Do **not** use
+`mlflow.deployments` (the pattern in the orphaned `narrative.py`), and do not hand-build an
+`openai` client with a token.
+
+**Per-endpoint parameter support must be tested and recorded in this file, not assumed** —
+`response_format`, `temperature`, `max_tokens`, reasoning-effort controls. Sampling parameters
+are rejected by some current model families. If structured output does not pass through,
+validate the schema client-side with one retry — never strip markdown fences the way
+`narrative.py:121–127` does.
+
+**Enable AI Gateway with inference tables on both endpoints.** Inference tables are a
+platform-written copy of every request/response — the audit trail a reviewer trusts because the
+application did not write it. Keep the synchronous `llm_calls` write as well.
+
+**Cost:** ~45 short narration calls per run plus one batch `classify`. Narration is tens of cents
+per run at any tier. `classify` is the only place a wrong choice is expensive — thousands of rows
+× per-row calls. Measure `system.billing.usage` after ten real runs before tuning anything.
+
+---
+
+## 7. Configuration and portability
+
+Every workspace-specific value is an environment variable read through `orchestrator/config.py`.
+`.env` is gitignored; `.env.example` is committed and complete.
+
+```
+DATABRICKS_HOST  DATABRICKS_TOKEN
+DBX_CATALOG  DBX_SCHEMA  DBX_VOLUME  DBX_WAREHOUSE_HTTP_PATH  DBX_APP_NAME  DBX_JOB_ID
+MODEL_ENDPOINT_HOST  MODEL_SONNET  MODEL_GPT_OSS
+EXECUTOR=thread|jobs   DEMO_MODE=true|false
+```
+
+**Six adapter Protocols** in `orchestrator/adapters/`: `DataSourceAdapter`, `ModelClient`,
+`PersistenceAdapter`, `PromptRepository`, `TracingAdapter`, `ExportStorageAdapter`.
+`DataSourceAdapter` must expose "give me the tested population" without the caller knowing whether
+pandas or Spark produced it — if a dataset later exceeds container memory, only that adapter changes.
+
+**Data access:** attach a serverless SQL warehouse as an App resource (this also grants the App's
+service principal access); read/write Delta through `databricks-sql-connector`; Volumes through the
+Files API.
+
+**Environment restrictions:** MCP is not permitted in the target corporate environment — do not add
+MCP dependencies. Databricks Apps cannot compile C extensions at deploy time; if a dependency fails
+to install, vendor a `manylinux2014_x86_64` wheel and reference it explicitly.
+
+---
+
+## 8. Phases
+
+Each phase ends with **stop and report**. Do not auto-start the next.
+
+| Phase | Deliverable | Definition of done |
+|---|---|---|
+| **P0** | Foundation reset | Done — this file, `.claude/` config, `.env.example`, `.gitattributes`, dead code removed |
+| **P1** | `RunState` + Delta persistence | JSON round-trip test green; migrations create all tables; `LocalPersistence` + `DeltaPersistence` both pass the same contract test; reaper test green |
+| **P2** | Primitives + T&E Skill | Surface 2 ≥0.98/≥0.95 per test on planted data; G8 green; **zero memorised constants** (grep test); contract describes raw sources |
+| **P3** | Pipeline loop + nodes + ThreadExecutor | G6, G7, G9, G10 green; full run on fixtures → findings in Delta; `/trace` shows real events; MLflow per-node spans; exposure double-count fixed |
+| **P4** | App rewired to run-scoped data | Surface 1 vs hand-verified oracle; G13 green; no module-level globals; `/workspace/tne` functionally identical; all routes unchanged |
+| **P5** | JobsExecutor + UC + Volume upload | `run_now` round-trip works; a run survives an App redeploy (reaper + resume); real file uploads and profiles; deployment ID reported |
+| **P6** | LLM layer | G11 100% on a 30-case golden set; G14, G15 green; degraded mode works; per-endpoint parameter matrix recorded in §6; `classify` via `ai_query` |
+| **P7** | HITL gates | Paused run resumes across browser refresh **and** App restart; export blocked until sign-off; both events in `trace_events` |
+| **P8** | GST Skill + Explorer | GST end-to-end on synthetic data via primitives (no bespoke test functions); Explorer proposes → validates → confirms → runs → saves draft Skill; planner cannot emit code (schema test) |
+| **P9** | Eval harness + hardening | Tier A in CI; nightly green 3 consecutive nights; judge κ recorded; migration checklist written |
+
+Jira submission is **not** built. `create_jira_preview` returns a stub labelled
+"Preview — not submitted".
+
+---
+
+## 9. Synthetic data
+
+Three distinct datasets. Do not conflate them.
+
+| Dataset | Purpose | Built by | Needed at |
+|---|---|---|---|
+| Planted-exception fixtures | Surface 2 precision/recall. 200–1,000 rows, plants declared in a sidecar file | **You**, generated from `contract.yaml` | P2 |
+| Hand-verified oracle | Surface 1 ground truth. ~100 rows, metrics verified by a human | Generated by you, **verified by the user** | P4 |
+| Realistic volume dataset | Demos, GST AP table, judge realism | The user's separate workstream | P5 / P8 |
+
+**Never use a generator as its own test oracle.** If the generator plants 47 duplicates and the
+test finds 47, you have proven they agree — not that either is right. Plants are declared
+explicitly in a sidecar, never inferred from generator logic.
+
+The generator satisfies `contract.yaml`; the contract does not describe the generator. Later,
+governed views satisfy the same contract with no orchestration change.
+
+**`build_demo_data` (`app.py:229–287`) is deleted in P3.** Random `RF_*` flags are noise, not
+synthetic data. Demo mode becomes "a completed run over a realistic dataset, persisted in Delta
+like any other run, clearly labelled".
+
+---
+
+## 10. Working rules
+
+- Work on the branch the user specifies. Commit at every stable checkpoint.
+- Commit format: `[P2] feat(primitives): add duplicate_detection`.
+- Run `python -m py_compile` on changed files and `pytest` before every commit. Fix failures first.
+- Do not push unless asked. Do not use `--no-verify` or `--force`.
+- Ask before adding a dependency or editing `requirements.txt`.
+- Do not connect to any workspace other than the one in the environment variables.
+- Never write a token to source, and never overwrite `.databrickscfg`.
+- Do not add docstrings, comments or type annotations to code you are not otherwise changing.
+- Do not create new markdown documentation files unless asked.
+- Do not touch `assets/` or the design system. Do not add UI patterns beyond
+  `src/platform/components.py`.
+- **If this brief conflicts with what you observe in the code, say so and ask. Do not assume.**
+
+### Model discipline — this project has a token budget
+
+| Model | Use for | Never |
+|---|---|---|
+| **Opus** | Phase kickoff plans, phase-gate reviews, schema design (P1), prompt + G11 design (P6), planner schema (P8) | Writing implementation code, tests, YAML, migrations |
+| **Sonnet** | All implementation, tests, debugging, deployment. The default | — |
+| **Haiku** | Single-file mechanical work with a precise spec: DDL, YAML, boilerplate, renames | Anything multi-file or requiring judgement |
+
+`.claude/settings.json` sets Sonnet as the default. Three subagents are defined with pinned
+models: `implement` (Sonnet), `mechanical` (Haiku), `review` (Opus).
+
+**If the session model is Opus and the task is implementation, delegate to the `implement`
+subagent — do not edit files directly on Opus.**
+
+Opus kickoff is warranted for P1, P2, P6, P8 (design-only, then hand off).
+Sonnet kickoff is sufficient for P3, P4, P5, P7, P9.
+
+---
+
+## 11. Day one — verify before building
+
+Run this first, on Sonnet, before any design work. Record the results in §6 of this file.
 
 ```python
 from databricks.sdk import WorkspaceClient
-
-def search_governed_data(query: str) -> list[dict]:
-    w = WorkspaceClient()   # uses DATABRICKS_HOST/TOKEN from env
-    # search across catalogs the current user has access to
-    ...
+w = WorkspaceClient()
+print(w.current_user.me().user_name)                    # host + token + network policy
+print([e.name for e in w.serving_endpoints.list()])     # the two endpoints
+print([c.name for c in w.catalogs.list()])              # Unity Catalog access
+print([wh.name for wh in w.warehouses.list()])          # SQL warehouse
 ```
 
-Until governed source tables are available, keep the discovery flow compatible with fixture data, uploaded files, and future governed tables. Do not assume a bundled synthetic-data package exists in this handoff.
+Then confirm, in the workspace UI, that all three platform capabilities exist:
+**Databricks Apps**, **serverless Jobs**, **pay-per-token model serving**. The architecture
+assumes all three. If any is missing, **stop and report** — it changes the plan, not the code.
 
-Handle no-access catalogs gracefully — return the asset with `access="Restricted"` rather than hiding it. For volume file listing use `WorkspaceClient().files.list_directory_contents(...)`.
+Then: one hello-world `jobs.run_now` round-trip, and one chat completion against each endpoint
+recording which parameters pass through.
 
----
+### Known environment issues
 
-## 6. Evaluation (five surfaces — do NOT collapse into one)
-
-All five run in CI or on demand. Each answers a different question. Do not treat them as one benchmark.
-
-### Surface 1 — Deterministic parity (pytest, every commit)
-
-**Question:** does the new orchestrator produce identical *computed* findings to today's `app.py` on the same fixture data?
-
-- Load fixture data used by current `app.py`.
-- Run both code paths.
-- Assert `findings_legacy.numbers == findings_new.numbers` and `findings_legacy.categories == findings_new.categories`.
-- **Narrative fields are excluded from parity** — they are LLM-generated and non-deterministic by design.
-- Any deviation is a regression. Blocks merge.
-
-### Surface 2 — Test correctness on synthetic data (pytest, every commit)
-
-**Question:** do individual audit tests correctly flag planted exceptions?
-
-- Use synthetic datasets with known plants (e.g. 47 duplicate T&E claims among 1,000 rows).
-- For each test, compute precision and recall against the plants.
-- Ship threshold: **precision ≥ 0.98, recall ≥ 0.95**. Below that, the test is broken.
-
-### Surface 3 — Narrative faithfulness (pytest, every commit)
-
-**Question:** does the LLM only quote numbers that exist in `RunState`?
-
-- Regex-extract all numeric literals from LLM prose.
-- Extract the set of numbers the node was allowed to reference from `RunState`.
-- Assert `narrative_numbers.issubset(allowed_numbers)`. Any surplus = hallucination.
-- Runs in milliseconds. Catches ~90% of what matters.
-
-### Surface 4 — Narrative quality (MLflow evaluate, weekly)
-
-**Question:** is the writing accurate, clear, and appropriate for a CAO audience?
-
-- MLflow `mlflow.evaluate()` with two judges:
-  - **LLM-as-judge (Fable 5.1 or Sonnet 4.6)** scoring: grounding, clarity, tone, absence of speculation, correct citation of test IDs. 1–5 rubric.
-  - **Human review** on a rolling sample (~10 findings per week during the build).
-- **Golden set:** ≈50 curated examples per Skill stored as a Delta table under `${DBX_CATALOG}.${DBX_SCHEMA}.golden_examples`. Version it.
-- Track mean judge score per node per model in the `evaluation_runs` table.
-
-### Surface 5 — End-to-end runs (pytest nightly + pre-demo)
-
-**Question:** does a full audit run produce the expected top-level metrics?
-
-- Curated scenarios: dataset A → expected 8 findings with $X total exposure.
-- Run the full graph. Assert top-level metrics within tolerance.
-- Catches integration bugs, persistence bugs, node ordering bugs.
-
-### Model routing decision loop (per node, per model change)
-
-1. Deploy pipeline with **all nodes on Premium** (Sonnet 4.6 or Fable 5.1 everywhere) → record Surfaces 3 & 4 scores. This is the **quality ceiling**.
-2. For each LLM-using node, downgrade one tier (Premium → Standard, Standard → Cheap).
-3. Re-run golden set.
-4. Keep the downgrade if quality ≥ **95% of ceiling**. Revert if not.
-5. Lock the resulting `NODE_MODELS` config.
-6. Re-run the loop when prompts or models change.
+- **`databricks-sdk` may fail to import** with `pyo3_runtime.PanicException` from
+  `cryptography` via `google.auth`. The system `cryptography` in `/usr/lib/python3/dist-packages`
+  is broken. Fix with a venv or a pinned `cryptography` upgrade in `/usr/local`. A SessionStart
+  hook should handle this.
+- **Proxy diagnostics:** if outbound calls fail, `curl -sS "$HTTPS_PROXY/__agentproxy/status"`
+  lists recent denials by host. A `403` on CONNECT is a network-policy denial; a `502` with
+  `injection failed` is a misconfigured managed connector. Both are environment settings —
+  report them, never work around them, and never disable TLS verification or unset `HTTPS_PROXY`.
 
 ---
 
-## 7. File upload
+## 12. What to do first
 
-Replace mock `upload_audit_file` with a real Volume write, path templated from env:
-
-```python
-def upload_audit_file(filename, content, run_id):
-    dest = f"{os.environ['DBX_VOLUME']}/runs/{run_id}/input/{filename}"
-    w = WorkspaceClient()
-    w.files.upload(file_path=dest, contents=io.BytesIO(content), overwrite=False)
-    ...
-```
-
-Enforce max size, validate mime type against Skill's required-source list, update row's validation status through `Uploaded → Profiling → Ready` (or `Warning`, `Failed`).
-
----
-
-## 8. Jira integration (deferred)
-
-Jira submission is **not in scope** for the personal Free Edition build. Keep `create_jira_preview` returning a stub preview object and mark the UI as "Preview — not submitted". Do not implement submission until Phase 8 during the Optus integration stage.
-
----
-
-## 9. Deployment & vendored dependencies
-
-Add LangGraph and the model-serving client to `requirements.txt`. Vendor transitive deps if any require compilation:
-
-```
-langgraph>=0.2.0
-langchain-core>=0.3.0
-databricks-sdk>=0.30.0
-mlflow>=2.16.0
-openai>=1.40.0        # for Databricks Model Serving OpenAI-compatible client
-```
-
-Test the deploy path. If any dep fails to install on Databricks Apps runtime, download the correct `manylinux2014_x86_64` wheel to `vendor/` and reference it explicitly in `requirements.txt`.
-
-### Model endpoint configuration
-
-Endpoint set via env vars. Do NOT hardcode names. Config values:
-
-- `MODEL_ENDPOINT_HOST` — workspace serving URL, e.g. `https://<workspace-host>/serving-endpoints`
-- `NODE_MODELS_JSON` — optional JSON blob overriding the defaults in `config.NODE_MODELS`
-- Individual overrides: `MODEL_PROFILE`, `MODEL_FIND`, etc. (see §4b)
-
-If `MODEL_ENDPOINT_HOST` is unset, the app runs in degraded mode: no narratives, UI shows "LLM unavailable — deterministic output only".
-
----
-
-## 10. Portability contract (personal → Optus migration)
-
-Design for portability from commit one. The Optus migration must be an **environment change**, not a code rewrite.
-
-### Environment abstraction
-
-- Every workspace-specific value in `src/orchestrator/config.py`, read from env vars. `.env` gitignored; ship `.env.example` with placeholders.
-- No literal `sdpt_gia`, `adb-*`, `optus.com.au`, or personal workspace names anywhere in the source.
-
-### Six adapter interfaces
-
-Define in `src/orchestrator/adapters/` as `Protocol`s. This build should remain portable across fixture-backed, upload-backed, and governed-data implementations without changing the graph or nodes.
-
-- `DataSourceAdapter` — read tables/volumes for a Skill.
-- `ModelClient` — wraps `LLMClient`; swappable endpoint host.
-- `PersistenceAdapter` — Delta writes for runs, findings, actions, events, llm_calls.
-- `PromptRepository` — load prompt template by name (filesystem now, MLflow Prompt Registry later).
-- `TracingAdapter` — MLflow spans + Delta trace events.
-- `ExportStorageAdapter` — write PPTX/XLSX to volume; return URL.
-
-### Data contracts per Skill
-
-`src/orchestrator/skills/<skill_id>/contract.yaml`:
-
-```yaml
-skill_id: SKILL-001
-name: T&E ExCo
-sources:
-  - logical_name: tne_claims
-    required_columns:
-      - name: claim_id
-        type: string
-        nullable: false
-        pk: true
-      - name: submitter_id
-        type: string
-        nullable: false
-      - name: amount_aud
-        type: decimal(18,2)
-        nullable: false
-      - name: claim_date
-        type: date
-        nullable: false
-      - name: category
-        type: string
-        allowed: ["Travel", "Meals", "Accommodation", "Entertainment", "Other"]
-      - name: description
-        type: string
-        pii: true
-    business_keys: [claim_id]
-    date_semantics: claim_date
-    currency: AUD
-    quality_checks:
-      - non_null: [claim_id, submitter_id, amount_aud, claim_date]
-      - unique: [claim_id]
-```
-
-The contract stays stable even as the underlying source moves from fixtures to governed views. Nothing else should need to change.
-
----
-
-## 11. Working style and cadence
-
-- Work on `master` branch or feature branches per phase. Commit at every stable checkpoint.
-- Prefix commits with phase number: `[P2] feat(orchestrator): ...`.
-- Before any Databricks deploy, run: `python -m py_compile app.py src/**/*.py` and the pytest suite.
-- Never bypass safety flags (`--no-verify`, `--force`).
-- Never overwrite `.databrickscfg` or store tokens in source.
-- Never touch files outside the packaged project folder.
-- After each meaningful change: syntax-check, run tests, sync, deploy, confirm deployment succeeded via `databricks apps get`.
-- Show the deployment ID after every successful deploy so the user can roll back.
-- When you finish a phase, **stop and report**. Do not auto-start the next phase.
-
----
-
-## 12. Phased delivery (implement in this order)
-
-1. **Phase 1 — Scaffolding & parity.** Create `src/orchestrator/` package. Move the T&E workspace layout out of `app.py` into `skills/tne_exco/skill.py`. Write the parity test. Deploy. Confirm the workspace still works identically.
-   *Gate:* Surface 1 parity test passes.
-
-2. **Phase 2 — LangGraph shell + MLflow.** Define `RunState`, `graph.py`, and node stubs that emit events but wrap the existing T&E computation as a single monolithic node. Wire `start_audit_run` to invoke the graph. Wire `mlflow.langchain.autolog()` at graph entry. Wire `MemorySaver`/`SqliteSaver` checkpointer. Persist events to Delta. Trace page shows real events.
-   *Gate:* Surface 1 still passes; a run appears in the MLflow Experiment.
-
-3. **Phase 3 — Delta persistence + adapters.** Create Delta schemas via idempotent migrations. Implement `PersistenceAdapter`. Replace fixture list endpoints with Delta reads. Fall back to fixtures if schema is missing.
-   *Gate:* Runs, findings, actions, events all round-trip via Delta.
-
-4. **Phase 4 — Decomposed nodes.** Split the monolithic T&E node into `discover → profile → plan → execute → classify → find → prioritise → act → export`. Each node emits its own MLflow span.
-   *Gate:* Surface 1 still passes with decomposed nodes.
-
-5. **Phase 5 — Unity Catalog + Volume upload.** Implement `DataSourceAdapter` and file upload against governed tables or uploaded files and a configured Volume. Handle no-access + quota gracefully.
-  *Gate:* Discoverable data sources appear via UI; a real file uploads to the configured Volume.
-
-6. **Phase 6 — Second Skill (GST T4.8).** Implement `skills/gst_t48/` with 3–4 real tests over a **synthetic** AP dataset persisted as a Delta table. Full lifecycle from discover to export.
-   *Gate:* Explorer + Playbook modes both work end-to-end for GST on synthetic data.
-
-7. **Phase 7 — Human-in-the-loop.** Implement plan confirmation via `interrupt_before("execute")`. Runs pause at the gate; UI shows plan; auditor confirms; run resumes from checkpoint.
-   *Gate:* A paused run resumes correctly across a browser refresh.
-
-8. **Phase 7a — LLM integration.** Build `llm.py`, prompt templates in `src/orchestrator/prompts/`, `NODE_MODELS` config, `llm_calls` Delta table, degraded mode. Wire narrative fields into `profile`, `find`, `prioritise`, `act`, `export` nodes. Add "regenerate" and "edit" affordances + narrative-traceability tooltip.
-   *Gate:* Surface 3 (faithfulness) passes 100%. Surface 4 (quality) baseline recorded.
-
-9. **Phase 7b — Findings critic (optional).** Only build if Phase 7a's Surface 3 misses hallucinations OR Surface 4 quality is below target on `find` node. Otherwise skip.
-   *Gate:* Critic reduces hallucinations without hurting run cost budget by more than 10%.
-
-10. **Phase 7c — Model routing loop.** Run the routing decision loop (§6). Downgrade nodes tier-by-tier while maintaining ≥95% quality. Lock resulting `NODE_MODELS`.
-    *Gate:* Total per-run inference cost ≤ 30% of all-Premium baseline at ≥95% quality.
-
-11. **Phase 8 — Jira preview (deferred).** Do not build during the personal-laptop stage. Reserved for post-Optus-migration.
-
-12. **Phase 9 — Hardening.** Idempotency, concurrent-run protection (run-scoped table names), error recovery, retry policies, comprehensive logging, observability polish. Prepare Optus migration checklist.
-    *Gate:* Full nightly run of Surfaces 1–5 passes for 3 consecutive nights.
-
-At the end of each phase: commit, deploy to the personal workspace, verify the app runs, report deployment ID + a one-paragraph summary of what changed.
-
----
-
-## 13. Definition of done (cloud-Claude handoff build)
-
-The personal build is ready to migrate to Optus when:
-
-- A user can open the app URL and see the platform landing page.
-- The user can search the configured catalog for governed tables and select them.
-- The user can upload a real file to the personal Volume and see validation progress.
-- The user can select the T&E Skill and run it against synthetic ExCo data — computed findings match the current prototype exactly (Surface 1 parity).
-- The user can select the T4.8 GST Skill and run it against a synthetic AP dataset with real tests producing real findings.
-- The user can enter Explorer Mode, describe an objective, see the proposed plan, and confirm before execution (HITL gate resumes correctly).
-- Every audit run is persisted to Delta and remains selectable across sessions.
-- Every graph run is visible in the MLflow Experiment with per-node spans.
-- Platform Trace shows real execution events (not fixture data) after any run.
-- Management Actions page shows real actions from Delta across all Skills.
-- Skill Methodology Viewer still shows the real T&E methodology and honest "under development" panels for other Skills.
-- Existing PPTX and Excel exports work for any completed run.
-- **Surface 1 parity test** passes: legacy `app.py` computed findings == new orchestrator computed findings.
-- **Surface 2 test correctness** passes: precision ≥ 0.98, recall ≥ 0.95 per test.
-- **Surface 3 narrative faithfulness** passes: no LLM-produced narrative contains a number not in `RunState`.
-- **Surface 4 narrative quality** baseline recorded in MLflow.
-- **Surface 5 end-to-end** passes on curated scenarios.
-- Model routing config produces ≥ 95% of all-Premium quality at ≤ 30% of all-Premium cost.
-- Every LLM call is logged to `${DBX_CATALOG}.${DBX_SCHEMA}.llm_calls`.
-- With `MODEL_ENDPOINT_HOST` unset, the app runs in degraded mode with a clear "LLM unavailable" indicator.
-- No hardcoded workspace URLs, catalog names, volumes, or model endpoints anywhere in source.
-- `.env.example` present; `.env` gitignored.
-- README documents the Optus migration path (env swap + adapter re-implementation + governed views satisfying the data contracts).
-- No fake successful integrations shown to the user.
-- Jira submission NOT built (deferred to Optus stage).
-
----
-
-## 14. What to do first
-
-1. Read `app.py`, `src/platform/pages.py`, `src/platform/adapters.py`, `src/platform/methodology.py`, and `src/test_catalogue.py` in full.
-2. Treat this package as synthetic-data-free. If test data is needed later, introduce it deliberately rather than assuming a bundled generator exists.
-3. Confirm you understand the current adapter surface and the T&E computation flow.
-4. Reply with a **one-page plan for Phase 1 only**: file list, extraction approach, test approach, expected risk points. Do not proceed to Phase 2 until Phase 1 is deployed and confirmed working on the personal Free Edition workspace.
-
-Do not touch `assets/`, `vendor/`, or `templates/` unless explicitly required. Do not change the design system. Do not add new UI patterns beyond those already in `src/platform/components.py`.
-
-If any instruction here conflicts with what you observe in the code, ask before assuming.
-
-Begin.
+1. Run §11. Stop and report if anything fails.
+2. Read the files in §0, in full.
+3. Confirm you understand §0.2 — the flag-counting problem, the orphaned modules, the memorised
+   constants. State it back in your own words.
+4. Produce a **one-page plan for P1 only**: file list, `RunState` field-by-field justification,
+   Delta DDL outline, test approach, risks.
+5. Stop. Do not start P2 until P1 is reviewed.
