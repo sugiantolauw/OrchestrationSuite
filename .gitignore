@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Databricks
+.databricks/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+
+# Test / build artefacts
+test_output*.pptx
+_inspect*.py
+_test_*.py
+
+# Environment
+.env

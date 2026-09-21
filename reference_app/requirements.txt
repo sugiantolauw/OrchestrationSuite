@@ -1,0 +1,11 @@
+dash>=2.14.0
+dash-bootstrap-components>=1.5.0
+plotly>=5.18.0
+pandas>=2.0.0
+numpy>=1.24.0
+openpyxl>=3.1.0
+lxml>=6.1.1
+pillow>=12.2.0
+typing_extensions>=4.16.0
+xlsxwriter>=3.2.9
+python-pptx>=1.0.2
