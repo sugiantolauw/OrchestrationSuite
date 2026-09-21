@@ -539,6 +539,76 @@ so a full rebuild before then is rework. Split it:
 - **P6** — the structural rebuild: new slide order, themes slide, LLM exec summary, bounded slide
   count, footer stamping, threshold-provenance labels.
 
+### 4.8 Schema headroom for the audit-suite model
+
+The target product is a commercial-grade audit suite, not a single-run analytics app. Three
+concepts from that model change the **shape of the tables**, so they belong in the P1 schema even
+though the features themselves land much later.
+
+**P1 creates the shape. P1 does not build the features.** Adding a column to an empty table is
+free. Adding it after real runs exist means backfilling rows that have no sensible value,
+rewriting every query, and re-deriving every permission check — at precisely the moment there is
+real data and real users to disrupt.
+
+#### 1. Engagement scoping
+
+Today the system thinks in *runs*. An audit suite thinks in *engagements*: "FY26 T&E audit of
+Consumer" owns many runs, across many Skills, over months.
+
+P1 delivers:
+- An `engagements` table: `engagement_id`, `name`, `entity`, `period_start`, `period_end`,
+  `owner`, `status`, `created_at`.
+- A non-null `engagement_id` column on `runs`, `findings`, `management_actions`, `trace_events`
+  and `uploaded_files`.
+- Exactly one seeded default engagement, so nothing in the UI has to change yet.
+- `RunState.engagement_id`.
+
+Later phases add engagement creation, listing, scoping of the runs/actions pages, and per-engagement
+access control. None of that requires a migration.
+
+#### 2. Review hierarchy
+
+Real audit review is preparer → reviewer → partner, with review notes raised against a finding
+("justify excluding FCM from the split-claim test") that must be cleared before the file closes.
+The current design has a single sign-off.
+
+P1 delivers:
+- A `review_notes` table: `note_id`, `engagement_id`, `run_id`, `finding_id` (nullable — a note
+  can sit on the run), `raised_by`, `raised_at`, `body`, `state` (`open`/`cleared`),
+  `cleared_by`, `cleared_at`, `response`.
+- `findings.review_state` — `draft` / `prepared` / `reviewed` / `approved`.
+- `runs.prepared_by`, `runs.reviewed_by`, `runs.approved_by` (nullable).
+
+P7's sign-off gate writes `approved_by` and moves findings to `approved`. The full note lifecycle
+and role model come later; the table exists and stays empty until then.
+
+#### 3. Rollforward
+
+"Same finding as last year; management agreed to fix it; they have not." This requires a finding
+identity that survives across periods. Today a finding is `run_id + finding_id`, which is unique
+to one run and meaningless across runs.
+
+P1 delivers:
+- `findings.rule_id` — the stable identity of the *rule that produced the finding*, namespaced by
+  Skill: `SKILL-001.T4_1`. It comes free from `findings.yaml` (§4.6) and never changes across runs.
+- `findings.prior_finding_id` (nullable) — the same rule's finding in the prior period.
+- `findings.recurrence_count` (default 0).
+
+Matching logic, the "recurring finding" badge and prior-period comparison come later. Without
+`rule_id` recorded from the first run, that history can never be reconstructed — which is the
+whole point of doing it now.
+
+#### Not in scope
+
+Two further suite capabilities are **features, not schema**, and are explicitly deferred with no
+P1 obligation:
+
+- **Statistical sampling** (monetary-unit and attribute sampling with defensible sample-size
+  calculation). The platform currently tests 100% of the population. This becomes a new category
+  of primitive (§4.3) when it is wanted.
+- **Workpaper indexing and cross-referencing** (A-1, B-2.3 style indices that findings cite).
+  Additive to `findings` when wanted.
+
 ---
 
 ## 5. Evaluation
@@ -678,7 +748,7 @@ Each phase ends with **stop and report**. Do not auto-start the next.
 | Phase | Deliverable | Definition of done |
 |---|---|---|
 | **P0** | Foundation reset | Done — this file, `.claude/` config, `.env.example`, `.gitattributes`, dead code removed |
-| **P1** | `RunState` + Delta persistence | JSON round-trip test green; migrations create all tables; `LocalPersistence` + `DeltaPersistence` both pass the same contract test; reaper test green |
+| **P1** | `RunState` + Delta persistence + suite schema headroom | JSON round-trip test green; migrations create all tables **including `engagements` and `review_notes`, and the `engagement_id` / `rule_id` / `prior_finding_id` / `review_state` columns per §4.8**; one default engagement seeded; `LocalPersistence` + `DeltaPersistence` both pass the same contract test; reaper test green |
 | **P2** | Primitives + T&E Skill | Surface 2 ≥0.98/≥0.95 per test on planted data; G8 green; **zero memorised constants** (grep test); contract describes raw sources |
 | **P3** | Pipeline loop + nodes + ThreadExecutor | G6, G7, G9, G10 green; full run on fixtures → findings in Delta; `/trace` shows real events; MLflow per-node spans; exposure double-count fixed |
 | **P4** | App rewired to run-scoped data | Surface 1 vs hand-verified oracle; G13 green; no module-level globals; `/workspace/tne` functionally identical; all routes unchanged; PPTX overflow, zero-findings and private-API defects fixed (§4.7) |
