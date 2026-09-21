@@ -609,6 +609,131 @@ P1 obligation:
 - **Workpaper indexing and cross-referencing** (A-1, B-2.3 style indices that findings cite).
   Additive to `findings` when wanted.
 
+### 4.9 The lifecycle spine — Risk → Control → Test → Finding → Issue → Action
+
+The long-term target is a platform organised around the **audit lifecycle**, not around a single
+analytic run (see `docs/PRODUCT_POSITIONING.md`). The current design covers the middle of that
+chain — `Test → Finding → Action`. The front (Risk, Control) and one middle link (Issue) are
+missing.
+
+**P1 creates every link. Only the middle three are exercised.** Same rule as §4.8: an empty column
+is free, a retrofit after real engagements exist is not.
+
+#### Risk and Control as first-class objects
+
+`test_catalogue.py` already carries a `control_objective` string per test. That string *is* a
+control; it is simply not modelled as one. Promoting it now costs almost nothing.
+
+```
+risks:     risk_id | engagement_id | title | description | category | owner
+                  | status (proposed|accepted|rejected|superseded)
+                  | source (manual|glean|regulation|erm_import) | source_ref
+                  | as_of_date | confidence | prior_risk_id | created_at
+
+controls:  control_id | risk_id | engagement_id | title | description
+                  | type (preventive|detective) | frequency | owner
+                  | design_conclusion | operating_conclusion | created_at
+```
+
+Every test in `plan.yaml` gains three fields:
+
+```yaml
+- primitive: duplicate_detection
+  params: {...}
+  control_id: CTL-TNE-07
+  risk_id:    RSK-TNE-03
+  assertion:  operating          # design | operating
+```
+
+This buys a **risk-and-control matrix (RCM)** view for free — the central artifact of audit
+planning — and makes every finding traceable to a risk rather than only to a test.
+
+**`assertion` is not optional.** Design effectiveness (*is this control capable of preventing the
+risk*) and operating effectiveness (*did it work on these transactions*) are different audit
+conclusions. Every test in the current catalogue is operating; the platform does not yet do design
+assessment. If tests are unlabelled, that distinction cannot be reconstructed later.
+
+#### Issue is not the same object as Finding
+
+`findings` currently does double duty. In an audit file these are distinct:
+
+| | **Finding** | **Issue** |
+|---|---|---|
+| Means | A test produced exceptions | A reportable control deficiency |
+| Scope | One run | The engagement — may draw on several findings, across several runs |
+| Nature | Factual | Judgement: an auditor decided to raise it |
+| Lifecycle | Ends with the run | Rated, owned, due-dated, tracked to closure, followed up next period |
+| Audience | Working paper | Audit committee |
+
+```
+issues:  issue_id | engagement_id | rule_id | title | description | rating
+               | status (draft|open|agreed|remediated|closed|superseded)
+               | raised_by | raised_at | owner | due_date
+               | remediation_plan | management_response
+               | prior_issue_id | finding_ids (array<string>) | run_ids (array<string>)
+```
+
+In P1 the app auto-creates one issue per finding, so behaviour is unchanged. The structure is what
+matters: the moment you want "three findings, one issue" or "still open from last period", it is
+there. `management_actions` becomes a child of an issue rather than of a finding.
+
+#### Engagement lifecycle stage
+
+One column: `engagements.stage` ∈ `planning | fieldwork | reporting | closed`. Every later module
+keys off it.
+
+#### Risk sensing — headroom only, no implementation
+
+The intended long-term source of risks is an internal knowledge tool (Glean) reached over MCP,
+plus external regulation lookups, producing a ranked register scored on financial, reputational
+and other impact dimensions. That is **months away on governance grounds and must not be built
+now.** What P1 provides is the shape it will write into.
+
+**1. Provenance is already in the `risks` table above.** A risk without a citation is unusable in
+audit — an auditor must be able to click through to the source paragraph. `as_of_date` matters
+more than it looks: regulations change, and a risk scored against last year's version goes stale
+silently without it.
+
+**2. Scoring is multi-dimensional and append-only.** Do not collapse it to one number on `risks`:
+
+```
+risk_assessments: assessment_id | risk_id | dimension | score | rationale
+               | method (model|human) | assessed_by | assessed_at | source_ref
+```
+
+`dimension` ∈ `financial | reputational | regulatory | operational`. Append-only gives rating
+history for free — "medium last quarter, high now" — which is the entire point of *continuous*
+sensing, and cannot be reconstructed from a single current-value column.
+
+**3. A seventh adapter Protocol, defined in P1 and implemented never:**
+
+```python
+class KnowledgeSourceAdapter(Protocol):
+    def search(self, query: str, *, as_of: date | None) -> list[Document]: ...
+    def fetch(self, doc_id: str) -> Document: ...
+```
+
+Glean-over-MCP becomes one implementation if and when it is approved. A file drop into a Volume is
+another, and is how this would be prototyped before then. Nothing in the pipeline knows which.
+
+**4. Governance — an LLM-authored risk register is a heavier question than LLM-authored findings.**
+Risks drive the audit plan; the plan drives what is tested; what is tested drives the assurance the
+board receives. An error of *omission* is invisible — nobody discovers the risk that was never on
+the list. Therefore:
+
+- A proposed risk is a **candidate** until an auditor accepts it — hence `risks.status`.
+- No citation, no acceptance.
+- Coverage is reported explicitly ("sensed from 412 documents, 38 risks proposed, 22 accepted")
+  together with a standing note that **absence of a risk is not assurance**.
+
+#### Not in scope, deliberately
+
+- Glean-specific code, MCP dependencies (see §7), or regulation fetching.
+- Risk scoring algorithms or weightings — the enterprise risk function's existing methodology will
+  dictate these, and a second conflicting methodology is worse than none.
+- `audit_plans` / annual planning. `engagement_id` is sufficient headroom.
+- Any UI for risks, controls or issues. Tables only in P1; UI arrives with the module.
+
 ---
 
 ## 5. Evaluation
@@ -726,8 +851,9 @@ MODEL_ENDPOINT_HOST  MODEL_SONNET  MODEL_GPT_OSS
 EXECUTOR=thread|jobs   DEMO_MODE=true|false
 ```
 
-**Six adapter Protocols** in `orchestrator/adapters/`: `DataSourceAdapter`, `ModelClient`,
-`PersistenceAdapter`, `PromptRepository`, `TracingAdapter`, `ExportStorageAdapter`.
+**Seven adapter Protocols** in `orchestrator/adapters/`: `DataSourceAdapter`, `ModelClient`,
+`PersistenceAdapter`, `PromptRepository`, `TracingAdapter`, `ExportStorageAdapter`, and
+`KnowledgeSourceAdapter` (§4.9 — declared in P1, no implementation).
 `DataSourceAdapter` must expose "give me the tested population" without the caller knowing whether
 pandas or Spark produced it — if a dataset later exceeds container memory, only that adapter changes.
 
@@ -735,8 +861,10 @@ pandas or Spark produced it — if a dataset later exceeds container memory, onl
 service principal access); read/write Delta through `databricks-sql-connector`; Volumes through the
 Files API.
 
-**Environment restrictions:** MCP is not permitted in the target corporate environment — do not add
-MCP dependencies. Databricks Apps cannot compile C extensions at deploy time; if a dependency fails
+**Environment restrictions:** MCP is not permitted in the target corporate environment today — do
+not add MCP dependencies, and do not design around them. External knowledge sources (§4.9) sit
+behind `KnowledgeSourceAdapter`; if an MCP-reached source such as Glean is approved later it
+becomes one implementation of that Protocol and nothing else in the codebase changes. Databricks Apps cannot compile C extensions at deploy time; if a dependency fails
 to install, vendor a `manylinux2014_x86_64` wheel and reference it explicitly.
 
 ---
@@ -748,8 +876,8 @@ Each phase ends with **stop and report**. Do not auto-start the next.
 | Phase | Deliverable | Definition of done |
 |---|---|---|
 | **P0** | Foundation reset | Done — this file, `.claude/` config, `.env.example`, `.gitattributes`, dead code removed |
-| **P1** | `RunState` + Delta persistence + suite schema headroom | JSON round-trip test green; migrations create all tables **including `engagements` and `review_notes`, and the `engagement_id` / `rule_id` / `prior_finding_id` / `review_state` columns per §4.8**; one default engagement seeded; `LocalPersistence` + `DeltaPersistence` both pass the same contract test; reaper test green |
-| **P2** | Primitives + T&E Skill | Surface 2 ≥0.98/≥0.95 per test on planted data; G8 green; **zero memorised constants** (grep test); contract describes raw sources |
+| **P1** | `RunState` + Delta persistence + suite schema headroom | JSON round-trip test green; migrations create all tables **including `engagements`, `review_notes`, `risks`, `controls`, `risk_assessments` and `issues`, and the `engagement_id` / `rule_id` / `prior_finding_id` / `review_state` / `stage` columns per §4.8 and §4.9**; one default engagement seeded; `LocalPersistence` + `DeltaPersistence` both pass the same contract test; reaper test green |
+| **P2** | Primitives + T&E Skill | Surface 2 ≥0.98/≥0.95 per test on planted data; G8 green; **zero memorised constants** (grep test); contract describes raw sources; every test in `plan.yaml` carries `control_id`, `risk_id` and `assertion`, and the T&E controls and risks are seeded from `test_catalogue.control_objective` (§4.9) |
 | **P3** | Pipeline loop + nodes + ThreadExecutor | G6, G7, G9, G10 green; full run on fixtures → findings in Delta; `/trace` shows real events; MLflow per-node spans; exposure double-count fixed |
 | **P4** | App rewired to run-scoped data | Surface 1 vs hand-verified oracle; G13 green; no module-level globals; `/workspace/tne` functionally identical; all routes unchanged; PPTX overflow, zero-findings and private-API defects fixed (§4.7) |
 | **P5** | JobsExecutor + UC + Volume upload | `run_now` round-trip works; a run survives an App redeploy (reaper + resume); real file uploads and profiles; deployment ID reported |
