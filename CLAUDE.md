@@ -69,8 +69,9 @@ defects that must not be reproduced:
 
 **P2 must port against an audit-approved test specification, not against `computation.py` output.**
 For each of the 14 tests, the P2 planning session writes: population, grain, join key, exception
-identity, threshold, exclusions, and expected evidence. Where `computation.py` and the spec
-disagree, the spec wins.
+identity, **scoring unit** (row, transaction pair, employee-day, claim group — precision and recall
+are not interpretable without it), threshold, exclusions, and expected evidence. Where
+`computation.py` and the spec disagree, the spec wins.
 
 **`app.py` therefore counts flags rather than computing tests.** `compute_evidence_payload`
 (`app.py:315`) derives most metrics by summing pre-existing `RF_*` columns —
@@ -593,7 +594,7 @@ The `run_fingerprints` table stores the immutable provenance snapshot captured a
 | Field | What it captures |
 |---|---|
 | `fingerprint_id` | PK — deterministic hash of the remaining fields |
-| `source_table_versions` | `{table_fqn: version}` from `DESCRIBE HISTORY` |
+| `source_table_versions` | `{table_fqn: version}` — resolved via `DESCRIBE HISTORY` **before** reading; the read uses `VERSION AS OF` to pin the exact snapshot. This ordering is critical: resolving the version after the read creates a TOCTOU gap where the table could change between read and provenance capture |
 | `uploaded_file_hashes` | `{volume_path: sha256}` |
 | `skill_content_hash` | SHA-256 over the Skill's manifest + contract + plan + thresholds + findings + prompts |
 | `code_revision` | Git commit hash of the deployed application code |
@@ -1245,7 +1246,7 @@ Each phase ends with **stop and report**. Do not auto-start the next.
 | **P0** | Foundation reset | Done — this file, `.claude/` config, `.env.example`, `.gitattributes`, dead code removed |
 | **P1A** | **Immutable run ledger** — `RunState`, explicit state machine, persistence contract | JSON round-trip test green; `runs`, `run_state`, `run_fingerprints`, `node_attempts`, `trace_events` tables created; **run fingerprint** stored per run in `run_fingerprints` (source version/hash, Skill content hash, code revision, dependency lock hash, runtime config hash, endpoint config, prompt template version); **optimistic concurrency**: `state_version` on every transition with CAS enforcement (zero-rows-affected = rejected), deterministic node execution keys, idempotent MERGE into `node_attempts`, failure-injection test proving CAS + idempotent MERGE work together; `LocalPersistence` + `DeltaPersistence` both pass the same contract test; reaper marks orphaned runs `interrupted` (never deletes); state-machine transitions tested (including invalid transitions rejected); one trivial end-to-end run completes |
 | **P1B** | **Minimum product schema** — engagement scoping + all suite table DDL | DDL created for **all** suite tables: `engagements`, `findings`, `management_actions`, `skill_versions`, `risks`, `controls`, `risk_assessments`, `review_notes`, `issues`; `engagement_id` nullable in schema, application validation enforces non-null for fieldwork/assessment/planning; one default engagement seeded; `risks` and `controls` tables exist with agreed identifiers — P2 seeds T&E risks/controls from `test_catalogue.control_objective` and references them via `risk_id`/`control_id` in `plan.yaml`; tables that P1B cannot yet populate are empty but schema-tested |
-| **P2** | Primitives + T&E Skill | Surface 2 ≥0.98/≥0.95 per test on planted data; G8 green; **zero hardcoded result values** — every one becomes a real computation or an explicit `not_testable` with a reason (grep test); contract describes raw sources; **per-test specification written before porting** (population, grain, join key, exception identity, threshold, exclusions, expected evidence); where `computation.py` and the spec disagree, the spec wins; every test in `plan.yaml` carries `control_id`, `risk_id` and `assertion`, and the T&E controls and risks are seeded from `test_catalogue.control_objective` (§4.9) |
+| **P2** | Primitives + T&E Skill | Surface 2 ≥0.98/≥0.95 per test on planted data; G8 green; **zero hardcoded result values** — every one becomes a real computation or an explicit `not_testable` with a reason (grep test); contract describes raw sources; **per-test specification written before porting** (population, grain, join key, exception identity, scoring unit, threshold, exclusions, expected evidence); where `computation.py` and the spec disagree, the spec wins; every test in `plan.yaml` carries `control_id`, `risk_id` and `assertion`, and the T&E controls and risks are seeded from `test_catalogue.control_objective` (§4.9) |
 | **P3** | Pipeline loop + nodes + ThreadExecutor | G6, G7, G9, G10 green; full run on fixtures → findings in Delta; `/trace` shows real events; MLflow per-node spans; exposure double-count fixed; **a run survives an App restart — reaper marks it `interrupted` and Resume completes it**; concurrency cap enforced with queued runs in Delta |
 | **P4** | App rewired to run-scoped data | Surface 1 vs hand-verified oracle; G13 green; no module-level globals; `/workspace/tne` functionally identical; all routes unchanged; PPTX overflow, zero-findings and private-API defects fixed (§4.7) |
 | **P5** | Unity Catalog + Volume upload + deploy | Governed tables discoverable and readable via the SQL warehouse; no-access catalogs surface as `Restricted`; a real file uploads to the Volume and profiles through `Uploaded → Profiling → Ready`; memory ceiling respected (aggregation pushed to SQL, loud failure never silent sampling); app deployed and deployment ID reported |
@@ -1275,8 +1276,11 @@ Later phases may add columns (via migration) but the owning phase defines the in
 | `risk_assessments` | P1B | P4 | Empty until risk-sensing or manual entry |
 | `review_notes` | P1B | P7 | Empty until HITL gates write sign-off notes |
 | `issues` | P1B | P3 | Empty until pipeline maps findings to issues |
+| `uploaded_files` | P5 | P5 | Upload metadata: volume path, file hash, profile status |
 | `llm_calls` | P6 | P6 | Per-LLM-call provenance including served model version |
+| `llm_cache` | P6 | P6 | Response cache keyed on `(prompt_sha256, endpoint, served_model_version, params_json)` |
 | `narrative_edits` | P7 | P7 | Edit audit trail for human narrative changes |
+| `evaluation_runs` | P9 | P9 | Eval harness run records, judge scores, golden-set results |
 
 Jira submission is **not** built. `create_jira_preview` returns a stub labelled
 "Preview — not submitted".
@@ -1383,15 +1387,21 @@ Playwright (or Selenium) against the App URL. Key scenarios:
 
 ### Layer 4 — Delta persistence verification (minutes)
 
-Query Delta tables directly from a notebook or SQL warehouse after the E2E run:
+Query Delta tables directly from a notebook or SQL warehouse after the E2E run. **Check only the
+tables expected by the current phase** (see table-to-phase matrix in §8 — a P1A verification does
+not assert `findings` exist; a P3 verification does).
 
-- `runs` table: expected `run_id`, status, timestamps.
-- `findings` table: rows match what the UI showed.
-- `run_state` JSON: parseable, contains expected node outputs.
+- `runs` table: expected `run_id`, status, timestamps. *(P1A+)*
+- `run_fingerprints` table: fingerprint_id matches `RunState.fingerprint_id`, source versions
+  recorded. *(P1A+)*
+- `run_state` JSON: parseable, contains expected node outputs, `state_version` ≥ 1. *(P1A+)*
+- `node_attempts`: rows for each executed node, outcomes correct. *(P1A+)*
 - Reaper: insert a stale run left `running`, trigger reaper, confirm it is marked `interrupted`
-  (never deleted — audit run records are evidence).
-- Suite tables: `engagements`, `review_notes`, `risks`, `controls`, `risk_assessments`, `issues`
-  all exist and seeded default engagement is present.
+  (never deleted — audit run records are evidence). *(P1A+)*
+- `engagements`: seeded default engagement present. *(P1B+)*
+- `findings` table: rows match what the UI showed. *(P2+)*
+- Suite tables (`risks`, `controls`, `risk_assessments`, `review_notes`, `issues`): DDL exists
+  from P1B; populated as each phase writes to them. *(P1B+ for DDL, per-table for data)*
 
 ### Layer 5 — Model-serving integration (minutes, needs endpoint)
 
@@ -1423,10 +1433,12 @@ without proving correctness. Each is noted with the phase or milestone where it 
 ### Concurrency model
 
 The `Semaphore(2)` concurrency cap (§2.3) protects only one Python process. It does not prevent
-duplicate execution across workers, overlapping deployments, or two containers. The Free Edition
-prototype is guaranteed single-process, so the semaphore is safe for now — but the persistence
-layer must be correct from P1A, because retrofitting concurrency controls onto an existing schema
-is expensive and error-prone.
+duplicate execution across workers, overlapping deployments, or two containers. The current
+`app.yaml` runs `python app.py`, which starts one process — but this is a configuration choice,
+not a platform guarantee. Databricks Apps support custom commands including Gunicorn with multiple
+workers, and redeployments or restarts can overlap even within a single-process configuration.
+The persistence layer must therefore be correct from P1A, because retrofitting concurrency
+controls onto an existing schema is expensive and error-prone.
 
 **P1A delivers** (foundational, not deferred):
 - `run_state.state_version` — integer, incremented on every state transition.
@@ -1439,8 +1451,11 @@ is expensive and error-prone.
 - **`node_attempts` table** with: `attempt_id`, `run_id`, `node_name`, `attempt_number`,
   `execution_key` (the deterministic key), `started_at`, `completed_at`, `outcome`
   (`succeeded | failed | interrupted`), `error_detail`, `state_version_before`, `state_version_after`.
-- **Failure-injection test:** a test that simulates a crash between node completion and state
-  persistence, then resumes — proving the CAS and idempotent MERGE work together.
+- **Failure-injection tests:** proving CAS and idempotent MERGE work together under:
+  - node output written but state not advanced (crash between node completion and state persistence) — resume must not re-execute the node;
+  - state update attempted twice (duplicate CAS) — second attempt must be rejected;
+  - two resume requests racing on the same run — exactly one must succeed, the other must get a CAS rejection;
+  - executor dying mid-node — `node_attempts` records `interrupted`, resume re-executes that node only.
 
 **Deferred to P3** (production-grade, requires multi-worker):
 - Persisted worker claim (`claimed_by`, `lease_expires_at`, `heartbeat_at`) with renewable leases.
