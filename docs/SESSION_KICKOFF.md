@@ -5,14 +5,15 @@ Paste the relevant block as the first message of a new Claude Code session.
 
 ---
 
-## P1 — first session of the build (run on **Opus**, switch to Sonnet after the plan)
+## P1A — first session of the build (run on **Opus**, switch to Sonnet after the plan)
 
 ```
 Read CLAUDE.md in full before doing anything else. It is the authoritative build brief
 and it supersedes the README, every docstring in this repo, and anything you may have
 seen in an earlier version of the brief.
 
-This is P1 of a phased build. Work in this order and stop where told.
+This is P1A of a phased build (the immutable run ledger). Work in this order and stop
+where told.
 
 STEP 1 — Verify the environment. Run the checks in CLAUDE.md §11:
   - WorkspaceClient().current_user.me()
@@ -27,32 +28,39 @@ STOP AND REPORT before designing anything.
 STEP 2 — Read the code. In full, not skimmed:
   reference_app/app.py, src/computation.py, src/test_catalogue.py,
   src/platform/adapters.py, src/platform/pages.py
-Then state back in your own words: (a) why computation.py -- the canonical detection
-engine -- was never wired into app.py, (b) what app.py does instead and why that cannot
+Then state back in your own words: (a) why computation.py -- the best available behavioural
+reference -- was never wired into app.py, (b) what app.py does instead and why that cannot
 continue, (c) which behaviours in the prototype were correct for a demo but must not survive
-into a governed audit run. If you cannot explain all three, re-read CLAUDE.md §0.2 before
+into a governed audit run, (d) which known defects in computation.py (§0.2) must not be
+reproduced when porting. If you cannot explain all four, re-read CLAUDE.md §0.2 before
 continuing. The prototype was built under real constraints; read that section as context,
 not as a list of mistakes.
 
-STEP 3 — Produce a one-page plan for P1 ONLY:
+STEP 3 — Produce a one-page plan for P1A ONLY (the immutable run ledger):
   - RunState: every field, with a one-line justification each, and why it is JSON-safe
-  - Delta DDL outline for runs, run_state, findings, management_actions, trace_events,
-    uploaded_files, llm_calls, llm_cache, narrative_edits, evaluation_runs
+  - The run fingerprint: what it contains (source version/hash, Skill content hash, code
+    revision, config hash, endpoint, served model version) and where it is stored
+  - Explicit run-status state machine: all valid states and transitions, including
+    invalid-transition rejection
+  - Delta DDL outline for runs, run_state, node_attempts, trace_events
   - PersistenceAdapter contract, and how LocalPersistence and DeltaPersistence both satisfy it
-  - The reaper, and the status state machine
-  - Test approach, including the JSON round-trip test
+  - The reaper: marks `interrupted`, never deletes (audit runs are evidence)
+  - Test approach, including the JSON round-trip test and one trivial end-to-end run
   - Risks and open questions
+
+P1B (engagement scoping + suite tables) is a separate plan after P1A passes.
 
 STEP 4 — STOP. Present the plan. Do not write code until I approve it.
 
 After I approve: switch to Sonnet (/model claude-sonnet-5) or delegate to the `implement`
-subagent, and build P1. Do not start P2.
+subagent, and build P1A. Do not start P1B.
 
 Constraints that override any instinct to be helpful:
   - Do not introduce LangGraph or any orchestration framework.
   - Do not preserve the silent-default behaviour in app.py's _standardise_* or _find_col.
-  - computation.py is the canonical detection engine. Restore it; do not rewrite it, and do
-    not treat app.py's flag-counting as a second valid implementation to choose between.
+  - computation.py is the best available behavioural reference for detection logic, but it
+    contains known semantic defects (§0.2). Do not reproduce them. P2 ports against an
+    audit-approved test specification, not against computation.py output.
   - Do not port any hardcoded result value from computation.py (the 132, the 0, the 2,
     the 152,921, the 500 fallback). Each becomes a real computation or an explicit
     not_testable with a reason string.

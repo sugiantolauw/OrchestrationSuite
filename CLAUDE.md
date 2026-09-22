@@ -55,7 +55,22 @@ Check `app.py:24–49`. This is a consequence of constraint 2, not an oversight:
 consumes eight raw source files — `expense_report`, `booking_detail`, `travel_request_segment`,
 `travel_requests_no_expense`, `missing_receipt`, `attendee_validity`, `approval_aging`,
 `per_diem_rates` — and when those were not reachable, the app had to be built against pre-flagged
-data instead. **`computation.py` is canonical. P2 restores it as the engine.**
+data instead.
+
+**`computation.py` is the best available behavioural reference, not an unquestionable oracle.**
+P2 ports its detection logic into primitives, but an independent review found material semantic
+defects that must not be reproduced:
+- T3.1b joins bookings to travel requests by employee name rather than a request key (`:82`).
+- T3.3b compares the full claim amount against $40/$80 instead of per-head spend (`:202`).
+- T5.1 split-claim window sums the entire employee/vendor/type group after finding any pair
+  within two days (`:365`) — the population inflates.
+- T6.1d says "per employee per country" but groups only by employee and date (`:562`).
+- Several functions still use fuzzy column selection or turn missing inputs into zero results.
+
+**P2 must port against an audit-approved test specification, not against `computation.py` output.**
+For each of the 14 tests, the P2 planning session writes: population, grain, join key, exception
+identity, threshold, exclusions, and expected evidence. Where `computation.py` and the spec
+disagree, the spec wins.
 
 **`app.py` therefore counts flags rather than computing tests.** `compute_evidence_payload`
 (`app.py:315`) derives most metrics by summing pre-existing `RF_*` columns —
@@ -175,13 +190,18 @@ number is not defensible in a CAO meeting.
 
 ## 1. Product vision
 
+**Positioning:** a governed, full-population fieldwork analytics engine with explicit evidence
+contracts and bounded AI narration. The long-term target is PwC's Internal Audit Orchestration
+Suite capability set; the credible near-term pitch is deterministic, repeatable, auditable
+transaction testing — structured-data-first, hybrid evidence later.
+
 One governed application serving multiple audit use cases through:
 
 - Reusable **Skills** — versioned audit methodologies, mostly declarative
 - **Playbook Mode** (run a saved Skill) and **Explorer Mode** (author a new one)
 - Governed data discovery from Unity Catalog plus business file upload
 - A deterministic pipeline with LLM narration at bounded points
-- Evidence-linked findings with source-file traceability
+- Evidence-linked findings with full source provenance (table version / file hash → row keys)
 - Persistent runs and management actions in Delta
 - Excel / PowerPoint / HTML exports
 - Jira integration behind an explicit approval step (deferred — not built now)
@@ -225,9 +245,11 @@ no Jobs dependency.
 through Delta. Keeping that separation is what makes the executor swappable (§2.3) and the pipeline
 testable without a browser.
 
-The App does run Python in callbacks — filtering a completed run's population for charts, building
-export bytes on download. The rule: **nothing over a couple of seconds, and nothing that produces
-audit evidence, runs in a callback.** Evidence is produced by the executor and carries a `run_id`.
+The App does run Python in callbacks — filtering a completed run's population for charts, streaming
+an already-created export on download. The rule: **nothing over a couple of seconds, and nothing
+that produces audit evidence, runs in a callback.** Evidence is produced by the executor and
+carries a `run_id`. A download callback streams an artifact the export node already wrote to the
+Volume; it does not build the artifact.
 
 `start_audit_run` inserts the `runs` row, hands `run_id` to the executor, and returns immediately.
 The UI polls Delta on a `dcc.Interval`. A run takes minutes; a Dash callback cannot.
@@ -455,15 +477,24 @@ Change none of these without stopping and proposing to the user first.
 7. **Every LLM call is logged** to `llm_calls` synchronously before the call returns: prompt,
    response, endpoint, served model version, params, token counts, latency, node, run_id.
    AI Gateway inference tables provide an independent second copy.
-8. **Reproducibility comes from the Delta response cache,** not from `temperature`. Cache key:
-   `(prompt_sha256, endpoint, served_model_version, params_json)`. Sampling parameters are
-   per-endpoint config, tested, never assumed.
+8. **Replayability comes from the Delta response cache;** reproducibility comes from the full
+   **run fingerprint**. Cache key: `(prompt_sha256, endpoint, served_model_version, params_json)`.
+   Sampling parameters are per-endpoint config, tested, never assumed. The cache provides exact
+   replay of a previously captured response — it does not by itself prove reproducibility of the
+   audit result. A reproducible run requires matching the full fingerprint: source table version
+   or uploaded-file SHA-256, Skill content hash (not just a version label), code revision,
+   dependency lock hash, runtime configuration hash, endpoint, served model version, and prompt
+   template version. **The run fingerprint is stored per run in P1A and verified at resume.**
 9. **Model routing is config-driven.** Two endpoints (§6). No model names in node code.
-10. **Every metric carries source-file provenance** — `{value, unit, source_file}`, per the
-    existing `EVIDENCE_PAYLOAD["metrics"]` pattern.
-11. **No chain-of-thought exposed.** Trace shows execution events only — timestamps, stages,
-    statuses, durations. Reasoning (including any `reasoning_content` from GPT-OSS) is logged
-    to `llm_calls` and never rendered.
+10. **Every metric carries source provenance** — `{value, unit, source_ref}` where `source_ref`
+    identifies the source table version or uploaded-file SHA-256, the source columns, and the
+    aggregation grain. `source_file` alone is metadata, not lineage — it cannot answer "which
+    rows produced this number?" For UC table inputs, `source_ref` includes the table version
+    (`DESCRIBE HISTORY`); for uploaded files, the file hash stored at ingest.
+11. **No chain-of-thought exposed or stored raw.** Trace shows execution events only — timestamps,
+    stages, statuses, durations. `llm_calls` logs prompts and response content (the structured
+    output). Raw reasoning traces (`reasoning_content`) are neither stored nor rendered — store
+    structured rationale and citations instead (§9C).
 12. **Narrative traceability.** Every LLM paragraph in the UI shows which `RunState` fields
     supplied its numbers.
 13. **No fake successful integrations.** UC search fails → demo indicator. Jira not connected →
@@ -490,7 +521,7 @@ Defined in `orchestrator/state.py`. No framework imports. JSON round-trip tested
 class RunState:
     run_id: str
     run_kind: Literal["fieldwork", "sensing", "assessment", "planning"]  # §4.10
-    engagement_id: str | None            # None for corpus-scoped runs, e.g. sensing
+    engagement_id: str | None            # None for corpus-scoped runs (sensing); non-null for engagement-scoped (fieldwork, assessment, planning). Enforced by application validation at run creation, not by a DB constraint — see §4.8 and §4.10.
     skill_id: str | None                 # None for Explorer
     skill_version: str | None
     mode: Literal["playbook", "explorer"]
@@ -676,12 +707,14 @@ known metric names; reject anything else at Skill load time.
 **Run-time synthesis (the one place the LLM adds judgement to findings).** After the rules
 produce the finding set, `find` makes one call that may:
 - group findings into themes and propose a root-cause hypothesis per theme
-- flag cross-test patterns no single rule can see
+- note cross-test patterns no single rule can see, as **review observations** attached to the
+  theme (not findings — they carry no test_id, severity or metrics_cited)
 - propose a severity *alongside* the computed one, with a reason
 
 It may not add a finding outside the rule set, remove one, change a computed severity, or emit a
-number. Themes are stored on `RunState.findings[].theme_id` plus a `themes` list, and the auditor
-confirms them at sign-off.
+number. Review observations are informational annotations, not findings — they do not appear in
+exports or counts. Themes are stored on `RunState.findings[].theme_id` plus a `themes` list,
+and the auditor confirms them at sign-off.
 
 **Regenerate** in the UI re-runs narration and synthesis. It never re-runs rule selection.
 
@@ -756,24 +789,30 @@ so a full rebuild before then is rework. Split it:
 ### 4.8 Schema headroom for the audit-suite model
 
 The target product is a commercial-grade audit suite, not a single-run analytics app. Three
-concepts from that model change the **shape of the tables**, so they belong in the P1 schema even
+concepts from that model change the **shape of the tables**, so they belong in the P1B schema even
 though the features themselves land much later.
 
-**P1 creates the shape. P1 does not build the features.** Adding a column to an empty table is
+**P1B creates the shape. P1B does not build the features.** Adding a column to an empty table is
 free. Adding it after real runs exist means backfilling rows that have no sensible value,
 rewriting every query, and re-deriving every permission check — at precisely the moment there is
 real data and real users to disrupt.
+
+**Note:** P1B adds only tables whose concepts and identifiers are agreed. The `risks`, `controls`,
+`risk_assessments`, `review_notes`, and `issues` tables are created only once their lifecycle
+rules are confirmed — empty columns are cheap, but wrong concepts are not (§8, P1B DoD).
 
 #### 1. Engagement scoping
 
 Today the system thinks in *runs*. An audit suite thinks in *engagements*: "FY26 T&E audit of
 Consumer" owns many runs, across many Skills, over months.
 
-P1 delivers:
+P1B delivers:
 - An `engagements` table: `engagement_id`, `name`, `entity`, `period_start`, `period_end`,
   `owner`, `status`, `created_at`.
-- A non-null `engagement_id` column on `runs`, `findings`, `management_actions`, `trace_events`
-  and `uploaded_files`.
+- A **nullable** `engagement_id` column on `runs`, `findings`, `management_actions`, `trace_events`
+  and `uploaded_files`. Nullable in the schema because corpus-scoped runs (sensing) have no
+  engagement. **Application validation at run creation enforces non-null for engagement-scoped
+  run kinds** (fieldwork, assessment, planning).
 - Exactly one seeded default engagement, so nothing in the UI has to change yet.
 - `RunState.engagement_id`.
 
@@ -786,7 +825,7 @@ Real audit review is preparer → reviewer → partner, with review notes raised
 ("justify excluding FCM from the split-claim test") that must be cleared before the file closes.
 The current design has a single sign-off.
 
-P1 delivers:
+P1B delivers (once lifecycle rules are agreed — see §8 P1B DoD):
 - A `review_notes` table: `note_id`, `engagement_id`, `run_id`, `finding_id` (nullable — a note
   can sit on the run), `raised_by`, `raised_at`, `body`, `state` (`open`/`cleared`),
   `cleared_by`, `cleared_at`, `response`.
@@ -802,7 +841,7 @@ and role model come later; the table exists and stays empty until then.
 identity that survives across periods. Today a finding is `run_id + finding_id`, which is unique
 to one run and meaningless across runs.
 
-P1 delivers:
+P1B delivers:
 - `findings.rule_id` — the stable identity of the *rule that produced the finding*, namespaced by
   Skill: `SKILL-001.T4_1`. It comes free from `findings.yaml` (§4.6) and never changes across runs.
 - `findings.prior_finding_id` (nullable) — the same rule's finding in the prior period.
@@ -815,7 +854,7 @@ whole point of doing it now.
 #### Not in scope
 
 Two further suite capabilities are **features, not schema**, and are explicitly deferred with no
-P1 obligation:
+P1B obligation:
 
 - **Statistical sampling** (monetary-unit and attribute sampling with defensible sample-size
   calculation). The platform currently tests 100% of the population. This becomes a new category
@@ -830,8 +869,9 @@ analytic run (see `docs/PRODUCT_POSITIONING.md`). The current design covers the 
 chain — `Test → Finding → Action`. The front (Risk, Control) and one middle link (Issue) are
 missing.
 
-**P1 creates every link. Only the middle three are exercised.** Same rule as §4.8: an empty column
-is free, a retrofit after real engagements exist is not.
+**P1B creates every link whose concepts are agreed. Only the middle three are exercised.** Same
+rule as §4.8: an empty column is free, a retrofit after real engagements exist is not. Tables
+whose lifecycle rules are not yet confirmed are deferred rather than guessed (§8, P1B DoD).
 
 #### Risk and Control as first-class objects
 
@@ -887,7 +927,7 @@ issues:  issue_id | engagement_id | rule_id | title | description | rating
                | prior_issue_id | finding_ids (array<string>) | run_ids (array<string>)
 ```
 
-In P1 the app auto-creates one issue per finding, so behaviour is unchanged. The structure is what
+In P1B the app auto-creates one issue per finding, so behaviour is unchanged. The structure is what
 matters: the moment you want "three findings, one issue" or "still open from last period", it is
 there. `management_actions` becomes a child of an issue rather than of a finding.
 
@@ -901,7 +941,7 @@ keys off it.
 The intended long-term source of risks is an internal knowledge tool (Glean) reached over MCP,
 plus external regulation lookups, producing a ranked register scored on financial, reputational
 and other impact dimensions. That is **months away on governance grounds and must not be built
-now.** What P1 provides is the shape it will write into.
+now.** What P1B provides is the shape it will write into.
 
 **1. Provenance is already in the `risks` table above.** A risk without a citation is unusable in
 audit — an auditor must be able to click through to the source paragraph. `as_of_date` matters
@@ -919,7 +959,7 @@ risk_assessments: assessment_id | risk_id | dimension | score | rationale
 history for free — "medium last quarter, high now" — which is the entire point of *continuous*
 sensing, and cannot be reconstructed from a single current-value column.
 
-**3. A seventh adapter Protocol, defined in P1 and implemented never:**
+**3. A seventh adapter Protocol, defined in P1A and implemented never:**
 
 ```python
 class KnowledgeSourceAdapter(Protocol):
@@ -976,11 +1016,13 @@ stated as such rather than left implicit.
 **Consequences for the design, when that module is built:**
 
 1. **`RunState.run_kind`** — `fieldwork | sensing | assessment | planning`, with
-   `NODES_FOR[run_kind][phase]`. The loop in §2.2 stays generic. **Added in P1**, one field, because
+   `NODES_FOR[run_kind][phase]`. The loop in §2.2 stays generic. **Added in P1A**, one field, because
    retrofitting a second pipeline shape into a single hardcoded node list is exactly the kind of
    change this brief exists to avoid.
-2. **`runs.engagement_id` is nullable.** Sensing is corpus-scoped and continuous, not
-   engagement-scoped — it runs on a schedule and feeds many engagements. **Decided in P1.**
+2. **`runs.engagement_id` stays nullable in the schema** (as §4.8 now states). Sensing is
+   corpus-scoped and continuous, not engagement-scoped — it runs on a schedule and feeds many
+   engagements. Application validation enforces non-null for fieldwork/assessment/planning.
+   **Decided in P1A/P1B.**
 3. **A bounded agentic loop is permitted, in that package only** (NN1's stated exception). Hard
    ceiling on tool calls, every call logged, confined so nothing in the fieldwork pipeline can
    import it.
@@ -1157,8 +1199,9 @@ Each phase ends with **stop and report**. Do not auto-start the next.
 | Phase | Deliverable | Definition of done |
 |---|---|---|
 | **P0** | Foundation reset | Done — this file, `.claude/` config, `.env.example`, `.gitattributes`, dead code removed |
-| **P1** | `RunState` (incl. `run_kind`, nullable `engagement_id`) + Delta persistence + suite schema headroom | JSON round-trip test green; migrations create all tables **including `engagements`, `review_notes`, `risks`, `controls`, `risk_assessments` and `issues`, and the `engagement_id` / `rule_id` / `prior_finding_id` / `review_state` / `stage` columns per §4.8 and §4.9**; one default engagement seeded; `LocalPersistence` + `DeltaPersistence` both pass the same contract test; reaper test green |
-| **P2** | Primitives + T&E Skill | Surface 2 ≥0.98/≥0.95 per test on planted data; G8 green; **zero hardcoded result values** — every one becomes a real computation or an explicit `not_testable` with a reason (grep test); contract describes raw sources; every test in `plan.yaml` carries `control_id`, `risk_id` and `assertion`, and the T&E controls and risks are seeded from `test_catalogue.control_objective` (§4.9) |
+| **P1A** | **Immutable run ledger** — `RunState`, explicit state machine, persistence contract | JSON round-trip test green; `runs`, `run_state`, `node_attempts`, `trace_events` tables created; **run fingerprint** stored per run (source version/hash, Skill content hash, code revision, config hash, endpoint, served model version); `LocalPersistence` + `DeltaPersistence` both pass the same contract test; reaper marks orphaned runs `interrupted` (never deletes); state-machine transitions tested (including invalid transitions rejected); one trivial end-to-end run completes |
+| **P1B** | **Minimum product schema** — engagement scoping + suite tables | `engagements`, `findings`, `management_actions`, `skill_versions` tables created; `engagement_id` nullable in schema, application validation enforces non-null for fieldwork/assessment/planning; one default engagement seeded; **only add `risks`, `controls`, `risk_assessments`, `review_notes`, `issues` once their identifiers and lifecycle rules are agreed** — empty columns are cheap, wrong concepts are not |
+| **P2** | Primitives + T&E Skill | Surface 2 ≥0.98/≥0.95 per test on planted data; G8 green; **zero hardcoded result values** — every one becomes a real computation or an explicit `not_testable` with a reason (grep test); contract describes raw sources; **per-test specification written before porting** (population, grain, join key, exception identity, threshold, exclusions, expected evidence); where `computation.py` and the spec disagree, the spec wins; every test in `plan.yaml` carries `control_id`, `risk_id` and `assertion`, and the T&E controls and risks are seeded from `test_catalogue.control_objective` (§4.9) |
 | **P3** | Pipeline loop + nodes + ThreadExecutor | G6, G7, G9, G10 green; full run on fixtures → findings in Delta; `/trace` shows real events; MLflow per-node spans; exposure double-count fixed; **a run survives an App restart — reaper marks it `interrupted` and Resume completes it**; concurrency cap enforced with queued runs in Delta |
 | **P4** | App rewired to run-scoped data | Surface 1 vs hand-verified oracle; G13 green; no module-level globals; `/workspace/tne` functionally identical; all routes unchanged; PPTX overflow, zero-findings and private-API defects fixed (§4.7) |
 | **P5** | Unity Catalog + Volume upload + deploy | Governed tables discoverable and readable via the SQL warehouse; no-access catalogs surface as `Restricted`; a real file uploads to the Volume and profiles through `Uploaded → Profiling → Ready`; memory ceiling respected (aggregation pushed to SQL, loud failure never silent sampling); app deployed and deployment ID reported |
@@ -1221,7 +1264,7 @@ this list written for a Databricks Solutions Architect.
    the Delta-backed tests. GitHub Actions will not reach a corporate Databricks workspace. Either
    the gates run against `LocalPersistence` only in CI (and the Delta path is covered by a nightly
    job inside the workspace), or CI moves into Databricks. Decide in P9; design `PersistenceAdapter`
-   in P1 so the first option is possible.
+   in P1A so the first option is possible.
 4. **Delta time travel vs data deletion.** Executive expense data is personal information. Delta
    retains history, so a deleted row remains readable via time travel until `VACUUM`. A retention
    and vacuum policy must exist before real data lands. This is a platform-owner decision.
@@ -1277,7 +1320,8 @@ Query Delta tables directly from a notebook or SQL warehouse after the E2E run:
 - `runs` table: expected `run_id`, status, timestamps.
 - `findings` table: rows match what the UI showed.
 - `run_state` JSON: parseable, contains expected node outputs.
-- Reaper: insert a stale run older than TTL, trigger reaper, confirm deletion.
+- Reaper: insert a stale run left `running`, trigger reaper, confirm it is marked `interrupted`
+  (never deleted — audit run records are evidence).
 - Suite tables: `engagements`, `review_notes`, `risks`, `controls`, `risk_assessments`, `issues`
   all exist and seeded default engagement is present.
 
@@ -1299,6 +1343,47 @@ APP_URL=https://... pytest tests/e2e/ -v
 
 When porting to Optus, these same scripts run in a CI pipeline. Design `tests/e2e/` in P3 (when
 the pipeline loop exists), expand it each phase.
+
+---
+
+## 9C. Acknowledged risks and deferred items
+
+Items identified by independent review that are real concerns but are either governance decisions
+requiring a platform owner, or production-grade requirements that would delay the prototype
+without proving correctness. Each is noted with the phase or milestone where it becomes blocking.
+
+### Concurrency model limitation
+
+The `Semaphore(2)` concurrency cap (§2.3) protects only one Python process. It does not prevent
+duplicate execution across workers, overlapping deployments, or two containers. The Free Edition
+prototype is guaranteed single-process, so this is safe for now. **Before any multi-worker or
+production deployment, add: a persisted worker claim (`claimed_by`, `lease_expires_at`,
+`heartbeat_at`), optimistic concurrency on `run_state`, and cross-worker duplicate-execution
+tests.** Design the `node_attempts` table in P1A so the schema is ready.
+
+### Corporate-migration prerequisites
+
+These are not prototype deliverables. They are decisions or controls that must exist before
+real data enters the system.
+
+| Item | What it requires | When it blocks |
+|---|---|---|
+| Authorization model (preparer/reviewer/approver) | Governance decision: enforced in UC, the App, or both | Before P7 (HITL gates) |
+| Retention and legal hold | Separate retention for raw uploads, evidence, prompts, model responses, exports, Delta history | Before P5 (real data) |
+| PII and security threat model | Malicious uploads, prompt injection, PII leakage, stored XSS, path traversal, spreadsheet-formula injection, oversized files, export classification, log redaction | Core controls by P5; detailed model by P6 |
+| Free-to-Optus capability matrix | Checked matrix for both environments: Apps, Jobs, SQL warehouse, identity, service principals, model endpoints, regional processing, ai_query, AI Gateway, system tables, Volumes, secrets, network, deployment permissions | P1A (create the matrix); P5 (validate it) |
+| Schema migrations and rollback | Schema versioning, forward migration tests, backup/restore, rollback rehearsal | P1A foundation; P9 rehearsal |
+| Operational observability and alerting | Health, readiness, queue age, stuck leases, node failures, rate limits, quota exhaustion | P3 (baselines); corporate deployment (routing) |
+| Skill versioning and rollback | Immutable Skill content hash stored per run; publishing, superseding, rollback and compatibility rules | P1B / P2 |
+| Data quality framework | Uniqueness, referential integrity, allowed values, join cardinality, duplicate source rows, mixed currency, timezone, date coverage, schema drift | P2 DoD |
+| Performance budgets | UI acknowledgement latency, callback latency, run duration, memory ceiling, SQL volume, model-call budget | P1A (baselines); enforce from P3 |
+
+### Chain-of-thought storage
+
+Do not design around storing raw model reasoning traces (`reasoning_content`). Store structured
+rationale, citations and decision summaries. Raw traces are potentially sensitive, not exposed
+consistently by providers, and are not required for the audit trail. `llm_calls` logs the prompt
+and the response content; that is sufficient.
 
 ---
 
@@ -1378,8 +1463,9 @@ only needed if and when the risk-sensing module is built (§4.10).
 1. Run §11. Stop and report if anything fails.
 2. Read the files in §0, in full.
 3. Confirm you understand §0.2 — why the prototype is shaped the way it is, that `computation.py`
-   is the canonical engine that was never wired up, and which behaviours must not survive into the
-   build. State it back in your own words.
-4. Produce a **one-page plan for P1 only**: file list, `RunState` field-by-field justification,
-   Delta DDL outline, test approach, risks.
-5. Stop. Do not start P2 until P1 is reviewed.
+   is the best available behavioural reference (not an unquestionable oracle), its known semantic
+   defects, and which behaviours must not survive into the build. State it back in your own words.
+4. Produce a **one-page plan for P1A only** (the immutable run ledger): `RunState` field-by-field
+   justification, the run fingerprint, the explicit state machine, Delta DDL for `runs`,
+   `run_state`, `node_attempts`, `trace_events`, persistence contract, reaper, test approach, risks.
+5. Stop. Do not start P1B until P1A is reviewed.

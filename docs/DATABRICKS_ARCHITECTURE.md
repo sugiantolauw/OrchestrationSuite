@@ -148,7 +148,7 @@ provide a platform-enforced backstop.
 
 | Concern | Mechanism |
 |---|---|
-| What ran, when, on what data | `runs` + `run_state` Delta tables, one row per run, plus the Databricks job-run record |
+| What ran, when, on what data | `runs` + `run_state` Delta tables, one row per run; MLflow run per pipeline run with per-node spans; `system.access.audit` for independent platform-level records |
 | Which tests ran and why | Skill version pinned per run; `plan.yaml` + `findings.yaml` versioned in git |
 | Where every number came from | Every metric carries `{value, unit, source_file}`; population reconciliation (row count, sum, date range) asserted and persisted per run |
 | Whether the LLM invented anything | Every number in generated prose must map to a metric that finding cites, unit-aware, checked automatically; failures fall back to a deterministic template and are flagged |
@@ -179,8 +179,8 @@ provide a platform-enforced backstop.
 1. **Are Databricks Apps, a serverless SQL warehouse and pay-per-token Model Serving all
    enabled** in the target workspace, for this team? (Jobs is not required — see §2.)
 2. **Identity model for the App.** Should it run as a service principal, or on behalf of the
-   signed-in user? If on-behalf-of: how should user context propagate to a Job the App triggers,
-   given the executor runs on a background thread rather than in the request? This determines
+   signed-in user? If on-behalf-of: how should user context propagate to background executor
+   threads, given the executor runs on a thread pool rather than in the request? This determines
    whether Unity Catalog row filters and column masks on executive data are enforced per auditor
    or bypassed — it is our largest open governance question.
 3. **App sizing and limits.** What CPU/memory is available to an App container, what is the
