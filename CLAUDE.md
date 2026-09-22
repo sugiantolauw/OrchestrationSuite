@@ -1037,7 +1037,11 @@ require coverage in both directions.
 ### Tier B — before any migration to a corporate workspace
 
 - **Surface 1 parity against a hand-verified oracle** (~100 rows, metrics worked independently by a
-  human). **Not** parity against legacy `app.py` — that would enshrine the flag-counting in §0.2.
+  human). **Not** parity against `app.py`'s flag-counting (§0.2) — that measures the workaround.
+  There is also a second, narrower parity target worth having during the P2 port: the primitives
+  must reproduce `computation.py`'s output on the same inputs, since `computation.py` is the
+  canonical engine being ported. That one is a refactor regression test; the oracle is the
+  correctness test. Keep both, and do not confuse them.
 - **G9 cross-process determinism** — same config + same data snapshot, two separate processes,
   byte-identical non-narrative output. Catches `abs(hash(x))` (`app.py:269`, PYTHONHASHSEED),
   dict ordering, float summation order.
@@ -1154,7 +1158,7 @@ Each phase ends with **stop and report**. Do not auto-start the next.
 |---|---|---|
 | **P0** | Foundation reset | Done — this file, `.claude/` config, `.env.example`, `.gitattributes`, dead code removed |
 | **P1** | `RunState` (incl. `run_kind`, nullable `engagement_id`) + Delta persistence + suite schema headroom | JSON round-trip test green; migrations create all tables **including `engagements`, `review_notes`, `risks`, `controls`, `risk_assessments` and `issues`, and the `engagement_id` / `rule_id` / `prior_finding_id` / `review_state` / `stage` columns per §4.8 and §4.9**; one default engagement seeded; `LocalPersistence` + `DeltaPersistence` both pass the same contract test; reaper test green |
-| **P2** | Primitives + T&E Skill | Surface 2 ≥0.98/≥0.95 per test on planted data; G8 green; **zero memorised constants** (grep test); contract describes raw sources; every test in `plan.yaml` carries `control_id`, `risk_id` and `assertion`, and the T&E controls and risks are seeded from `test_catalogue.control_objective` (§4.9) |
+| **P2** | Primitives + T&E Skill | Surface 2 ≥0.98/≥0.95 per test on planted data; G8 green; **zero hardcoded result values** — every one becomes a real computation or an explicit `not_testable` with a reason (grep test); contract describes raw sources; every test in `plan.yaml` carries `control_id`, `risk_id` and `assertion`, and the T&E controls and risks are seeded from `test_catalogue.control_objective` (§4.9) |
 | **P3** | Pipeline loop + nodes + ThreadExecutor | G6, G7, G9, G10 green; full run on fixtures → findings in Delta; `/trace` shows real events; MLflow per-node spans; exposure double-count fixed; **a run survives an App restart — reaper marks it `interrupted` and Resume completes it**; concurrency cap enforced with queued runs in Delta |
 | **P4** | App rewired to run-scoped data | Surface 1 vs hand-verified oracle; G13 green; no module-level globals; `/workspace/tne` functionally identical; all routes unchanged; PPTX overflow, zero-findings and private-API defects fixed (§4.7) |
 | **P5** | Unity Catalog + Volume upload + deploy | Governed tables discoverable and readable via the SQL warehouse; no-access catalogs surface as `Restricted`; a real file uploads to the Volume and profiles through `Uploaded → Profiling → Ready`; memory ceiling respected (aggregation pushed to SQL, loud failure never silent sampling); app deployed and deployment ID reported |
@@ -1185,9 +1189,11 @@ explicitly in a sidecar, never inferred from generator logic.
 The generator satisfies `contract.yaml`; the contract does not describe the generator. Later,
 governed views satisfy the same contract with no orchestration change.
 
-**`build_demo_data` (`app.py:229–287`) is deleted in P3.** Random `RF_*` flags are noise, not
-synthetic data. Demo mode becomes "a completed run over a realistic dataset, persisted in Delta
-like any other run, clearly labelled".
+**`build_demo_data` (`app.py:229–287`) is deleted in P3.** It was the right call for a prototype
+with no data — a deterministic seeded population that makes the UI demonstrable — but its `RF_*`
+flags are random, so no finding derived from it means anything and it must not be mistaken for
+synthetic audit data. Demo mode becomes "a completed run over a realistic dataset, persisted in
+Delta like any other run, clearly labelled".
 
 ---
 

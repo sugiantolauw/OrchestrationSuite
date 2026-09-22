@@ -17,13 +17,14 @@ Two properties drive the design:
 ## Status
 
 **Pre-build.** `reference_app/` is a working Dash prototype with a complete UI, a 14-test T&E
-control catalogue, and Excel/PowerPoint exporters — but no backend: it computes its metrics from
-flag columns produced by an upstream notebook that is not in this repository, and it has never
-called a model at runtime. The build replaces that with a real governed execution engine while
-keeping the UI.
+control catalogue in `src/computation.py`, and Excel/PowerPoint exporters. It was built under three
+constraints — no model serving, no dependable access to the raw source files, and no backend — so
+the detection engine was never wired into the app, the app counts pre-existing flag columns
+instead, and no model has ever been called at runtime. The build wires the real engine up, puts a
+governed execution layer underneath it, and keeps the UI.
 
-`CLAUDE.md` §0 documents exactly what works and what does not. Read it before trusting anything
-in `reference_app/`.
+`CLAUDE.md` §0.2 explains what is wired, what is not, and why. Read it as context before changing
+anything in `reference_app/`.
 
 ## Start here
 

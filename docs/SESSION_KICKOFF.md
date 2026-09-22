@@ -51,7 +51,11 @@ subagent, and build P1. Do not start P2.
 Constraints that override any instinct to be helpful:
   - Do not introduce LangGraph or any orchestration framework.
   - Do not preserve the silent-default behaviour in app.py's _standardise_* or _find_col.
-  - Do not port any memorised constant from computation.py.
+  - computation.py is the canonical detection engine. Restore it; do not rewrite it, and do
+    not treat app.py's flag-counting as a second valid implementation to choose between.
+  - Do not port any hardcoded result value from computation.py (the 132, the 0, the 2,
+    the 152,921, the 500 fallback). Each becomes a real computation or an explicit
+    not_testable with a reason string.
   - Do not push to any remote unless I ask.
 ```
 
