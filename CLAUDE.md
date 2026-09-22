@@ -78,7 +78,7 @@ disagree, the spec wins.
 earlier run of the detection logic elsewhere, not from this process. Where the two approaches
 overlap they differ, and `computation.py` is the one to follow:
 
-| Test | `computation.py` (canonical) | `app.py` (workaround) |
+| Test | `computation.py` (behavioural reference) | `app.py` (workaround) |
 |---|---|---|
 | T6.1d daily spend | Per-diem-rate driven (`:568`) | Hardcoded `$1,000` (`:415`) |
 | T3.3a late booking | `Advance Purchase Days` (`:147`) | `RF_CS_LateBooking` flag (`:388`) |
@@ -484,7 +484,10 @@ Change none of these without stopping and proposing to the user first.
    audit result. A reproducible run requires matching the full fingerprint: source table version
    or uploaded-file SHA-256, Skill content hash (not just a version label), code revision,
    dependency lock hash, runtime configuration hash, endpoint, served model version, and prompt
-   template version. **The run fingerprint is stored per run in P1A and verified at resume.**
+   template version. **The run fingerprint is stored in `run_fingerprints` (P1A) and verified at
+   resume.** Per-LLM-call provenance (actual served model version, token counts) is captured in
+   `llm_calls` (P6) — the fingerprint answers "was the setup identical?", `llm_calls` answers
+   "did each model call behave identically?".
 9. **Model routing is config-driven.** Two endpoints (§6). No model names in node code.
 10. **Every metric carries source provenance** — `{value, unit, source_ref}` where `source_ref`
     identifies the source table version or uploaded-file SHA-256, the source columns, and the
@@ -533,6 +536,20 @@ class RunState:
     materiality: float | None
     options: dict
 
+    # identity and provenance
+    run_owner: str                       # user identity captured at run creation (§9A Q1)
+    fingerprint_id: str                  # FK → run_fingerprints table (run-level provenance)
+    state_version: int                   # optimistic concurrency — incremented on every transition, CAS enforced
+
+    # timestamps
+    created_at: str                      # ISO 8601 UTC — when start_audit_run was called
+    started_at: str | None               # when status first moved to "running"
+    completed_at: str | None             # when status moved to a terminal state
+    last_state_change_at: str            # updated on every status or phase transition
+
+    # node tracking
+    current_node_attempt_id: str | None  # FK → node_attempts; the node currently executing or last completed
+
     data_assets: list[dict]              # UC refs
     uploaded_files: list[dict]           # Volume refs
     profile_result: dict | None
@@ -549,6 +566,7 @@ class RunState:
     management_actions: list[dict]
     exports: dict
     signoff: dict | None                 # approver, timestamp
+    status_reason: str | None            # why the run is in its current status (error message, interruption reason, etc.)
 
     # LLM narration — never contains raw numbers the model invented
     profile_narrative: str | None
@@ -565,6 +583,28 @@ class RunState:
     status: Literal["queued","running","awaiting_confirmation",
                     "awaiting_signoff","completed","failed","interrupted"]
 ```
+
+#### Run fingerprints (P1A)
+
+The `run_fingerprints` table stores the immutable provenance snapshot captured at run start.
+`RunState.fingerprint_id` is a FK to this table. The fingerprint is computed once at
+`start_audit_run` and never updated.
+
+| Field | What it captures |
+|---|---|
+| `fingerprint_id` | PK — deterministic hash of the remaining fields |
+| `source_table_versions` | `{table_fqn: version}` from `DESCRIBE HISTORY` |
+| `uploaded_file_hashes` | `{volume_path: sha256}` |
+| `skill_content_hash` | SHA-256 over the Skill's manifest + contract + plan + thresholds + findings + prompts |
+| `code_revision` | Git commit hash of the deployed application code |
+| `dependency_lock_hash` | SHA-256 of `requirements.txt` or lockfile |
+| `runtime_config_hash` | SHA-256 of the effective runtime configuration (excluding secrets) |
+| `endpoint_config` | `{task: endpoint_name}` — which endpoints were configured |
+| `prompt_template_version` | Version or hash of the prompt templates in use |
+
+Per-LLM-call provenance (actual served model version, token counts, latency) is captured in
+`llm_calls` (P6), not here. The fingerprint answers "was the setup identical?"; `llm_calls`
+answers "did the model behave identically?".
 
 ### 4.2 Nodes
 
@@ -1080,10 +1120,14 @@ require coverage in both directions.
 
 - **Surface 1 parity against a hand-verified oracle** (~100 rows, metrics worked independently by a
   human). **Not** parity against `app.py`'s flag-counting (§0.2) — that measures the workaround.
-  There is also a second, narrower parity target worth having during the P2 port: the primitives
-  must reproduce `computation.py`'s output on the same inputs, since `computation.py` is the
-  canonical engine being ported. That one is a refactor regression test; the oracle is the
-  correctness test. Keep both, and do not confuse them.
+  Surface 1 is the **correctness gate** — it proves the engine produces the right answers.
+  There is also a second, narrower comparison worth having during the P2 port: a **historical
+  regression comparison** against `computation.py` on the same inputs. This is not a correctness
+  test — `computation.py` has documented semantic defects (§0.2) — it is a regression test that
+  ensures every difference between the new engine and the old one is **explained** by a known
+  defect or a deliberate correction. The gate is "no unexplained divergence", not "matches
+  `computation.py`". Keep both, and do not confuse them: Surface 1 (oracle) proves correctness;
+  the `computation.py` comparison proves the port was intentional.
 - **G9 cross-process determinism** — same config + same data snapshot, two separate processes,
   byte-identical non-narrative output. Catches `abs(hash(x))` (`app.py:269`, PYTHONHASHSEED),
   dict ordering, float summation order.
@@ -1199,8 +1243,8 @@ Each phase ends with **stop and report**. Do not auto-start the next.
 | Phase | Deliverable | Definition of done |
 |---|---|---|
 | **P0** | Foundation reset | Done — this file, `.claude/` config, `.env.example`, `.gitattributes`, dead code removed |
-| **P1A** | **Immutable run ledger** — `RunState`, explicit state machine, persistence contract | JSON round-trip test green; `runs`, `run_state`, `node_attempts`, `trace_events` tables created; **run fingerprint** stored per run (source version/hash, Skill content hash, code revision, config hash, endpoint, served model version); `LocalPersistence` + `DeltaPersistence` both pass the same contract test; reaper marks orphaned runs `interrupted` (never deletes); state-machine transitions tested (including invalid transitions rejected); one trivial end-to-end run completes |
-| **P1B** | **Minimum product schema** — engagement scoping + suite tables | `engagements`, `findings`, `management_actions`, `skill_versions` tables created; `engagement_id` nullable in schema, application validation enforces non-null for fieldwork/assessment/planning; one default engagement seeded; **only add `risks`, `controls`, `risk_assessments`, `review_notes`, `issues` once their identifiers and lifecycle rules are agreed** — empty columns are cheap, wrong concepts are not |
+| **P1A** | **Immutable run ledger** — `RunState`, explicit state machine, persistence contract | JSON round-trip test green; `runs`, `run_state`, `run_fingerprints`, `node_attempts`, `trace_events` tables created; **run fingerprint** stored per run in `run_fingerprints` (source version/hash, Skill content hash, code revision, dependency lock hash, runtime config hash, endpoint config, prompt template version); **optimistic concurrency**: `state_version` on every transition with CAS enforcement (zero-rows-affected = rejected), deterministic node execution keys, idempotent MERGE into `node_attempts`, failure-injection test proving CAS + idempotent MERGE work together; `LocalPersistence` + `DeltaPersistence` both pass the same contract test; reaper marks orphaned runs `interrupted` (never deletes); state-machine transitions tested (including invalid transitions rejected); one trivial end-to-end run completes |
+| **P1B** | **Minimum product schema** — engagement scoping + all suite table DDL | DDL created for **all** suite tables: `engagements`, `findings`, `management_actions`, `skill_versions`, `risks`, `controls`, `risk_assessments`, `review_notes`, `issues`; `engagement_id` nullable in schema, application validation enforces non-null for fieldwork/assessment/planning; one default engagement seeded; `risks` and `controls` tables exist with agreed identifiers — P2 seeds T&E risks/controls from `test_catalogue.control_objective` and references them via `risk_id`/`control_id` in `plan.yaml`; tables that P1B cannot yet populate are empty but schema-tested |
 | **P2** | Primitives + T&E Skill | Surface 2 ≥0.98/≥0.95 per test on planted data; G8 green; **zero hardcoded result values** — every one becomes a real computation or an explicit `not_testable` with a reason (grep test); contract describes raw sources; **per-test specification written before porting** (population, grain, join key, exception identity, threshold, exclusions, expected evidence); where `computation.py` and the spec disagree, the spec wins; every test in `plan.yaml` carries `control_id`, `risk_id` and `assertion`, and the T&E controls and risks are seeded from `test_catalogue.control_objective` (§4.9) |
 | **P3** | Pipeline loop + nodes + ThreadExecutor | G6, G7, G9, G10 green; full run on fixtures → findings in Delta; `/trace` shows real events; MLflow per-node spans; exposure double-count fixed; **a run survives an App restart — reaper marks it `interrupted` and Resume completes it**; concurrency cap enforced with queued runs in Delta |
 | **P4** | App rewired to run-scoped data | Surface 1 vs hand-verified oracle; G13 green; no module-level globals; `/workspace/tne` functionally identical; all routes unchanged; PPTX overflow, zero-findings and private-API defects fixed (§4.7) |
@@ -1209,6 +1253,30 @@ Each phase ends with **stop and report**. Do not auto-start the next.
 | **P7** | HITL gates | Paused run resumes across browser refresh **and** App restart; export blocked until sign-off; both events in `trace_events` |
 | **P8** | GST Skill + Explorer | GST end-to-end on synthetic data via primitives (no bespoke test functions); Explorer proposes → validates → confirms → runs → saves draft Skill; planner cannot emit code (schema test) |
 | **P9** | Eval harness + hardening | Tier A in CI; nightly green 3 consecutive nights; judge κ recorded; migration checklist written |
+
+### Table-to-phase ownership
+
+DDL is created by the phase that owns the table's schema. Data is first written by the phase shown.
+Later phases may add columns (via migration) but the owning phase defines the initial schema.
+
+| Table | DDL (schema owner) | First populated | Notes |
+|---|---|---|---|
+| `runs` | P1A | P1A | Run metadata — one row per run |
+| `run_state` | P1A | P1A | Serialised `RunState` JSON |
+| `run_fingerprints` | P1A | P1A | Immutable provenance snapshot per run |
+| `node_attempts` | P1A | P1A | Per-node execution tracking with outcomes |
+| `trace_events` | P1A | P1A | Execution timeline events |
+| `engagements` | P1B | P1B | Engagement scoping; one default seeded |
+| `findings` | P1B | P2 | Empty until primitives produce findings |
+| `management_actions` | P1B | P3 | Empty until pipeline `act` node runs |
+| `skill_versions` | P1B | P2 | Immutable Skill content snapshots |
+| `risks` | P1B | P2 | T&E risks seeded from `test_catalogue`; empty schema in P1B |
+| `controls` | P1B | P2 | T&E controls seeded from `test_catalogue`; empty schema in P1B |
+| `risk_assessments` | P1B | P4 | Empty until risk-sensing or manual entry |
+| `review_notes` | P1B | P7 | Empty until HITL gates write sign-off notes |
+| `issues` | P1B | P3 | Empty until pipeline maps findings to issues |
+| `llm_calls` | P6 | P6 | Per-LLM-call provenance including served model version |
+| `narrative_edits` | P7 | P7 | Edit audit trail for human narrative changes |
 
 Jira submission is **not** built. `create_jira_preview` returns a stub labelled
 "Preview — not submitted".
@@ -1352,14 +1420,32 @@ Items identified by independent review that are real concerns but are either gov
 requiring a platform owner, or production-grade requirements that would delay the prototype
 without proving correctness. Each is noted with the phase or milestone where it becomes blocking.
 
-### Concurrency model limitation
+### Concurrency model
 
 The `Semaphore(2)` concurrency cap (§2.3) protects only one Python process. It does not prevent
 duplicate execution across workers, overlapping deployments, or two containers. The Free Edition
-prototype is guaranteed single-process, so this is safe for now. **Before any multi-worker or
-production deployment, add: a persisted worker claim (`claimed_by`, `lease_expires_at`,
-`heartbeat_at`), optimistic concurrency on `run_state`, and cross-worker duplicate-execution
-tests.** Design the `node_attempts` table in P1A so the schema is ready.
+prototype is guaranteed single-process, so the semaphore is safe for now — but the persistence
+layer must be correct from P1A, because retrofitting concurrency controls onto an existing schema
+is expensive and error-prone.
+
+**P1A delivers** (foundational, not deferred):
+- `run_state.state_version` — integer, incremented on every state transition.
+- **Compare-and-swap on every transition.** `UPDATE run_state SET ... WHERE run_id = ? AND
+  state_version = ?` — if zero rows affected, the transition is rejected (stale state). No
+  transition is valid without matching the current version.
+- **Deterministic node execution keys.** Each node attempt gets a key derived from
+  `(run_id, node_name, attempt_number)`. Idempotent `MERGE` into `node_attempts` keyed on this —
+  a resumed run that replays a completed node is a no-op, not a duplicate insert.
+- **`node_attempts` table** with: `attempt_id`, `run_id`, `node_name`, `attempt_number`,
+  `execution_key` (the deterministic key), `started_at`, `completed_at`, `outcome`
+  (`succeeded | failed | interrupted`), `error_detail`, `state_version_before`, `state_version_after`.
+- **Failure-injection test:** a test that simulates a crash between node completion and state
+  persistence, then resumes — proving the CAS and idempotent MERGE work together.
+
+**Deferred to P3** (production-grade, requires multi-worker):
+- Persisted worker claim (`claimed_by`, `lease_expires_at`, `heartbeat_at`) with renewable leases.
+- Cross-worker duplicate-execution tests.
+- Lease timeout and automatic re-acquisition.
 
 ### Corporate-migration prerequisites
 
@@ -1425,6 +1511,8 @@ Sonnet kickoff is sufficient for P3, P4, P5, P7, P9.
 
 Run this first, on Sonnet, before any design work. Record the results in §6 of this file.
 
+### Platform existence check (run once, all phases)
+
 ```python
 from databricks.sdk import WorkspaceClient
 w = WorkspaceClient()
@@ -1434,16 +1522,27 @@ print([c.name for c in w.catalogs.list()])              # Unity Catalog access
 print([wh.name for wh in w.warehouses.list()])          # SQL warehouse
 ```
 
-Then confirm, in the workspace UI, that these exist: **Databricks Apps**, a **serverless SQL
-warehouse**, and **pay-per-token model serving**. The architecture assumes all three. If any is
-missing, **stop and report** — it changes the plan, not the code.
+Confirm in the workspace UI that these exist: **Databricks Apps**, a **serverless SQL warehouse**,
+and **pay-per-token model serving**. Record the results. Jobs is not required — compute runs
+inside the App (§2.1). Jobs is only needed if the risk-sensing module is built (§4.10).
 
-Then one chat completion against each endpoint, recording which parameters pass through
+### Phase gates (block only when the current phase needs the feature)
+
+| Feature | Blocks if absent | Rationale |
+|---|---|---|
+| **Databricks Apps** | All phases | The entire application runs here |
+| **Serverless SQL warehouse** | All phases | Every Delta read/write goes through it |
+| **Unity Catalog** | All phases | System of record for runs and evidence |
+| **Pay-per-token Model Serving** | **P6** (LLM layer) | P1A–P5 have no LLM calls; P6 is where `find`, `classify`, `export` first call an endpoint. If Model Serving is absent at P1A, note it and continue — it must be available before P6 starts |
+
+If a feature marked "All phases" is missing, **stop and report** — it changes the plan, not the
+code. If Model Serving is missing and the current phase is before P6, note it as a risk and
+continue building.
+
+### Endpoint parameter check (run once, before P6)
+
+One chat completion against each endpoint, recording which parameters pass through
 (`response_format`, `temperature`, `max_tokens`, reasoning-effort controls) into §6.
-
-Note the platform check no longer includes Jobs: compute runs inside the App (§2.1). Confirm
-**Databricks Apps**, a **serverless SQL warehouse**, and **pay-per-token model serving**. Jobs is
-only needed if and when the risk-sensing module is built (§4.10).
 
 ### Known environment issues
 
@@ -1466,6 +1565,8 @@ only needed if and when the risk-sensing module is built (§4.10).
    is the best available behavioural reference (not an unquestionable oracle), its known semantic
    defects, and which behaviours must not survive into the build. State it back in your own words.
 4. Produce a **one-page plan for P1A only** (the immutable run ledger): `RunState` field-by-field
-   justification, the run fingerprint, the explicit state machine, Delta DDL for `runs`,
-   `run_state`, `node_attempts`, `trace_events`, persistence contract, reaper, test approach, risks.
+   justification, the run fingerprint (`run_fingerprints` table), the explicit state machine with
+   optimistic concurrency (CAS on `state_version`), Delta DDL for `runs`, `run_state`,
+   `run_fingerprints`, `node_attempts`, `trace_events`, persistence contract, reaper, test
+   approach (including failure-injection test for CAS + idempotent MERGE), risks.
 5. Stop. Do not start P1B until P1A is reviewed.

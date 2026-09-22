@@ -38,14 +38,19 @@ not as a list of mistakes.
 
 STEP 3 — Produce a one-page plan for P1A ONLY (the immutable run ledger):
   - RunState: every field, with a one-line justification each, and why it is JSON-safe
-  - The run fingerprint: what it contains (source version/hash, Skill content hash, code
-    revision, config hash, endpoint, served model version) and where it is stored
+  - The run fingerprint: run_fingerprints table with source version/hash, Skill content hash,
+    code revision, dependency lock hash, runtime config hash, endpoint config, prompt template
+    version. Per-LLM-call provenance (served model version, tokens) deferred to llm_calls (P6).
+  - Optimistic concurrency: state_version on every transition, CAS enforcement
+    (zero-rows-affected = rejected), deterministic node execution keys, idempotent MERGE into
+    node_attempts
   - Explicit run-status state machine: all valid states and transitions, including
     invalid-transition rejection
-  - Delta DDL outline for runs, run_state, node_attempts, trace_events
+  - Delta DDL outline for runs, run_state, run_fingerprints, node_attempts, trace_events
   - PersistenceAdapter contract, and how LocalPersistence and DeltaPersistence both satisfy it
   - The reaper: marks `interrupted`, never deletes (audit runs are evidence)
-  - Test approach, including the JSON round-trip test and one trivial end-to-end run
+  - Test approach, including the JSON round-trip test, failure-injection test (CAS + idempotent
+    MERGE), and one trivial end-to-end run
   - Risks and open questions
 
 P1B (engagement scoping + suite tables) is a separate plan after P1A passes.

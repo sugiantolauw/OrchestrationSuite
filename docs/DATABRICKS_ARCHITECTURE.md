@@ -75,10 +75,13 @@ warehouse rather than loading whole populations into pandas, and a node that can
 population fails loudly rather than silently sampling.
 
 **Independent run evidence.** A Databricks job run would have produced a platform-written record of
-each execution. Without Jobs, two records the application does not author serve that purpose: an
-**MLflow run per pipeline run** with per-node spans, and **`system.access.audit`**, which
-independently logs every SQL statement the App issued. Both are cited in the application's
-methodology panel.
+each execution. Without Jobs, two records the application does not author serve that purpose:
+**`system.access.audit`**, which independently logs every SQL statement the App issued, and
+**MLflow experiment tracing** with per-node spans that provide timing and execution-flow
+observability. Note that MLflow provides execution observability (when nodes ran, how long they
+took), not the evidence chain — the audit trail linking findings to metrics to source rows lives in
+the application's own Delta tables (`runs`, `run_state`, `findings`, `run_fingerprints`). Both
+independent records are cited in the application's methodology panel.
 
 **No orchestration framework.** No LangGraph, Airflow, Prefect or Dagster. Delta is the state
 store, MLflow the tracer, and the pipeline is a plain Python loop over nine linear nodes. One
@@ -99,7 +102,7 @@ document corpus and would run outside the App.
 | 8 | **`ai_query()`** from SQL | Batch row-level classification (the one workload that scales with row count) | Medium | Falls back to a Python loop of HTTP calls — slower, more expensive, and rows leave Delta. Strongly preferred. |
 | 9 | **MLflow experiment + tracing** | Per-run and per-node spans; evaluation harness | Medium | Trace events still land in Delta; loses the MLflow UI and the eval integration. |
 | 10 | **System tables** — `system.billing.usage`, `system.access.audit` | Cost measurement; independent access audit | Low (build) / High (assurance) | — |
-| 11 | **Databricks secret scopes** | Job-side credentials | Medium | — |
+| 11 | **Databricks secret scopes** | App service-principal credentials and endpoint configuration | Medium | — |
 
 **Explicitly NOT used:** MCP servers (prohibited in the target environment), classic clusters,
 Delta Live Tables, Databricks SQL dashboards, Genie, Lakebase, Model Serving custom models,
@@ -115,7 +118,8 @@ variables (no model name appears in source):
 | Finding narratives, executive summary, profile, remediation drafts, Explorer planning | Claude Sonnet class | ~40 short calls |
 | Row-level expense classification (via `ai_query`), chart captions, schema-repair, grounding judge | GPT-OSS 120B class | 1 batch statement + ~8 short calls |
 
-Reasoning traces returned by any endpoint are logged but never displayed.
+Raw reasoning traces (`reasoning_content`) are neither stored nor displayed. `llm_calls` logs
+prompts and structured response content; structured rationale and citations are stored instead.
 
 ### 3.2 Dependencies
 
@@ -134,7 +138,7 @@ dependency needing compilation is vendored as a pre-built `manylinux2014_x86_64`
 4. Model-serving calls send **computed aggregates and metric values** — not raw rows — for
    narrative generation. The one exception is row-level classification, which runs via `ai_query`
    so rows are processed inside the platform.
-5. Findings, actions, events and model calls are written to Delta, partitioned by `run_id`.
+5. Findings, actions, events and model calls are written to Delta, keyed by `run_id`.
 6. Exports (PPTX/XLSX) are written to a UC Volume and downloaded by the auditor.
 
 **Personal information.** Expense data names individuals, including executives. The Skill's data
@@ -150,7 +154,7 @@ provide a platform-enforced backstop.
 |---|---|
 | What ran, when, on what data | `runs` + `run_state` Delta tables, one row per run; MLflow run per pipeline run with per-node spans; `system.access.audit` for independent platform-level records |
 | Which tests ran and why | Skill version pinned per run; `plan.yaml` + `findings.yaml` versioned in git |
-| Where every number came from | Every metric carries `{value, unit, source_file}`; population reconciliation (row count, sum, date range) asserted and persisted per run |
+| Where every number came from | Every metric carries `{value, unit, source_ref}` where `source_ref` identifies the source table version or uploaded-file hash, source columns, and aggregation grain; population reconciliation (row count, sum, date range) asserted and persisted per run |
 | Whether the LLM invented anything | Every number in generated prose must map to a metric that finding cites, unit-aware, checked automatically; failures fall back to a deterministic template and are flagged |
 | Every model call | `llm_calls` (application-written, synchronous) **and** AI Gateway inference tables (platform-written) |
 | Human edits to narrative | `narrative_edits` — who, when, before/after diff |
@@ -198,7 +202,7 @@ provide a platform-enforced backstop.
    owns them? Are PII guardrails available and recommended?
 7. **Rate limits / quotas** on the serving endpoints, and the expected behaviour of `ai_query`
    under throttling.
-8. **Secret scope** for job-side credentials.
+8. **Secret scope** for App service-principal credentials and endpoint configuration.
 9. **Egress classification** for generated PPTX/XLSX containing individuals' names and spend.
 10. **CI:** Tier-A regression gates need to run against a workspace. Is there an approved pattern
     for CI inside Databricks, or should the Delta-backed tests run as a nightly job while
