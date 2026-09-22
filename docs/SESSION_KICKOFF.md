@@ -27,10 +27,12 @@ STOP AND REPORT before designing anything.
 STEP 2 — Read the code. In full, not skimmed:
   reference_app/app.py, src/computation.py, src/test_catalogue.py,
   src/platform/adapters.py, src/platform/pages.py
-Then state back in your own words: (a) why the app's metrics are not actually computed by
-this repository, (b) which modules are orphaned, (c) which values in computation.py are
-memorised prior results rather than computation. If you cannot explain all three, re-read
-CLAUDE.md §0.2 before continuing.
+Then state back in your own words: (a) why computation.py -- the canonical detection
+engine -- was never wired into app.py, (b) what app.py does instead and why that cannot
+continue, (c) which behaviours in the prototype were correct for a demo but must not survive
+into a governed audit run. If you cannot explain all three, re-read CLAUDE.md §0.2 before
+continuing. The prototype was built under real constraints; read that section as context,
+not as a list of mistakes.
 
 STEP 3 — Produce a one-page plan for P1 ONLY:
   - RunState: every field, with a one-line justification each, and why it is JSON-safe

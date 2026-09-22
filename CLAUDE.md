@@ -31,54 +31,99 @@ Read these before writing code:
 - A test catalogue with 14 T&E control tests.
 - `src/computation.py` — genuine detection logic (groupby duplicates, split claims, per-diem).
 
-### 0.2 What does NOT work — read this twice
+### 0.2 Why the prototype looks like this, and what is not wired up
 
-**The app does not compute most of its audit tests. It counts flags it did not produce.**
+**Read this as context, not as an audit of careless work.** The prototype was built by an agentic
+coding tool under three hard constraints, and it succeeded at what it was actually for:
+demonstrating the UI, the audit approach and the export pipeline to stakeholders. The constraints
+were:
 
-`app.py:compute_evidence_payload` (line 315) derives most metrics by summing pre-existing
-`RF_*` columns — `flag_count("RF_CS_SplitClaims_SameDay")` and similar (lines 324–362).
-The detection logic that produced those columns lived in an upstream notebook that is **not
-in this repository**. In demo mode the flags are random: `rng.random(n) < p` (lines 243–261).
+1. **No Databricks Model Serving.** Every LLM-shaped decision had to be made at authoring time and
+   written into code.
+2. **No reliable access to the raw source files.** The eight files in `FILE_REGISTRY` were not
+   dependably available, so the app was built to work from whatever data it could obtain.
+3. **No backend at all.** No job runner, no state store, no persistence — everything computed at
+   import and held in module globals.
 
-**`src/computation.py` is never imported by `app.py`.** Check the import block at lines 24–49.
-Neither are `narrative.py` or `guardrail.py`. All three are orphans.
+Almost everything in this section follows from those three. The code is not wrong for a prototype;
+it is wrong for a governed audit platform, which is what the build turns it into.
 
-**The two implementations disagree** where they overlap:
-- T6.1d daily spend: per-diem-rate-driven in `computation.py:568`; hardcoded `$1,000` in `app.py:415`.
-- T3.3a late booking: `Advance Purchase Days` in `computation.py:147`; `RF_CS_LateBooking` flag in `app.py:388`.
+#### What is not wired up
 
-**`computation.py` contains memorised results from a prior audit, presented as computation:**
-- `compute_test_4_3_cached()` returns `flagged: 132` (line 288)
-- `compute_test_6_1c()` returns `exceptions: 0`, "Based on audit findings" (line 529)
-- `intl_exceptions: 2, # From audit findings` (line 590)
-- `total_records: 152_921`, `total_files: 8` (lines 641–642)
-- `aus_rate = 500  # Fallback reasonable ATO rate` (line 576)
+**`src/computation.py` is the intended detection engine, and `app.py` does not import it.**
+Check `app.py:24–49`. This is a consequence of constraint 2, not an oversight: `computation.py`
+consumes eight raw source files — `expense_report`, `booking_detail`, `travel_request_segment`,
+`travel_requests_no_expense`, `missing_receipt`, `attendee_validity`, `approval_aging`,
+`per_diem_rates` — and when those were not reachable, the app had to be built against pre-flagged
+data instead. **`computation.py` is canonical. P2 restores it as the engine.**
 
-**`app.py` silently fabricates data when columns are missing.** `_standardise_combined`,
-`_standardise_pre`, `_standardise_approval` (lines 107–226) insert `"Unknown"`, `0`, and
-`2025-01-01` so the UI never breaks. `_find_col` (lines 65–77) matches any column whose name
-*contains* a candidate substring — so `"amount"` can match the wrong column. In an audit tool,
-a silent default is a fabricated record.
+**`app.py` therefore counts flags rather than computing tests.** `compute_evidence_payload`
+(`app.py:315`) derives most metrics by summing pre-existing `RF_*` columns —
+`flag_count("RF_CS_SplitClaims_SameDay")` and similar (lines 324–362). Those columns came from an
+earlier run of the detection logic elsewhere, not from this process. Where the two approaches
+overlap they differ, and `computation.py` is the one to follow:
 
-**Genuine bug:** `computation.py:390` — `same_day_splits if 'same_day_splits' in dir() else ...`
-works by accident. Fix it when you port.
+| Test | `computation.py` (canonical) | `app.py` (workaround) |
+|---|---|---|
+| T6.1d daily spend | Per-diem-rate driven (`:568`) | Hardcoded `$1,000` (`:415`) |
+| T3.3a late booking | `Advance Purchase Days` (`:147`) | `RF_CS_LateBooking` flag (`:388`) |
 
-**Hardcoded values that violate the portability contract (§3.16).** `app.yaml` was fixed in P0;
-these remain and are yours to remove in the phase that touches each file:
+**`src/narrative.py` and `src/guardrail.py` are also unwired, for constraint 1.** `narrative.py` is
+the *intended* LLM layer, never called because there was no endpoint — not a failed design. Its
+T&E test-ID framework (`:46–60`) and tone instructions are the closest thing to a specification for
+the real prompts in P6. Do not import it; do use it as reference. `guardrail.py`'s numeric check is
+a reasonable first pass whose approach does not hold up (§5, G11), and P6 rewrites it.
+
+`src/eval_gate.py` was deleted in P0: it was a stub whose docstring described a pipeline that never
+existed.
+
+#### What must not survive into the build
+
+These are sound prototype choices and unsound production ones. The difference is that a demo must
+never crash, whereas a governed audit run must **fail loudly rather than proceed on a guess**.
+
+**Placeholder values for absent columns.** `_standardise_combined`, `_standardise_pre` and
+`_standardise_approval` (`app.py:107–226`) insert `"Unknown"`, `0` and `2025-01-01` when a column
+is missing, so the UI always renders. Defensive coding for a demo; a silent wrong answer on real
+data. If `Transaction Date` is absent, every row becomes 2025-01-01, every date filter then matches
+everything, **the population reconciliation still balances**, and nothing signals that anything went
+wrong. `_find_col` (`:65–77`) has the same shape — it matches any column whose name merely
+*contains* a candidate substring, so `"amount"` can bind to the wrong column.
+
+Non-negotiable 14 replaces all of it: a contract violation fails the run.
+
+**Values held constant because they could not be computed.** These were sensible placeholders —
+real prior-audit figures used so the prototype showed realistic numbers — and every one must become
+either a real computation or an explicit `not_testable` result with a reason string. Never a number.
+
+- `compute_test_4_3_cached()` → `flagged: 132` (`computation.py:288`). Note this one is deliberate:
+  T4.3 is a GenAI classification test the docstring says takes ~5 minutes, and with no endpoint
+  available caching a known result was the only option. It moves to the `classify` node in P6.
+- `compute_test_6_1c()` → `exceptions: 0`, "Based on audit findings" (`:529`)
+- `intl_exceptions: 2, # From audit findings` (`:590`)
+- `total_records: 152_921`, `total_files: 8` (`:641–642`)
+- `aus_rate = 500  # Fallback reasonable ATO rate` (`:576`)
+
+**Generated demo data.** `build_demo_data` (`app.py:229–287`) produces a deterministic seeded
+population with random `RF_*` flags (`rng.random(n) < p`). The right call for a prototype with no
+data; it is not synthetic audit data and no finding derived from it means anything. Deleted in P3,
+replaced by a completed run over a real synthetic dataset, persisted and clearly labelled (§9).
+
+**Genuine bug, unrelated to any constraint:** `computation.py:390` —
+`same_day_splits if 'same_day_splits' in dir() else ...` works by accident. Fix it when porting.
+
+#### Hardcoded values that violate the portability contract (§3.16)
+
+`app.yaml` was fixed in P0; these remain and belong to the phase that touches each file:
+
 - `src/platform/adapters.py:71` — `_UPLOAD_BASE = "/Volumes/sdpt_gia/ep_temp/taxgovernance"`.
-  Must come from `DBX_VOLUME`. Fix in **P5** when you implement the real upload.
-- `src/platform/fixtures.py` — `sdpt_gia.*` table names, `data-engineering@optus.com.au` owners
-  throughout the demo data. Fix in **P3** when fixtures are replaced by real Delta reads.
-- `src/narrative.py:23` — `"You are an internal audit analyst for Optus."` This module is
-  orphaned; it is kept only as reference for the T&E prompt content and the test-ID framework
-  when you write the real prompts in **P6**. Do not import it. Delete it in P6.
+  Must come from `DBX_VOLUME`. Fix in **P5** with the real upload implementation.
+- `src/platform/fixtures.py` — `sdpt_gia.*` table names and `data-engineering@optus.com.au` owners
+  throughout the demo data. Fix in **P3** when fixtures give way to Delta reads.
+- `src/narrative.py:23` — `"You are an internal audit analyst for Optus."` Delete with the file in P6.
 
-A CI grep test for these patterns is part of P9. Until then, the scan is:
+A CI grep test for these patterns is part of P9. Until then:
 `grep -rniE 'dvlp_11|ia_dart|sdpt_gia|optus|adb-[0-9]' --include=*.py --include=*.yaml .`
-
-**Wrong docstring:** `src/eval_gate.py` claims the pipeline uses
-`narrative.generate_findings()` + `guardrail.verify_all_findings()` "directly from app.py".
-It does not. That file is deleted in P0.
 
 ### 0.3 The exposure number on the executive brief is wrong
 
@@ -427,8 +472,8 @@ Change none of these without stopping and proposing to the user first.
 14. **No silent defaults for missing data.** Contract violation → run fails. `_find_col` and the
     `_standardise_*` defaulting behaviour are deleted, not ported.
 15. **`/workspace/tne` stays functionally identical on the same data.** LLM narration is additive.
-    Note "functionally", not "bit-for-bit": v1 said bit-for-bit, which would have fossilised the
-    fabricated constants in §0.2.
+    Note "functionally", not "bit-for-bit": v1 said bit-for-bit, which would have preserved the
+    placeholder constants and silent defaults in §0.2.
 16. **No hardcoded workspace, catalog, volume, endpoint, or organisation names anywhere in source.**
     Migration to another workspace is an environment change, not a code change.
 
@@ -1264,8 +1309,9 @@ only needed if and when the risk-sensing module is built (§4.10).
 
 1. Run §11. Stop and report if anything fails.
 2. Read the files in §0, in full.
-3. Confirm you understand §0.2 — the flag-counting problem, the orphaned modules, the memorised
-   constants. State it back in your own words.
+3. Confirm you understand §0.2 — why the prototype is shaped the way it is, that `computation.py`
+   is the canonical engine that was never wired up, and which behaviours must not survive into the
+   build. State it back in your own words.
 4. Produce a **one-page plan for P1 only**: file list, `RunState` field-by-field justification,
    Delta DDL outline, test approach, risks.
 5. Stop. Do not start P2 until P1 is reviewed.
