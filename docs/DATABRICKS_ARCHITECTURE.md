@@ -3,7 +3,8 @@
 **Audience:** Databricks Solutions Architect / platform owner
 **Purpose:** confirm the platform features this application depends on are available and
 permissible in the target corporate workspace, and settle the open governance questions in §7.
-**Status:** built and proven on Databricks Free Edition; not yet deployed to a corporate workspace.
+**Status:** the UI and control-test logic exist as a working prototype on Databricks Free Edition.
+The governed execution architecture described here is designed and reviewed but not yet built.
 
 ---
 
@@ -29,53 +30,67 @@ Two design properties drive every platform choice:
 ## 2. Architecture
 
 ```
-┌────────────────────────────┐      jobs.run_now(run_id, phase)      ┌───────────────────────────┐
-│  Databricks App            │ ───────────────────────────────────▶  │  Job run (serverless)     │
-│  Python / Dash             │                                       │                           │
-│                            │                                       │  • pipeline, 9 nodes      │
-│  • UI, routing             │                                       │  • deterministic tests    │
-│  • starts runs             │                                       │  • model-serving calls    │
-│  • polls Delta, renders    │                                       │  • writes exports         │
-│  • HITL approval gates     │                                       │                           │
-└─────────┬──────────────────┘                                       └────────────┬──────────────┘
-          │ read (SQL warehouse)                                                  │ write
-          ▼                                                                       ▼
-┌──────────────────────────────────────────────────────────────────────────────────────────────┐
-│  Unity Catalog                                                                                │
-│    Delta tables:  runs · run_state · findings · management_actions · trace_events            │
-│                   uploaded_files · llm_calls · llm_cache · narrative_edits · evaluation_runs  │
-│    Volume:        uploads/  exports/                                                          │
-├──────────────────────────────────────────────────────────────────────────────────────────────┤
-│  Mosaic AI Model Serving (pay-per-token FM APIs)  ·  AI Gateway + inference tables            │
-│  MLflow experiment (per-run, per-node spans)      ·  system.billing / system.access.audit     │
-└──────────────────────────────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────┐
+│  Databricks App  (Python / Dash)                                         │
+│                                                                          │
+│   web tier                        executor (in-process thread pool)      │
+│   • UI, routing, approval gates   • pipeline, 9 nodes                    │
+│   • starts runs, returns run_id   • deterministic control tests          │
+│   • polls Delta, renders          • model-serving calls                  │
+│                                   • writes exports                       │
+└──────────────┬────────────────────────────────────┬──────────────────────┘
+               │ read                               │ write
+               ▼                                    ▼
+┌──────────────────────────────────────────────────────────────────────────┐
+│  Unity Catalog  (via serverless SQL warehouse attached as an App resource)│
+│    ~15 managed Delta tables: runs · run_state · findings · issues ·      │
+│    risks · controls · engagements · trace_events · llm_calls · …         │
+│    Volume:  uploads/  exports/                                            │
+├──────────────────────────────────────────────────────────────────────────┤
+│  Mosaic AI Model Serving (pay-per-token)  ·  AI Gateway + inference tables│
+│  MLflow experiment (per-run, per-node spans)  ·  system.billing / access  │
+└──────────────────────────────────────────────────────────────────────────┘
 ```
 
-**The App never executes audit logic. The Job never renders UI. They communicate only through
-Delta.** The App starts a job run and then reads state; a job run reads state, advances it, and
-writes back. Nothing produces audit evidence except a job run, which carries a permanent run record.
+**Compute runs inside the App.** There is no Databricks Jobs dependency. The web tier starts a run
+on an in-process thread pool and returns immediately; the executor advances the run and persists
+state to Delta after every node; the UI polls. The two never call each other directly — Delta is
+the only channel — which keeps the executor swappable and the pipeline testable without a browser.
 
-**Long-running work is not in the web tier.** Dash callbacks are synchronous HTTP; an audit run
-takes minutes. The App returns a `run_id` immediately and the UI polls.
+**Long-running work is not in a callback.** An audit run takes minutes; Dash callbacks are
+synchronous HTTP. `start_audit_run` returns a `run_id` and the UI polls for state.
 
-**Human-in-the-loop gates are job boundaries, not in-process pauses.** A run is up to three job
-runs: `plan` (stops for plan confirmation), `execute` (stops for findings sign-off), `export`.
-State lives in Delta between them, so an approval can happen hours later, from a different browser,
-after an app restart.
+**Human-in-the-loop gates are Delta state, not in-process pauses.** A run is up to three executor
+passes: `plan` stops at `awaiting_confirmation`, `execute` stops at `awaiting_signoff`, `export`
+completes. Because state lives in Delta rather than in a thread, an approval can happen hours
+later, from a different browser, after an App restart.
 
-**No orchestration framework.** No LangGraph, Airflow, Prefect or Dagster. Databricks Jobs is the
-durable executor; Delta is the state store; MLflow is the tracer. The pipeline is a plain Python
-loop over nine linear nodes with no branching. This was a deliberate decision to avoid a second
-state store competing with Delta.
+**Resilience requirements this design imposes.** In-App execution means a container restart or a
+redeploy kills in-flight runs, so three properties are mandatory and are tested by a build gate:
+every node is idempotent and state is persisted after each one, so a run resumes where it stopped;
+a reaper on App start marks orphaned runs `interrupted` and offers Resume; and concurrency is
+capped at two with further runs queued in Delta, because executor work shares CPU and memory with
+the web tier. App containers are also memory-constrained, so aggregation is pushed into the SQL
+warehouse rather than loading whole populations into pandas, and a node that cannot fit its
+population fails loudly rather than silently sampling.
 
----
+**Independent run evidence.** A Databricks job run would have produced a platform-written record of
+each execution. Without Jobs, two records the application does not author serve that purpose: an
+**MLflow run per pipeline run** with per-node spans, and **`system.access.audit`**, which
+independently logs every SQL statement the App issued. Both are cited in the application's
+methodology panel.
+
+**No orchestration framework.** No LangGraph, Airflow, Prefect or Dagster. Delta is the state
+store, MLflow the tracer, and the pipeline is a plain Python loop over nine linear nodes. One
+future exception is noted in §7: a risk-sensing module, if built, is a bounded research loop over a
+document corpus and would run outside the App.
 
 ## 3. Databricks features used
 
 | # | Feature | Used for | Criticality | If unavailable |
 |---|---|---|---|---|
-| 1 | **Databricks Apps** (Python/Dash) | The entire front end | **Blocking** | No supported alternative in-platform. Would require hosting the web tier outside Databricks, which moves governed data out of the workspace. |
-| 2 | **Serverless Jobs** — triggered via `jobs.run_now` with job parameters, not on a schedule | Pipeline execution | **High** | Falls back to an in-App `ThreadPoolExecutor` (already implemented behind an `Executor` interface). Loses durable run history, isolation and scale. Acceptable for a pilot, not for production. |
+| 1 | **Databricks Apps** (Python/Dash) | The entire application — UI **and** pipeline execution | **Blocking** | No supported alternative in-platform. Would require hosting the web tier outside Databricks, which moves governed data out of the workspace. |
+| 2 | **Serverless Jobs** | Not used. Reserved only for a future risk-sensing module (§7 Q13), whose corpus passes are too long for a web container | **Not required** | — |
 | 3 | **Serverless SQL warehouse**, attached as an App resource | All Delta reads/writes from the App via `databricks-sql-connector` | **Blocking** | — |
 | 4 | **Unity Catalog** — one schema, ~10 managed Delta tables | System of record for runs and evidence | **Blocking** | — |
 | 5 | **UC Volume** | File uploads from auditors; generated PPTX/XLSX | **High** | Could use workspace files, but loses UC governance on uploads. |
@@ -168,8 +183,9 @@ provide a platform-enforced backstop.
    given the job run executes under its own identity? This determines whether Unity Catalog row
    filters and column masks on executive data are enforced per auditor or bypassed — it is our
    largest open governance question.
-3. **May the App's identity trigger job runs** (`CAN_MANAGE_RUN`), and what is the approved pattern
-   — a managed Job definition, or `jobs.submit()` one-time runs with no persistent job object?
+3. **App sizing and limits.** What CPU/memory is available to an App container, what is the
+   request timeout, and what happens to in-flight work on redeploy? Pipeline execution runs
+   in-process, so these are functional constraints rather than tuning knobs.
 4. **Model endpoint region.** Are the pay-per-token endpoints served in-region, or does inference
    cross geography? If cross-geo, what approval is required for expense data containing executive
    names?
@@ -187,6 +203,13 @@ provide a platform-enforced backstop.
 10. **CI:** Tier-A regression gates need to run against a workspace. Is there an approved pattern
     for CI inside Databricks, or should the Delta-backed tests run as a nightly job while
     external CI covers only the local-persistence path?
+
+13. **Future: risk sensing over an internal document corpus.** A later module would read company
+    policy, process and risk-register documents (via an internal knowledge tool, potentially over
+    MCP once governance permits) plus external regulatory sources, and propose a ranked risk
+    register. Two questions to start on now, because both have lead time: what is the approved
+    pattern for an LLM reading a broad internal corpus, and would that workload be permitted to
+    run as a serverless Job (it is too long-running for an App container)?
 
 **Nice to know:**
 

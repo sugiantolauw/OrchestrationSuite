@@ -148,85 +148,126 @@ prompts and the workspace layout. T&E ExCo is SKILL-001; T4.8 Input GST is SKILL
 
 ## 2. Architecture
 
-### 2.1 Runtime — three components, one channel
+### 2.1 Runtime — the App is the whole application
+
+Confirmed with a Databricks Solutions Architect: compute runs inside the Databricks App. There is
+no Jobs dependency.
 
 ```
-Databricks App (Dash)  ──run_now(run_id, phase)──▶  Job run (serverless)
-  • UI, routing, forms                                • the pipeline loop
-  • start_audit_run                                   • nodes, Skill tests, LLM calls
-  • polls Delta, renders                              • exports to Volume
-  • plan confirm / findings sign-off
-        │ read                                                  │ write
-        ▼                                                       ▼
-   Delta: runs · run_state · findings · management_actions · trace_events
-          uploaded_files · llm_calls · llm_cache · narrative_edits · evaluation_runs
-   Volume: uploads · exports      MLflow: per-node spans      Model Serving: 2 endpoints
+┌──────────────────────────────────────────────────────────────────────┐
+│  Databricks App  (Python / Dash)                                     │
+│                                                                      │
+│   web tier                    executor (in-process thread pool)      │
+│   • UI, routing, forms   ──▶  • the pipeline loop                    │
+│   • start_audit_run           • nodes, Skill tests, LLM calls        │
+│   • polls Delta, renders      • writes exports to the Volume         │
+│   • HITL approval gates       • semaphore-capped, queue in Delta     │
+└───────────────┬──────────────────────────────┬───────────────────────┘
+                │ read                         │ write
+                ▼                              ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│  Unity Catalog — serverless SQL warehouse attached as an App resource│
+│    runs · run_state · findings · issues · management_actions         │
+│    trace_events · uploaded_files · llm_calls · llm_cache             │
+│    narrative_edits · risks · controls · risk_assessments             │
+│    engagements · review_notes · evaluation_runs                      │
+│  Volume: uploads/ exports/     MLflow: per-run, per-node spans        │
+│  Model Serving: two endpoints  ·  AI Gateway + inference tables       │
+└──────────────────────────────────────────────────────────────────────┘
 ```
 
-**The App never runs a node. The Job never renders anything. They communicate only through Delta.**
+**The web tier never executes a node; the executor never renders UI.** They communicate only
+through Delta. Keeping that separation is what makes the executor swappable (§2.3) and the pipeline
+testable without a browser.
 
-The App does run Python — Dash callbacks, chart filtering, building export bytes on download.
-The rule: *nothing that takes more than a couple of seconds, and nothing that produces audit
-evidence, runs in the App.* Evidence is produced by a job run with a run number, or it is not evidence.
+The App does run Python in callbacks — filtering a completed run's population for charts, building
+export bytes on download. The rule: **nothing over a couple of seconds, and nothing that produces
+audit evidence, runs in a callback.** Evidence is produced by the executor and carries a `run_id`.
 
-### 2.2 No orchestration framework
+`start_audit_run` inserts the `runs` row, hands `run_id` to the executor, and returns immediately.
+The UI polls Delta on a `dcc.Interval`. A run takes minutes; a Dash callback cannot.
 
-**Do not use LangGraph, Prefect, Dagster, or any agent framework.** v1 mandated LangGraph; that
-was wrong given this runtime. Databricks Jobs is the durable executor, Delta is the state store,
-MLflow is the tracer. The pipeline is a plain Python loop:
+### 2.2 No orchestration framework in the pipeline
+
+**Do not use LangGraph, Airflow, Prefect or Dagster for the audit pipeline.** Delta is the state
+store, MLflow is the tracer, and the pipeline is a plain Python loop:
 
 ```python
 state = persistence.load_state(run_id)
-for node in NODES_FOR_PHASE[phase][state.next_node_index:]:
+for node in NODES_FOR[state.run_kind][state.phase][state.next_node_index:]:
     state = node(skill, state)
     persistence.save_state(state)
     if state.status in ("awaiting_confirmation", "awaiting_signoff"):
         return
 ```
 
-Nine nodes, linear, no cycles, no conditional routing, no fan-out. A framework would add a second
-persistence layer that fights Delta, 40+ transitive dependencies, and nothing else.
+Nine nodes for a fieldwork run, linear, no branching, no cycles. A framework would add a second
+persistence layer competing with Delta and 40+ transitive dependencies, for nothing. See §4.10 for
+the one module where a bounded agentic loop **is** permitted.
 
-If a future phase needs a genuine loop (an interactive Explorer refinement, a multi-round critic),
-introduce a framework **for that node only**, and ask first.
+### 2.3 Executor — swappable, thread-based by default
 
-### 2.3 Executor abstraction
+`Executor.start(run_id, phase)`, with the pipeline function identical underneath. Selected by
+`EXECUTOR` env var.
 
-`Executor.start(run_id, phase)` with two implementations:
+| Implementation | Use |
+|---|---|
+| `ThreadExecutor` | **Default.** `ThreadPoolExecutor` inside the App, `Semaphore(2)`, further runs held as `queued` rows in Delta. Also used by pytest. |
+| `JobsExecutor` | Optional, not built now. `w.jobs.run_now(job_id, job_parameters={...})`. Reserved for workloads too long for a web container — chiefly risk sensing (§4.10), which can run for hours over a document corpus. |
 
-- `ThreadExecutor` — `ThreadPoolExecutor`, semaphore(2), for local dev and pytest.
-- `JobsExecutor` — `w.jobs.run_now(job_id, job_parameters={"run_id":…, "phase":…})`, for deployed.
+Keep the interface even though only one implementation exists. It is what lets the pipeline be
+tested with no workspace, and what lets a long-running module move out later without touching a
+node.
 
-The pipeline function is identical under both. Selected by env var. This is what lets you build
-and test the whole engine with no workspace access, and it is the fallback if Job permissions
-are blocked in the target environment.
+**Four rules that make in-App execution safe. These are requirements, not advice.**
 
-**Three rules that make either executor safe:**
-1. Every node is idempotent — re-running it for the same `run_id` overwrites its own outputs, never appends.
-2. A reaper runs on App start: any run still `running` was orphaned by a restart → mark `interrupted`, offer resume.
-3. Concurrency is capped; further runs sit in Delta as `queued`.
+1. **Every node is idempotent.** Re-running a node for the same `run_id` overwrites its own outputs
+   and never appends duplicates. State is persisted after every node, so a restart resumes at
+   `next_node_index` rather than from the beginning.
+2. **A reaper runs on App start.** Any run left `running` was orphaned by a container restart →
+   mark `interrupted`, surface a Resume action. **This is load-bearing:** in-App execution means a
+   redeploy kills in-flight runs, and the P3 gate tests it explicitly.
+3. **Concurrency is capped.** Executor runs share CPU and memory with the web tier. Two concurrent
+   runs maximum; the rest queue in Delta.
+4. **Memory has a ceiling.** App containers are small. `DataSourceAdapter` must be able to push
+   aggregation and filtering into the SQL warehouse rather than loading a whole population into
+   pandas. A node that cannot fit its population in memory must fail loudly, never silently sample.
 
-### 2.4 Human-in-the-loop gates — process boundaries, not interrupts
+**What in-App execution costs, and the mitigation.** A Databricks job run would have given an
+independently platform-written run record — useful evidence in an audit tool, because it is not
+asserted by the application being audited. Without Jobs, compensate with two records the app does
+not author: an **MLflow run per pipeline run** (per-node spans, parameters, outcome) and
+**`system.access.audit`**, which independently logs every SQL statement the App issued. Both are
+named in the methodology panel as the independent trail.
 
-| Phase parameter | Nodes | Ends with |
+### 2.4 Human-in-the-loop gates — phase boundaries in Delta
+
+A run is up to three executor passes. Each ends by writing state and returning; the next begins
+when a human acts.
+
+| Phase | Nodes | Ends with |
 |---|---|---|
 | `plan` | discover → profile → plan | `awaiting_confirmation` |
 | `execute` | execute → classify → find → prioritise → act | `awaiting_signoff` |
 | `export` | export | `completed` |
 
 - Plan confirmation: **mandatory in Explorer**, optional in Playbook.
-- **Findings sign-off before export: mandatory in both modes.** This is the control that matters
-  for a defensible workpaper — a human signs off on what leaves the system. v1 only had the plan
-  gate; that was the wrong gate.
-- Sign-off records approver identity and timestamp in `trace_events`.
+- **Findings sign-off before export: mandatory in both modes.** A human signs off on what leaves
+  the system. This is the control that matters for a defensible workpaper.
+- Sign-off records approver identity and timestamp in `trace_events` and on `runs.approved_by`.
 
----
+Because state lives in Delta and not in a thread, an approval can happen hours later, from a
+different browser, after an App restart. That property is the reason for the design and the P7
+gate tests it.
 
 ## 3. Non-negotiables
 
 Change none of these without stopping and proposing to the user first.
 
-1. **No orchestration framework for the core pipeline.** Plain Python loop (§2.2).
+1. **No orchestration framework for the audit pipeline.** Plain Python loop (§2.2). One stated
+   exception: the risk-sensing module (§4.10) is a bounded research loop and may use a tool-use
+   framework, confined to its own package, with a hard ceiling on calls. Nothing in the fieldwork
+   pipeline may import it.
 2. **The LLM authors rules; it does not decide results at runtime.** An LLM may author a
    Skill's tests, finding rules, thresholds and prose templates — reviewed by a human and
    versioned (§4.6). At runtime, every number and every finding's existence comes from Python
@@ -277,6 +318,8 @@ Defined in `orchestrator/state.py`. No framework imports. JSON round-trip tested
 @dataclass
 class RunState:
     run_id: str
+    run_kind: Literal["fieldwork", "sensing", "assessment", "planning"]  # §4.10
+    engagement_id: str | None            # None for corpus-scoped runs, e.g. sensing
     skill_id: str | None                 # None for Explorer
     skill_version: str | None
     mode: Literal["playbook", "explorer"]
@@ -734,6 +777,67 @@ the list. Therefore:
 - `audit_plans` / annual planning. `engagement_id` is sufficient headroom.
 - Any UI for risks, controls or issues. Tables only in P1; UI arrives with the module.
 
+### 4.10 Three workload classes — one guarantee does not fit all
+
+The lifecycle target (§4.9, `docs/PRODUCT_POSITIONING.md`) spans five modules, and they are not
+the same shape of work. The brief so far assumes one: a deterministic pipeline over tabular data.
+That holds for fieldwork. It cannot hold for risk sensing — you cannot make *"read the policy
+corpus and tell me what is emerging"* reproducible, and claiming otherwise would either block the
+feature or ship a false guarantee.
+
+So the architecture has three classes, each with **its own guarantee**:
+
+| Class | Modules | Shape | LLM's job | Guarantee |
+|---|---|---|---|---|
+| **Deterministic pipeline** | Fieldwork, Reporting & Issues | Fixed node sequence over tabular data | Narration + bounded synthesis (§4.6) | **Reproducible** — same data, same findings, same numbers |
+| **Structured generation** | Audit Planning, Explorer | One call → validate → at most one repair | Authors artifacts against a strict schema (§4.5) | **Reproducible via cache, human-confirmed** |
+| **Bounded research** | Risk Sensing, Risk Assessment | Iterative search → read → synthesise, with tools | Genuinely agentic | **Not reproducible — auditable instead** |
+
+Only the first two exist today. The third is unbuilt and its module is months away; what follows is
+the contract it must satisfy when it arrives, so nobody has to break a non-negotiable to build it.
+
+**"Auditable instead of reproducible"** means, concretely: every query logged, every document read
+logged with its version, every proposed risk carrying a citation to a real passage, coverage
+reported explicitly, a hard call ceiling, and nothing accepted without a human (§4.9
+`risks.status`). That is a different guarantee from determinism, equally defensible, and it must be
+stated as such rather than left implicit.
+
+**Consequences for the design, when that module is built:**
+
+1. **`RunState.run_kind`** — `fieldwork | sensing | assessment | planning`, with
+   `NODES_FOR[run_kind][phase]`. The loop in §2.2 stays generic. **Added in P1**, one field, because
+   retrofitting a second pipeline shape into a single hardcoded node list is exactly the kind of
+   change this brief exists to avoid.
+2. **`runs.engagement_id` is nullable.** Sensing is corpus-scoped and continuous, not
+   engagement-scoped — it runs on a schedule and feeds many engagements. **Decided in P1.**
+3. **A bounded agentic loop is permitted, in that package only** (NN1's stated exception). Hard
+   ceiling on tool calls, every call logged, confined so nothing in the fieldwork pipeline can
+   import it.
+4. **The response cache does not transfer.** `(prompt_hash, endpoint, version, params)` never hits
+   in a research loop, so cost is unbounded. Sensing needs **document-level** caching — the
+   extraction from document X at version Y — which is a different table and a different key.
+5. **The evaluation gates do not transfer.** G11 asserts every number maps to a cited metric; risks
+   are not numbers. Surface 2 asserts precision/recall against planted exceptions; there is no
+   ground truth for "emerging risks". Sensing needs its own gate, RAG-faithfulness shaped:
+   - **G17 citation validity** — every proposed risk cites a document and passage, the passage
+     exists, and it actually supports the claim. Sampled and judged.
+   - **Coverage reporting** — "sensed 412 documents, 38 risks proposed, 22 accepted", always
+     accompanied by: **absence of a risk is not assurance.**
+6. **Model tiering changes.** §6's routing rule is "who reads the output verbatim". Sensing breaks
+   it: nobody reads the intermediate steps, but it is long-horizon reasoning over large context
+   with the highest downstream stakes in the product — risks drive the plan, the plan drives what
+   is tested, that drives the assurance the board receives. This is the first genuine case for a
+   premium endpoint at high effort.
+7. **It does not run in the App.** A corpus pass can run for hours; a web container cannot hold it
+   and a redeploy would kill it. This is the workload `JobsExecutor` (§2.3) is reserved for.
+8. **Cost is a different order.** Fieldwork is ~45 short calls, tens of cents per run. A sensing
+   pass is 10–100× that. Budget it separately, cap it explicitly, and schedule it rather than
+   offering it on demand.
+
+**What does not change:** deterministic numbers in fieldwork, Skills as data, primitives,
+`findings.yaml`, the HITL gates, every-call logging, the adapter Protocols, and the two fieldwork
+endpoints. Sensing adds a premium tier and a gate; it does not loosen anything.
+
 ---
 
 ## 5. Evaluation
@@ -846,9 +950,11 @@ Every workspace-specific value is an environment variable read through `orchestr
 
 ```
 DATABRICKS_HOST  DATABRICKS_TOKEN
-DBX_CATALOG  DBX_SCHEMA  DBX_VOLUME  DBX_WAREHOUSE_HTTP_PATH  DBX_APP_NAME  DBX_JOB_ID
+DBX_CATALOG  DBX_SCHEMA  DBX_VOLUME  DBX_WAREHOUSE_HTTP_PATH  DBX_APP_NAME
 MODEL_ENDPOINT_HOST  MODEL_SONNET  MODEL_GPT_OSS
-EXECUTOR=thread|jobs   DEMO_MODE=true|false
+EXECUTOR=thread          # 'jobs' reserved for §4.10 sensing; DBX_JOB_ID only then
+MAX_CONCURRENT_RUNS=2
+DEMO_MODE=true|false
 ```
 
 **Seven adapter Protocols** in `orchestrator/adapters/`: `DataSourceAdapter`, `ModelClient`,
@@ -876,11 +982,11 @@ Each phase ends with **stop and report**. Do not auto-start the next.
 | Phase | Deliverable | Definition of done |
 |---|---|---|
 | **P0** | Foundation reset | Done — this file, `.claude/` config, `.env.example`, `.gitattributes`, dead code removed |
-| **P1** | `RunState` + Delta persistence + suite schema headroom | JSON round-trip test green; migrations create all tables **including `engagements`, `review_notes`, `risks`, `controls`, `risk_assessments` and `issues`, and the `engagement_id` / `rule_id` / `prior_finding_id` / `review_state` / `stage` columns per §4.8 and §4.9**; one default engagement seeded; `LocalPersistence` + `DeltaPersistence` both pass the same contract test; reaper test green |
+| **P1** | `RunState` (incl. `run_kind`, nullable `engagement_id`) + Delta persistence + suite schema headroom | JSON round-trip test green; migrations create all tables **including `engagements`, `review_notes`, `risks`, `controls`, `risk_assessments` and `issues`, and the `engagement_id` / `rule_id` / `prior_finding_id` / `review_state` / `stage` columns per §4.8 and §4.9**; one default engagement seeded; `LocalPersistence` + `DeltaPersistence` both pass the same contract test; reaper test green |
 | **P2** | Primitives + T&E Skill | Surface 2 ≥0.98/≥0.95 per test on planted data; G8 green; **zero memorised constants** (grep test); contract describes raw sources; every test in `plan.yaml` carries `control_id`, `risk_id` and `assertion`, and the T&E controls and risks are seeded from `test_catalogue.control_objective` (§4.9) |
-| **P3** | Pipeline loop + nodes + ThreadExecutor | G6, G7, G9, G10 green; full run on fixtures → findings in Delta; `/trace` shows real events; MLflow per-node spans; exposure double-count fixed |
+| **P3** | Pipeline loop + nodes + ThreadExecutor | G6, G7, G9, G10 green; full run on fixtures → findings in Delta; `/trace` shows real events; MLflow per-node spans; exposure double-count fixed; **a run survives an App restart — reaper marks it `interrupted` and Resume completes it**; concurrency cap enforced with queued runs in Delta |
 | **P4** | App rewired to run-scoped data | Surface 1 vs hand-verified oracle; G13 green; no module-level globals; `/workspace/tne` functionally identical; all routes unchanged; PPTX overflow, zero-findings and private-API defects fixed (§4.7) |
-| **P5** | JobsExecutor + UC + Volume upload | `run_now` round-trip works; a run survives an App redeploy (reaper + resume); real file uploads and profiles; deployment ID reported |
+| **P5** | Unity Catalog + Volume upload + deploy | Governed tables discoverable and readable via the SQL warehouse; no-access catalogs surface as `Restricted`; a real file uploads to the Volume and profiles through `Uploaded → Profiling → Ready`; memory ceiling respected (aggregation pushed to SQL, loud failure never silent sampling); app deployed and deployment ID reported |
 | **P6** | LLM layer + export rebuild | G11 100% on a 30-case golden set; G14, G15 green; degraded mode works; per-endpoint parameter matrix recorded in §6; `classify` via `ai_query`; PPTX restructured per §4.7 with bounded slide count, written exec summary, themes slide and run-id footer |
 | **P7** | HITL gates | Paused run resumes across browser refresh **and** App restart; export blocked until sign-off; both events in `trace_events` |
 | **P8** | GST Skill + Explorer | GST end-to-end on synthetic data via primitives (no bespoke test functions); Explorer proposes → validates → confirms → runs → saves draft Skill; planner cannot emit code (schema test) |
@@ -1002,12 +1108,16 @@ print([c.name for c in w.catalogs.list()])              # Unity Catalog access
 print([wh.name for wh in w.warehouses.list()])          # SQL warehouse
 ```
 
-Then confirm, in the workspace UI, that all three platform capabilities exist:
-**Databricks Apps**, **serverless Jobs**, **pay-per-token model serving**. The architecture
-assumes all three. If any is missing, **stop and report** — it changes the plan, not the code.
+Then confirm, in the workspace UI, that these exist: **Databricks Apps**, a **serverless SQL
+warehouse**, and **pay-per-token model serving**. The architecture assumes all three. If any is
+missing, **stop and report** — it changes the plan, not the code.
 
-Then: one hello-world `jobs.run_now` round-trip, and one chat completion against each endpoint
-recording which parameters pass through.
+Then one chat completion against each endpoint, recording which parameters pass through
+(`response_format`, `temperature`, `max_tokens`, reasoning-effort controls) into §6.
+
+Note the platform check no longer includes Jobs: compute runs inside the App (§2.1). Confirm
+**Databricks Apps**, a **serverless SQL warehouse**, and **pay-per-token model serving**. Jobs is
+only needed if and when the risk-sensing module is built (§4.10).
 
 ### Known environment issues
 
