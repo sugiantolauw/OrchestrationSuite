@@ -260,6 +260,132 @@ Because state lives in Delta and not in a thread, an approval can happen hours l
 different browser, after an App restart. That property is the reason for the design and the P7
 gate tests it.
 
+### 2.5 Apps compute vs Jobs — the trade-off, for review
+
+This section exists so the execution decision can be evaluated rather than assumed. It states both
+options fairly, the reasoning for the choice made, the conditions that would reverse it, and the
+platform facts still unverified.
+
+**Decision:** pipeline execution runs in-process inside the Databricks App (§2.1–2.3), behind an
+`Executor` interface that keeps a Jobs implementation available. Confirmed with a Databricks
+Solutions Architect as feasible.
+
+#### Apps compute — in-process thread pool
+
+**Strengths**
+
+- **One deployable.** No job definition to create, permission, version or keep in sync with the
+  App's source. Fewer governed assets means fewer approvals in a corporate workspace, and approval
+  lead time is a real project risk here.
+- **No cold start.** A thread starts immediately. A serverless job run takes tens of seconds to
+  begin, which is poor UX behind an interactive "Run audit" button and makes the Trace page open on
+  a spinner rather than an event.
+- **One identity.** No handoff between the App's identity and a job's own identity. This matters
+  directly for the largest open governance question (§9A.1): whether Unity Catalog row filters on
+  executive data are enforced per auditor.
+- **Same code path in tests.** `ThreadExecutor` is what pytest uses, so the pipeline is exercised
+  identically in CI and in production. With Jobs, the tested path and the deployed path differ.
+- **Simpler debugging.** One log stream, one environment, one dependency set.
+- **Lower cost and no idle compute.** No per-run compute spin-up.
+
+**Weaknesses**
+
+- **No platform-written run record.** A job run produces execution evidence the application did not
+  author. This is the most audit-relevant loss; the mitigation (MLflow run + `system.access.audit`,
+  §2.3) is weaker because both are still initiated by the App.
+- **A restart or redeploy kills in-flight runs.** Resume-from-Delta becomes load-bearing rather
+  than a nicety, which is why it is a P3 gate and not a P9 hardening item.
+- **No isolation.** Executor work shares CPU and memory with the web tier. A heavy run degrades the
+  UI for every user.
+- **Hard memory ceiling.** App containers are small. Large populations cannot be loaded into
+  pandas, forcing aggregation into SQL and a loud failure when a population will not fit.
+- **No horizontal scale.** One container, concurrency capped at two. Several auditors running
+  simultaneously will queue.
+- **No platform retries, timeouts or alerting.** All of it must be written and maintained in code.
+- **Long-running work is impossible.** A risk-sensing pass over a document corpus (§4.10) cannot
+  run here at all.
+- **Queueing must be built.** The `queued` status and `MAX_CONCURRENT_RUNS` exist because the
+  platform provides no queue.
+- **Cost attribution is coarse.** Per-run compute cost is not separable from App compute.
+
+#### Databricks Jobs — serverless, triggered by `run_now`
+
+**Strengths**
+
+- **Durable, platform-written run history.** "Run 8843, 21 Sep 14:02, these parameters, this
+  outcome", recorded by the platform. For an audit tool this is genuine evidence.
+- **Isolation and right-sizing.** Own compute per run, sized to the work, no effect on the UI.
+- **Retries, timeouts, alerts and notifications** are configuration rather than code.
+- **Scales.** Many concurrent runs, each with its own compute.
+- **Handles long-running work** — the only viable home for risk sensing.
+- **Schedulable**, which continuous sensing requires.
+- **Per-run cost attribution** through system tables.
+- **Survives App redeploy.** A run in flight is unaffected by a UI deployment.
+
+**Weaknesses**
+
+- **Cold start** on every run, as above.
+- **Two deployables.** The job's source path, dependency set and runtime must track the App's, or
+  the two drift and the deployed pipeline stops matching the tested one.
+- **More permissions to obtain.** The App's service principal needs `CAN_MANAGE_RUN`; the job's
+  compute needs its own Unity Catalog grants. In a corporate workspace each is a request with lead
+  time.
+- **Identity handoff.** The job executes under its own identity, so per-user Unity Catalog
+  enforcement requires deliberately carrying and re-checking user context.
+- **More surface to operate** — two log streams, two environments, a job definition someone owns.
+
+#### Why this workload favours Apps
+
+The deciding factors are properties of *this* workload, not general preferences:
+
+| Factor | This workload | Consequence |
+|---|---|---|
+| Run duration | Minutes | Isolation and durability matter less |
+| Frequency | A few per week per auditor | Scale does not bind |
+| Concurrency | A handful of auditors | A cap of two is tolerable |
+| Interaction model | A person clicks "Run" and waits | Cold start is a visible cost |
+| Data volume | ~150K rows today | Fits in memory; SQL pushdown covers growth |
+| Governance context | Every new permission is a request with lead time | Fewer governed assets is real value |
+| Reversibility | `Executor` interface | The decision is not load-bearing |
+
+Jobs is the better engineering answer on durability and isolation. It is the worse answer on
+latency, permission surface, identity, and test/production fidelity. For a prototype heading to a
+pilot, with an interface preserving the option, Apps is the better trade — and the loss that most
+deserves scrutiny is the platform-written run record, not performance.
+
+#### What would reverse the decision
+
+Any one of these should move execution to `JobsExecutor`:
+
+1. **The risk-sensing module is built** (§4.10). Hours-long corpus passes cannot run in a web
+   container. This is a certainty if the lifecycle roadmap proceeds, not a risk.
+2. **A population stops fitting in App memory** after SQL pushdown is exhausted.
+3. **Concurrent demand exceeds the cap** often enough that auditors wait.
+4. **An assurance requirement demands a platform-written execution record** that MLflow and
+   `system.access.audit` do not satisfy.
+5. **Runs routinely exceed ~10 minutes**, making restart-kills frequent rather than rare.
+
+Because the pipeline is a pure function of `RunState` and every node persists to Delta, that switch
+is a deployment change, not a rewrite. Keep it that way: **no node may reference the executor, the
+thread pool, or Dash.**
+
+#### Platform facts not yet verified — confirm in P1
+
+Stated here so a reviewer does not read them as established:
+
+- App container CPU and memory limits, and whether they are configurable.
+- Whether an App can scale to zero, restart on idle, or recycle containers unprompted — all of
+  which would make orphaned runs common rather than rare, and would materially weaken this choice.
+- Whether background threads survive for the full duration of a multi-minute run, or are bounded by
+  a request or worker lifecycle.
+- HTTP/gateway timeout applying to the polling callbacks.
+- How App compute appears in `system.billing.usage` for per-run cost attribution.
+
+If any of these turns out worse than assumed — particularly container recycling — revisit this
+section before P3 rather than after.
+
+---
+
 ## 3. Non-negotiables
 
 Change none of these without stopping and proposing to the user first.
