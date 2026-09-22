@@ -48,11 +48,13 @@ Opus by accident. Three subagents are defined with pinned models: `implement` (S
 
 ## Architecture in one paragraph
 
-A Databricks App hosts the UI and starts runs; a serverless Job executes the pipeline; Delta is
-the only channel between them. The pipeline is a plain Python loop over nine linear nodes — no
-orchestration framework. Human approval gates are job boundaries, not in-process pauses, so an
-auditor can confirm a plan or sign off findings hours later from a different browser. Two model
-serving endpoints handle narration and row-level classification. See `CLAUDE.md` §2.
+Everything runs inside a Databricks App: the web tier serves the UI and starts runs, an
+in-process executor advances them, and Delta is the only channel between the two. There is no
+Databricks Jobs dependency. The pipeline is a plain Python loop over nine linear nodes — no
+orchestration framework. Human approval gates are Delta state rather than in-process pauses, so an
+auditor can confirm a plan or sign off findings hours later, from a different browser, after an app
+restart. Two model serving endpoints handle narration and row-level classification.
+See `CLAUDE.md` §2.
 
 ## Repository layout
 

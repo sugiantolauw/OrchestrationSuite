@@ -19,9 +19,10 @@ STEP 1 — Verify the environment. Run the checks in CLAUDE.md §11:
   - serving_endpoints.list(), catalogs.list(), warehouses.list()
 If the SDK import panics on `cryptography`, fix it per §11 (venv or pinned upgrade).
 If any call fails with a proxy 403 or 502, do NOT work around it — report it and stop.
-Also confirm in the workspace UI that Databricks Apps, serverless Jobs, and pay-per-token
-model serving all exist. The architecture assumes all three. If any is missing, STOP AND
-REPORT before designing anything.
+Also confirm in the workspace UI that Databricks Apps, a serverless SQL warehouse, and
+pay-per-token model serving all exist. The architecture assumes all three. Jobs is NOT
+required -- compute runs inside the App (CLAUDE.md 2.1). If any of the three is missing,
+STOP AND REPORT before designing anything.
 
 STEP 2 — Read the code. In full, not skimmed:
   reference_app/app.py, src/computation.py, src/test_catalogue.py,

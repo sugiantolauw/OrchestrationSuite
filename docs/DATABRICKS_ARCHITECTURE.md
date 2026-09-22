@@ -129,8 +129,8 @@ dependency needing compilation is vendored as a pre-built `manylinux2014_x86_64`
 ## 4. Data flow and residency
 
 1. Auditor selects governed tables (Unity Catalog) and/or uploads a file to a UC Volume.
-2. A job run reads the tested population through the SQL warehouse.
-3. Tests run in-process (pandas) inside the job. **No audit data leaves Databricks.**
+2. The executor reads the tested population through the SQL warehouse.
+3. Tests run in pandas inside the App container. **No audit data leaves Databricks.**
 4. Model-serving calls send **computed aggregates and metric values** — not raw rows — for
    narrative generation. The one exception is row-level classification, which runs via `ai_query`
    so rows are processed inside the platform.
@@ -161,8 +161,8 @@ provide a platform-enforced backstop.
 
 ## 6. Cost profile
 
-- **Compute:** serverless job runs of a few minutes, a handful of times per week per auditor.
-  Serverless SQL warehouse for the App, auto-stopping.
+- **Compute:** the App container itself, plus an auto-stopping serverless SQL warehouse. Runs
+  take a few minutes, a handful of times per week per auditor.
 - **Inference:** roughly 45 short calls per run (~1–2K tokens in, ~300 out) plus one batch
   classification. Dominated by the batch classification if row volume is high — which is why it
   runs on the cheaper endpoint via `ai_query` rather than per-row HTTP.
@@ -176,13 +176,13 @@ provide a platform-enforced backstop.
 
 **Blocking — needed before design is final:**
 
-1. **Are Databricks Apps, serverless Jobs and pay-per-token Model Serving all enabled** in the
-   target workspace, for this team?
+1. **Are Databricks Apps, a serverless SQL warehouse and pay-per-token Model Serving all
+   enabled** in the target workspace, for this team? (Jobs is not required — see §2.)
 2. **Identity model for the App.** Should it run as a service principal, or on behalf of the
    signed-in user? If on-behalf-of: how should user context propagate to a Job the App triggers,
-   given the job run executes under its own identity? This determines whether Unity Catalog row
-   filters and column masks on executive data are enforced per auditor or bypassed — it is our
-   largest open governance question.
+   given the executor runs on a background thread rather than in the request? This determines
+   whether Unity Catalog row filters and column masks on executive data are enforced per auditor
+   or bypassed — it is our largest open governance question.
 3. **App sizing and limits.** What CPU/memory is available to an App container, what is the
    request timeout, and what happens to in-flight work on redeploy? Pipeline execution runs
    in-process, so these are functional constraints rather than tuning knobs.

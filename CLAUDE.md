@@ -1031,9 +1031,10 @@ this list written for a Databricks Solutions Architect.
    - As a service principal, every auditor sees whatever the SP can see. Unity Catalog row filters
      and column masks on executive expense data are bypassed, and `runs.run_owner` is a value the
      app asserts rather than an identity the platform verified.
-   - On behalf of the user, UC permissions apply per auditor and the identity is real — but a
-     serverless Job triggered by the app runs as the job's own identity, so the user context has
-     to be carried into `RunState` and re-checked, or the job inherits the SP's reach anyway.
+   - On behalf of the user, UC permissions apply per auditor and the identity is real — but the
+     executor runs on a background thread, not in the request, so the signed-in user's context has
+     to be captured at `start_audit_run` and carried in `RunState`, or the pipeline silently falls
+     back to the App's own reach.
    Decide before P5. `RunState` must carry a verified `run_owner` either way.
 2. **Can a run be retracted?** Findings leave the system as PPTX and XLSX. If a run is later found
    wrong, there is currently no way to mark it superseded, and no way to tell which exports came
@@ -1056,8 +1057,9 @@ this list written for a Databricks Solutions Architect.
 7. **Rate limits and quotas.** AI Gateway can rate-limit an endpoint. `classify` submits batch work
    via `ai_query`; behaviour under throttling must be defined — queue, degrade, or fail the run.
    Whatever it is, it must not be a silent partial result.
-8. **Secrets in the Job.** The App reads env vars, but a serverless Job should read a Databricks
-   secret scope, not environment variables. Wire this in P5.
+8. **Secrets.** The App reads environment variables today. A Databricks secret scope is the
+   better home for the model-serving and warehouse credentials, and becomes necessary if the
+   sensing module (§4.10) ever runs outside the App. Decide in P5.
 
 ---
 
