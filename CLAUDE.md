@@ -1240,6 +1240,68 @@ this list written for a Databricks Solutions Architect.
 
 ---
 
+## 9B. Testing a deployed Databricks App
+
+Five layers, cheapest to most expensive. Layers 1–2 run on every deploy; layer 3 on gated
+deploys; layers 4–5 at phase boundaries.
+
+### Layer 1 — Smoke (seconds)
+
+Hit `/health` from `curl` or the Databricks CLI. Add a `/ready` endpoint that also checks Delta
+connectivity (a single `spark.sql("SELECT 1")` or equivalent catalog-list call). If `/ready`
+passes, the container started, Dash is serving, and the runtime is wired to the workspace.
+
+### Layer 2 — API-level integration (minutes)
+
+Dash callbacks are HTTP endpoints. `POST` synthetic callback payloads against the running App URL
+— file upload, parameter changes, pipeline trigger — and assert response shape. This catches
+serialisation bugs, missing columns, and broken callback chains without a browser. Run from a
+notebook or a lightweight script triggered after deploy.
+
+### Layer 3 — Browser E2E (minutes, gated)
+
+Playwright (or Selenium) against the App URL. Key scenarios:
+
+| Scenario | Asserts |
+|---|---|
+| Upload fixture CSV | Dashboard renders all tabs, no JS errors |
+| Trigger a pipeline run | Status callback arrives; findings appear |
+| HITL confirm + reject | State survives page refresh (Delta round-trip, not callback memory) |
+| PPTX export | File downloads; slide count and chart presence correct |
+| App restart resilience | Mid-run: restart App → reload → reaper marks `interrupted` → Resume completes; completed run: restart → findings still visible from Delta |
+
+### Layer 4 — Delta persistence verification (minutes)
+
+Query Delta tables directly from a notebook or SQL warehouse after the E2E run:
+
+- `runs` table: expected `run_id`, status, timestamps.
+- `findings` table: rows match what the UI showed.
+- `run_state` JSON: parseable, contains expected node outputs.
+- Reaper: insert a stale run older than TTL, trigger reaper, confirm deletion.
+- Suite tables: `engagements`, `review_notes`, `risks`, `controls`, `risk_assessments`, `issues`
+  all exist and seeded default engagement is present.
+
+### Layer 5 — Model-serving integration (minutes, needs endpoint)
+
+- Send a known evidence payload to `generate_findings`; assert valid JSON with `findings` key.
+- Send a malformed payload; verify error handling doesn't crash the App.
+- Measure latency against the App's configured timeout.
+- `classify` via `ai_query` on a small batch; confirm results land in Delta, not returned inline.
+
+### Practical pattern for Free Edition
+
+No CI can reach the workspace easily. Keep a `tests/e2e/` folder with pytest scripts that assume
+a running App URL via `APP_URL` env var. Run manually after deploy:
+
+```bash
+APP_URL=https://... pytest tests/e2e/ -v
+```
+
+When porting to Optus, these same scripts run in a CI pipeline. Design `tests/e2e/` in P3 (when
+the pipeline loop exists), expand it each phase.
+
+---
+
 ## 10. Working rules
 
 - Work on the branch the user specifies. Commit at every stable checkpoint.
