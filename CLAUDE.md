@@ -1569,6 +1569,44 @@ One chat completion against each endpoint, recording which parameters pass throu
   lists recent denials by host. A `403` on CONNECT is a network-policy denial; a `502` with
   `injection failed` is a misconfigured managed connector. Both are environment settings —
   report them, never work around them, and never disable TLS verification or unset `HTTPS_PROXY`.
+- **SessionStart hook** (`.claude/hooks/session-start.sh`, remote only): reinstalls `cryptography`,
+  `cffi` and `blinker` with `--ignore-installed` (Debian copies have no RECORD file), installs
+  `requirements.txt`, and exports the gitignored `.env` into the session.
+
+### Recorded results — 2026-09-23
+
+| Check | Result |
+|---|---|
+| Identity / network | OK — SDK authenticates; no proxy denials |
+| Unity Catalog | Metadata OK (catalogs `samples`, `system`, `test_workspace`; schema `test_workspace.audit_ledger` created). **Storage FAILS**: credential `test_workspace` (role `…-catalog-role`) cannot be assumed — Delta writes impossible |
+| SQL warehouse | `Starter Warehouse` is **Pro, not serverless**. Launch FAILS: `WORKSPACE_CONFIGURATION_ERROR`, `sts:AssumeRole` AccessDenied on the workspace role |
+| Databricks Apps | API reachable, 0 apps. Deploy **untested** — uploading source to workspace files fails with `Cannot access AWS bucket` |
+| Model Serving | OK — `databricks-claude-sonnet-5`, `databricks-gpt-oss-120b` present (parameter matrix not yet run) |
+
+Root cause for all three failures: the workspace's AWS IAM roles no longer trust Databricks.
+**P1A is blocked on the platform** until the AWS trust is repaired or a different workspace is used.
+
+### Recorded data decisions for SKILL-001 (from the user, 2026-09-23)
+
+Source files are in `synthetic_data/`; row counts match `FILE_REGISTRY` exactly.
+
+1. **ExCo population** — the prototype's 11 `EXCO_MEMBERS` names do not occur in the synthetic data.
+   The user supplies the 11 synthetic ExCo names; resolve them to `Employee ID` once, have the user
+   confirm, and key the contract on the ID (§0.5). Two names map to multiple IDs in this data.
+2. **Column names** — use the names actually present in the files, not those referenced in
+   `computation.py` (e.g. `Report Receipt Viewed` / `All Entry Receipts Viewed`).
+3. **Whitespace** — trim header whitespace (`Advance Purchase Days `, `Currency `) as an explicit,
+   declared contract rule. Not fuzzy matching.
+4. **T3.1b join** — bookings carry no Travel Request ID or Employee ID. Join on
+   **employee name + expense type** (booking `Booking Type` ↔ request `Expense Type`, via a declared
+   mapping). Report the match rate.
+5. **Country for T6.1d** — expense rows have no country. Derive it from
+   **`City/Location` + `Transaction Currency`** via a declared lookup; unmapped rows are reported, never defaulted.
+6. **Currency** — `Reimbursement Currency` is AUD on 100% of rows in every file. The contract requires
+   AUD and fails the run otherwise. Per-diem rates are **SGD**: convert at a fixed SGD→AUD rate held in
+   `thresholds.yaml` with source and effective date (rate still to be supplied).
+7. **Oracle** — the user holds an auditor-confirmed exception list for this data; it is the Surface 1
+   comparison set (§9).
 
 ---
 
