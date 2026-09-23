@@ -1722,7 +1722,16 @@ Source files are in `synthetic_data/`; row counts match `FILE_REGISTRY` exactly.
   mandatory, G17) — confined to sensing/assessment per NN1's exception, never imported by fieldwork;
   (5) Risk Assessment v1 — agent-proposed, cited, four-dimension scoring shown as proposals, nothing
   accepted without an auditor; the scoring methodology stays the enterprise risk function's to
-  supply.
+  supply. Includes **impact analysis** that combines qualitative evidence (cited document passages)
+  with quantitative fieldwork evidence (exception rates, the de-duplicated flagged-spend headline,
+  materiality) from full-population runs; (6) **Audit Planning v1 (approved 2026-09-23)** —
+  `run_kind: planning`, structured-generation class (§4.10: one call, strict schema, validate, ≤1
+  repair, human-confirmed, replayable from cache — not a research loop). From accepted, scored risks
+  it proposes an RCM (risks → controls → tests, each test with `assertion: design|operating`), an
+  audit scope memo, test steps and a document request list, from agreed templates. Test steps link
+  to executable Skill tests/primitives wherever one fits, so an approved plan launches fieldwork
+  runs; the auditor edits and approves before anything runs. Step (3)'s mockups include the impact
+  analysis, RCM and planning screens.
 
 ---
 
