@@ -1212,6 +1212,24 @@ are rejected by some current model families. If structured output does not pass 
 validate the schema client-side with one retry — never strip markdown fences the way
 `narrative.py:121–127` does.
 
+**Recorded parameter matrix — development workspace, 2026-09-23** (full detail in
+`docs/specs/P6_P8_explorer_llm_design.md`; client `get_open_ai_client()`, databricks-sdk 0.140.0):
+
+- `MODEL_SONNET` (`databricks-claude-sonnet-5`): **untestable** — every call, including the bare
+  baseline, returns `403 PERMISSION_DENIED: The endpoint is temporarily disabled due to a
+  Databricks-set rate limit of 0.` The same happens on every proprietary-model endpoint in the
+  workspace; the open-weights endpoints answer.
+- `MODEL_GPT_OSS` (`databricks-gpt-oss-120b`): passes `max_tokens`, `temperature`, `top_p`, `n`,
+  `tools`/`tool_choice`, `reasoning_effort` (low/medium/high, effective), and `response_format`
+  json_schema `strict: true` (enforced; `anyOf`/`oneOf`/`$defs`/`$ref`, enums, bounds, `const` all
+  accepted). Rejects `pattern` in schemas, `seed`, `stop`, `max_completion_tokens` and `thinking`.
+  `json_object` needs the word "json" in the prompt. A strict-mode bare `{"type":"object"}` property
+  comes back empty. Truncation returns `finish_reason: "length"` with no text part. `content` is a
+  list of a reasoning part (strip it before storing, NN11) and a text part. The response `model`
+  (`gpt-oss-120b-080525`) is the served model version; `usage` is present, and there is no
+  `system_fingerprint`.
+- AI Gateway: usage tracking only on both endpoints; inference tables are **not** enabled.
+
 **Enable AI Gateway with inference tables on both endpoints.** Inference tables are a
 platform-written copy of every request/response — the audit trail a reviewer trusts because the
 application did not write it. Keep the synchronous `llm_calls` write as well.
