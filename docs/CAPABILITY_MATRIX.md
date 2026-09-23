@@ -27,7 +27,7 @@ Corporate target: to be filled by the platform owner before migration.
 | 16 | Model region / cross-geo processing | P6 | Unverified | ? | §9A.6 — governance decision with lead time |
 | 17 | `ai_query()` from SQL warehouse | P6 | Unverified | ? | `classify` batch path |
 | 18 | AI Gateway + inference tables | P6 | Unverified | ? | Needs working storage (row 9) |
-| 19 | MLflow tracking (per-run, per-node spans) | P3 | Unverified | ? | Independent trail (§2.3) |
+| 19 | MLflow tracking (per-run, per-node spans) | P3 | **Verified** 2026-09-23 — deployed App, live run RUN-8486A15C5985: experiment `/Shared/ai-audit-analyst-audit-runs` (created by `scripts/deploy_app.py`, App SP granted `CAN_MANAGE`) holds 1 parent run tagged `orchestrator_run_id=<run_id>` (params `run_id`, `skill_id`, `skill_version`, `fingerprint_id`, `code_revision` all populated) plus 8 nested `mlflow.parentRunId`-linked runs, one per node (`discover, profile, plan, execute, classify, find, prioritise, act`), all `FINISHED`; matches the 8 `node_started`/`node_completed` pairs in `trace_events` for the same run, with zero "tracing unavailable" events | ? | Independent trail (§2.3); parent MLflow run stays `RUNNING` while the audit run sits at `awaiting_signoff` (ends at export) |
 | 20 | `system.access.audit` readable | P3 | Unverified (`system` catalog visible) | ? | Independent trail (§2.3) |
 | 21 | `system.billing.usage` readable | P6 | Unverified | ? | Cost measurement after ten runs |
 | 22 | Service principal for the App + on-behalf-of-user identity | P5 | App SP **verified** (OAuth M2M creds injected); on-behalf-of-user untested | ? | §9A.1; default: App runs as SP, records signed-in user as `run_owner` |
