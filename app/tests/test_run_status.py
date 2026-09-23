@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import flask
+import pytest
+
+import fake_service
 from src import run_status
 from src.platform import adapters
 
@@ -13,6 +17,19 @@ def _new_run(review_plan_first=False):
         run_owner="auditor@example.com",
         review_plan_first=review_plan_first,
     )
+
+
+_probe_app = flask.Flask(__name__)
+
+
+def test_request_actor_blocks_on_deployed_backend_with_no_identity_header(monkeypatch):
+    """CLAUDE.md §9A.1, P2/P3 gate review item 7: confirm_plan/sign_off/resume
+    must never silently record actor='local-user' for an unverified caller
+    on the deployed backend."""
+    monkeypatch.setattr(fake_service, "ready", lambda ctx: {"ready": True, "backend": "uc", "detail": None})
+    with _probe_app.test_request_context("/"):
+        with pytest.raises(adapters.MissingIdentityHeader):
+            run_status._request_actor()
 
 
 def test_render_body_unknown_run():

@@ -35,6 +35,7 @@ def _finding(finding_id, *, rule_id, title="A finding", severity="High", **overr
             }
         ],
         analyst_set_severity=True,
+        severity_basis="threshold",
         metrics_cited={"hv_count": {"value": 15, "unit": "count", "source_ref": {"sources": [], "columns": [], "grain": "row", "population": "pop"}}},
         observation="15 claims.",
         recommendation="Review these claims.",
@@ -230,6 +231,45 @@ def test_write_findings_round_trip_json_fields_intact(persistence, uid):
 
     listed = persistence.list_findings(run_id)
     assert listed == written
+
+
+def test_write_findings_persists_analyst_set_severity_and_severity_basis(persistence, uid):
+    """CLAUDE.md §0.4/G8, P2/P3 gate review item 3: analyst_set_severity and
+    severity_basis (migration 004) must round-trip through both backends and
+    must NEVER default to False/None when the caller supplied them -- a
+    finding with a fixed (non-threshold) severity and one with an
+    analyst-set threshold severity are both exercised, and a finding that
+    omits them entirely (a caller bug) must come back None, not False."""
+    run_id = f"RUN-{uid}"
+    skill_id = f"SKILL-{uid}"
+    fixed = _finding(
+        f"{run_id}:T1", rule_id=f"{skill_id}.T1",
+        analyst_set_severity=True, severity_basis="fixed",
+    )
+    threshold = _finding(
+        f"{run_id}:T2", rule_id=f"{skill_id}.T2",
+        analyst_set_severity=False, severity_basis="threshold",
+    )
+    omitted = dict(_finding(f"{run_id}:T3", rule_id=f"{skill_id}.T3"))
+    omitted.pop("analyst_set_severity", None)
+    omitted.pop("severity_basis", None)
+
+    written = persistence.write_findings(
+        run_id, [fixed, threshold, omitted], engagement_id="ENG-DEFAULT",
+        skill_id=skill_id, skill_version="1.0.0", now=canonical_ts(0),
+    )
+    by_id = {f["finding_id"]: f for f in written}
+    assert by_id[fixed["finding_id"]]["analyst_set_severity"] is True
+    assert by_id[fixed["finding_id"]]["severity_basis"] == "fixed"
+    assert by_id[threshold["finding_id"]]["analyst_set_severity"] is False
+    assert by_id[threshold["finding_id"]]["severity_basis"] == "threshold"
+    assert by_id[omitted["finding_id"]]["analyst_set_severity"] is None
+    assert by_id[omitted["finding_id"]]["severity_basis"] is None
+
+    listed = {f["finding_id"]: f for f in persistence.list_findings(run_id)}
+    assert listed[fixed["finding_id"]]["analyst_set_severity"] is True
+    assert listed[threshold["finding_id"]]["analyst_set_severity"] is False
+    assert listed[omitted["finding_id"]]["analyst_set_severity"] is None
 
 
 def test_write_findings_idempotent_rewrite_same_set_no_duplicates(persistence, uid):

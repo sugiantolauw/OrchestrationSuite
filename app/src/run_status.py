@@ -20,7 +20,26 @@ _TERMINAL_STATUSES = {"completed", "failed"}
 
 
 def _request_actor() -> str:
-    return request.headers.get("X-Forwarded-Email") or request.headers.get("X-Forwarded-User") or "local-user"
+    """See run_setup.py's _request_owner -- same rule: "local-user" is a
+    label the LOCAL backend alone may use; the deployed backend must block
+    plan confirmation / sign-off / resume rather than record an unverified
+    approver identity (CLAUDE.md §9A.1, P2/P3 gate review item 7)."""
+    owner = request.headers.get("X-Forwarded-Email") or request.headers.get("X-Forwarded-User")
+    if owner:
+        return owner
+    if adapters.is_local_backend():
+        return "local-user"
+    raise adapters.MissingIdentityHeader(
+        "No verified identity header (X-Forwarded-Email / X-Forwarded-User) was present on "
+        "this request. Refusing to record an action under an unverified identity."
+    )
+
+
+def _error_panel(exc: Exception) -> html.Div:
+    return html.Div([
+        html.H3("Action blocked", style={"margin": "0 0 6px", "color": "#b85042"}),
+        html.P(f"{type(exc).__name__}: {exc}", className="sub"),
+    ], className="panel", style={"marginTop": 16, "borderColor": "#b85042"})
 
 
 def run_page(run_id: str) -> html.Div:
@@ -162,7 +181,10 @@ def register_callbacks(app) -> None:
     def _confirm_plan(n_clicks, run_id):
         if not n_clicks:
             raise PreventUpdate
-        adapters.confirm_plan(run_id, _request_actor())
+        try:
+            adapters.confirm_plan(run_id, _request_actor())
+        except adapters.MissingIdentityHeader as exc:
+            return _error_panel(exc)
         return _render_body(adapters.get_run(run_id), run_id)
 
     # "Sign off findings" only opens the native confirm dialog (a single-
@@ -189,7 +211,10 @@ def register_callbacks(app) -> None:
     def _confirm_signoff(submit_n_clicks, run_id):
         if not submit_n_clicks:
             raise PreventUpdate
-        adapters.sign_off(run_id, _request_actor())
+        try:
+            adapters.sign_off(run_id, _request_actor())
+        except adapters.MissingIdentityHeader as exc:
+            return _error_panel(exc)
         return _render_body(adapters.get_run(run_id), run_id)
 
     @app.callback(
@@ -201,7 +226,10 @@ def register_callbacks(app) -> None:
     def _resume(n_clicks, run_id):
         if not n_clicks:
             raise PreventUpdate
-        adapters.resume_run(run_id, _request_actor())
+        try:
+            adapters.resume_run(run_id, _request_actor())
+        except adapters.MissingIdentityHeader as exc:
+            return _error_panel(exc)
         return _render_body(adapters.get_run(run_id), run_id)
 
     @app.callback(

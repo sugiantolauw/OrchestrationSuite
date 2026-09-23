@@ -24,9 +24,19 @@ def _request_owner() -> str:
     header set by the platform's front door. CLAUDE.md §9A Q1 leaves the
     real verified-identity question open for the corporate migration; until
     then this is the best available run_owner and is never silently
-    defaulted to an empty string."""
+    defaulted -- "local-user" is an explicit label the LOCAL backend alone
+    may use (nothing else forwards these headers there); the deployed
+    backend must block rather than start a run under an unverified identity
+    (CLAUDE.md §9A.1, P2/P3 gate review item 7)."""
     owner = request.headers.get("X-Forwarded-Email") or request.headers.get("X-Forwarded-User")
-    return owner or "local-user"
+    if owner:
+        return owner
+    if adapters.is_local_backend():
+        return "local-user"
+    raise adapters.MissingIdentityHeader(
+        "No verified identity header (X-Forwarded-Email / X-Forwarded-User) was present on "
+        "this request. Refusing to start a run under an unverified identity."
+    )
 
 
 def _table_fqn(table: dict) -> str:
@@ -216,8 +226,8 @@ def register_callbacks(app) -> None:
         if errors:
             return no_update, html.Ul([html.Li(e) for e in errors])
 
-        run_owner = _request_owner()
         try:
+            run_owner = _request_owner()
             run_id = adapters.start_audit_run(
                 skill_id=skill_id,
                 bindings=bindings,

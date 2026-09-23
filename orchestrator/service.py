@@ -744,11 +744,17 @@ def health(ctx: AppContext) -> dict:
 
 
 def ready(ctx: AppContext) -> dict:
+    # /ready is typically reached without auth (a platform health check), so
+    # the exception's own text (which can carry a connection string, a table
+    # name, or other internal detail) is logged server-side only -- the
+    # caller gets a generic status, never repr(exc) (CLAUDE.md P2/P3 gate
+    # review item 7).
     try:
         ctx.persistence.find_runs(["queued"])
         db_ok = True
         detail = None
-    except Exception as exc:  # noqa: BLE001 - surfaced verbatim to the caller
+    except Exception:
         db_ok = False
-        detail = repr(exc)
+        detail = "database connectivity check failed"
+        _LOG.exception("service.ready(): database connectivity check failed")
     return {"ready": db_ok, "backend": ctx.backend, "detail": detail}

@@ -29,7 +29,7 @@ import json
 import xlsxwriter
 
 from orchestrator.contract import ContractViolation
-from orchestrator.errors import ReconciliationError
+from orchestrator.errors import MissingSeverityProvenance, ReconciliationError
 from orchestrator.engine import execute_skill
 from orchestrator.findings import build_findings
 from orchestrator.frames import build_row_snapshots, frame_parquet_bytes, sha256_bytes
@@ -515,6 +515,42 @@ def act(ctx: NodeContext, state: RunState) -> RunState:
 # ── export phase ─────────────────────────────────────────────────────────────
 
 
+# OWASP CSV/formula-injection guard (P2/P3 gate review item 7): a cell whose
+# first character is one of these is a live formula/macro trigger in Excel
+# (and in most spreadsheet apps re-parsing a CSV export of this workbook),
+# so any string that starts with one gets a leading single quote -- Excel
+# renders a leading `'` as a literal-text marker and drops it from display,
+# so this is invisible to a reader but stops the string being evaluated.
+_FORMULA_TRIGGER_CHARS = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _safe_str(value) -> str:
+    if value is None:
+        return ""
+    text = str(value)
+    if text.startswith(_FORMULA_TRIGGER_CHARS):
+        return "'" + text
+    return text
+
+
+def _write_str(ws, row: int, col: int, value, fmt=None) -> None:
+    # write_string (never the type-sniffing `write()`, which will itself
+    # detect a leading "=" and emit a live formula cell) -- every string in
+    # this workbook is either data-derived (objective, finding prose) or
+    # comes from a Skill/config value that is not this codebase's to trust.
+    ws.write_string(row, col, _safe_str(value), fmt)
+
+
+def _require_severity_provenance(f: dict) -> tuple[bool, str]:
+    analyst_set = f.get("analyst_set_severity")
+    basis = f.get("severity_basis")
+    if analyst_set is None:
+        raise MissingSeverityProvenance(f["finding_id"], "analyst_set_severity")
+    if basis is None:
+        raise MissingSeverityProvenance(f["finding_id"], "severity_basis")
+    return analyst_set, basis
+
+
 def _write_xlsx_workpaper(state: RunState, findings: list[dict], metrics: dict[str, dict], flagged_rows: list[dict], now: str) -> bytes:
     buf = io.BytesIO()
     wb = xlsxwriter.Workbook(buf, {"in_memory": True})
@@ -523,54 +559,73 @@ def _write_xlsx_workpaper(state: RunState, findings: list[dict], metrics: dict[s
     footer = f"run_id={state.run_id} | generated_at={now}"
 
     cover = wb.add_worksheet("Cover")
-    cover.write(0, 0, "AI Audit Analyst — Workpaper Export", bold)
-    cover.write(1, 0, f"run_id: {state.run_id}")
-    cover.write(2, 0, f"generated_at: {now}")
-    cover.write(3, 0, f"skill: {state.skill_id} v{state.skill_version}")
-    cover.write(4, 0, f"audit_period: {state.audit_period[0]} to {state.audit_period[1]}")
-    cover.write(5, 0, f"objective: {state.objective}")
-    cover.write(6, 0, f"run_owner: {state.run_owner}")
-    cover.write(8, 0, footer)
+    _write_str(cover, 0, 0, "AI Audit Analyst — Workpaper Export", bold)
+    # label/value split into two columns (rather than one interpolated string)
+    # so every data-derived value -- objective and run_owner above all, since
+    # both are free text an auditor typed at run setup -- gets its own cell
+    # through _write_str's formula-injection guard, not buried mid-string
+    # where a leading "=" in the VALUE would not be the cell's first
+    # character (CLAUDE.md P2/P3 gate review item 7).
+    cover_fields = [
+        ("run_id", state.run_id),
+        ("generated_at", now),
+        ("skill", f"{state.skill_id} v{state.skill_version}"),
+        ("audit_period", f"{state.audit_period[0]} to {state.audit_period[1]}"),
+        ("objective", state.objective),
+        ("run_owner", state.run_owner),
+    ]
+    for r, (label, value) in enumerate(cover_fields, start=1):
+        _write_str(cover, r, 0, label, bold)
+        _write_str(cover, r, 1, value)
+    _write_str(cover, len(cover_fields) + 2, 0, footer)
 
     ws = wb.add_worksheet("Findings")
     headers = [
-        "finding_id", "rule_id", "test_id", "severity", "analyst_set_severity", "title",
-        "observation", "recommendation", "exposure_amount", "exposure_basis", "review_state",
+        "finding_id", "rule_id", "test_id", "severity", "analyst_set_severity", "severity_basis",
+        "title", "observation", "recommendation", "exposure_amount", "exposure_basis", "review_state",
     ]
     ws.write_row(0, 0, headers, bold)
     for r, f in enumerate(findings, start=1):
-        ws.write(r, 0, f["finding_id"])
-        ws.write(r, 1, f["rule_id"])
-        ws.write(r, 2, f.get("test_id"))
-        ws.write(r, 3, f["severity"])
-        ws.write(r, 4, bool(f.get("analyst_set_severity", False)))
-        ws.write(r, 5, f["title"])
-        ws.write(r, 6, f.get("observation"))
-        ws.write(r, 7, f.get("recommendation"))
-        ws.write_number(r, 8, f.get("exposure_amount") or 0.0, money)
-        ws.write(r, 9, f.get("exposure_basis"))
-        ws.write(r, 10, f.get("review_state"))
-    ws.write(len(findings) + 2, 0, footer)
+        # Never a defaulted False (CLAUDE.md §0.4/G8): raises if the run's own
+        # persisted findings never carried these (a write_findings bug), rather
+        # than exporting an unattributed severity as if it were policy-backed.
+        analyst_set, basis = _require_severity_provenance(f)
+        _write_str(ws, r, 0, f["finding_id"])
+        _write_str(ws, r, 1, f["rule_id"])
+        _write_str(ws, r, 2, f.get("test_id"))
+        _write_str(ws, r, 3, f["severity"])
+        ws.write_boolean(r, 4, analyst_set)
+        _write_str(ws, r, 5, basis)
+        _write_str(ws, r, 6, f["title"])
+        _write_str(ws, r, 7, f.get("observation"))
+        _write_str(ws, r, 8, f.get("recommendation"))
+        ws.write_number(r, 9, f.get("exposure_amount") or 0.0, money)
+        _write_str(ws, r, 10, f.get("exposure_basis"))
+        _write_str(ws, r, 11, f.get("review_state"))
+    _write_str(ws, len(findings) + 2, 0, footer)
 
     ws2 = wb.add_worksheet("Metrics")
     ws2.write_row(0, 0, ["metric_name", "value", "unit", "test_id", "source_ref"], bold)
     for r, (name, m) in enumerate(sorted(metrics.items()), start=1):
-        ws2.write(r, 0, name)
+        _write_str(ws2, r, 0, name)
         value = m.get("value")
         if isinstance(value, (int, float)) and not isinstance(value, bool):
             ws2.write_number(r, 1, value)
         else:
-            ws2.write(r, 1, "" if value is None else str(value))
-        ws2.write(r, 2, m.get("unit"))
-        ws2.write(r, 3, m.get("test_id"))
-        ws2.write(r, 4, json.dumps(m.get("source_ref", {}), sort_keys=True))
-    ws2.write(len(metrics) + 2, 0, footer)
+            _write_str(ws2, r, 1, value)
+        _write_str(ws2, r, 2, m.get("unit"))
+        _write_str(ws2, r, 3, m.get("test_id"))
+        _write_str(ws2, r, 4, json.dumps(m.get("source_ref", {}), sort_keys=True))
+    _write_str(ws2, len(metrics) + 2, 0, footer)
 
     ws3 = wb.add_worksheet("Test Results")
     ws3.write_row(0, 0, ["test_id", "status", "exception_units", "reason"], bold)
     for r, t in enumerate(state.test_results, start=1):
-        ws3.write_row(r, 0, [t["test_id"], t["status"], t["exception_units"], t.get("reason") or ""])
-    ws3.write(len(state.test_results) + 2, 0, footer)
+        _write_str(ws3, r, 0, t["test_id"])
+        _write_str(ws3, r, 1, t["status"])
+        ws3.write_number(r, 2, t["exception_units"])
+        _write_str(ws3, r, 3, t.get("reason") or "")
+    _write_str(ws3, len(state.test_results) + 2, 0, footer)
 
     ws4 = wb.add_worksheet("Reconciliation")
     ws4.write_row(
@@ -580,14 +635,14 @@ def _write_xlsx_workpaper(state: RunState, findings: list[dict], metrics: dict[s
     )
     reconciliation = state.reconciliation or {}
     for r, (source, rec) in enumerate(sorted(reconciliation.items()), start=1):
-        ws4.write_row(
-            r, 0,
-            [
-                source, rec.get("engine_rows"), rec.get("independent_rows"), rec.get("variance"),
-                rec.get("amount"), rec.get("min_date"), rec.get("max_date"),
-            ],
-        )
-    ws4.write(len(reconciliation) + 2, 0, footer)
+        _write_str(ws4, r, 0, source)
+        ws4.write_number(r, 1, rec.get("engine_rows") or 0)
+        ws4.write_number(r, 2, rec.get("independent_rows") or 0)
+        ws4.write_number(r, 3, rec.get("variance") or 0)
+        ws4.write_number(r, 4, rec.get("amount") or 0.0, money)
+        _write_str(ws4, r, 5, rec.get("min_date"))
+        _write_str(ws4, r, 6, rec.get("max_date"))
+    _write_str(ws4, len(reconciliation) + 2, 0, footer)
 
     counts: dict[str, int] = {}
     for row in flagged_rows:
@@ -595,8 +650,9 @@ def _write_xlsx_workpaper(state: RunState, findings: list[dict], metrics: dict[s
     ws5 = wb.add_worksheet("Flagged Row Counts")
     ws5.write_row(0, 0, ["flag", "row_count"], bold)
     for r, (flag, n) in enumerate(sorted(counts.items()), start=1):
-        ws5.write_row(r, 0, [flag, n])
-    ws5.write(len(counts) + 2, 0, footer)
+        _write_str(ws5, r, 0, flag)
+        ws5.write_number(r, 1, n)
+    _write_str(ws5, len(counts) + 2, 0, footer)
 
     wb.close()
     return buf.getvalue()

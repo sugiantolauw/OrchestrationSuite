@@ -365,3 +365,53 @@ def test_export_writes_xlsx_and_records_it(local_persistence, tmp_path):
     import hashlib
 
     assert hashlib.sha256(path.read_bytes()).hexdigest() == xlsx_recorded[0]["sha256"]
+
+
+def test_export_xlsx_never_writes_a_live_formula_cell(local_persistence, tmp_path):
+    """P2/P3 gate review item 7 (OWASP CSV/formula-injection guidance): a
+    data-derived string starting with =, +, -, @, tab or CR must be written
+    as literal text, prefixed with a single quote, never as a live formula
+    Excel would evaluate on open."""
+    import openpyxl
+
+    h = _make_harness(local_persistence, tmp_path)
+    state = _run_through_prioritise(h)
+    state = dataclasses.replace(state, objective="=HYPERLINK(\"http://evil.example\",\"click me\")")
+    state = act(h.ctx, state)
+    state = export(h.ctx, state)
+
+    path = Path(state.exports["xlsx"]["path"])
+    wb = openpyxl.load_workbook(path)
+    cover = wb["Cover"]
+    objective_cell = cover.cell(row=6, column=2)  # ("objective", value) row, value column
+    assert objective_cell.value == "'=HYPERLINK(\"http://evil.example\",\"click me\")"
+    assert objective_cell.data_type == "s"  # shared string, never "f" (formula)
+
+
+def test_export_xlsx_raises_if_severity_provenance_was_never_persisted(local_persistence, tmp_path):
+    """CLAUDE.md §0.4/G8, item 3: never defaults analyst_set_severity to
+    False -- a finding missing its persisted provenance must fail the export
+    loudly rather than produce an unattributed severity in the workpaper."""
+    h = _make_harness(local_persistence, tmp_path)
+    state = _run_through_prioritise(h)
+    state = act(h.ctx, state)
+
+    findings = h.persistence.list_findings(state.run_id)
+    assert findings, "fixture must produce at least one finding to corrupt"
+
+    # write_findings' own contract requires analyst_set_severity/severity_basis
+    # to be supplied by the caller -- simulate a caller bug (a future node that
+    # forgets to carry them) by re-writing this run's findings without them.
+    stripped = [dict(f) for f in findings]
+    for f in stripped:
+        f.pop("analyst_set_severity", None)
+        f.pop("severity_basis", None)
+    h.persistence.write_findings(
+        state.run_id, stripped, engagement_id=state.engagement_id, skill_id=state.skill_id,
+        skill_version=state.skill_version, now=canonical_ts(9),
+    )
+
+    from orchestrator.errors import MissingSeverityProvenance
+
+    with pytest.raises(MissingSeverityProvenance):
+        export(h.ctx, state)

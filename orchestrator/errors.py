@@ -155,3 +155,18 @@ class NonDraftFindingWouldBeDeleted(Exception):
             f"write_findings(run_id={run_id!r}): {sorted(finding_ids)} are no longer in the "
             f"new finding set but have review_state past 'draft' -- refusing to delete them"
         )
+
+
+class MissingSeverityProvenance(Exception):
+    """CLAUDE.md §0.4/G8, P2/P3 gate review item 3: a finding whose severity
+    provenance (analyst_set_severity / severity_basis) was never persisted.
+    Raised by every reader (XLSX export, UI) instead of silently defaulting
+    to False -- an unattributed severity is not defensible in a CAO meeting."""
+
+    def __init__(self, finding_id: str, field: str):
+        self.finding_id = finding_id
+        self.field = field
+        super().__init__(
+            f"finding {finding_id!r}: {field} was not persisted -- a severity's provenance "
+            f"must never be assumed (CLAUDE.md §0.4)"
+        )

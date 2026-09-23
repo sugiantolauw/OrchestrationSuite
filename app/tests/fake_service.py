@@ -97,21 +97,50 @@ def suggest_bindings(ctx, skill_id: str) -> dict:
     return {"expense_report": "test_catalog.tne_source.expense_report", "attendee_validity": None}
 
 
+# CLAUDE.md P2/P3 gate review item 2: the real service's get_run() returns
+# RunState.findings -- the COMPACT node-output projection the find/prioritise
+# nodes write (orchestrator/nodes/fieldwork.py's `compact` list: finding_id,
+# rule_id, test_id, severity, title, analyst_set_severity, exposure_amount --
+# no observation/recommendation/management_questions/metrics_cited). Only
+# get_run_payload() returns the FULL persisted row (every column
+# orchestrator/adapters/persistence_delta.py's _FINDING_COLUMNS / sqlite's
+# equivalent writes, via list_findings). This fake used to hand the SAME full
+# dict back from both, which is exactly the shape the real service does NOT
+# have -- app code exercised only against this fake would never have caught
+# workspace_tne.py reading cards from the compact projection. _make_findings
+# below is the full shape; _compact_finding derives the same compact
+# projection orchestrator/nodes/fieldwork.py's `prioritise` writes into
+# RunState.findings, and get_run() below returns THAT, not the full dict.
+_COMPACT_FINDING_KEYS = ("finding_id", "rule_id", "test_id", "severity", "title", "analyst_set_severity", "exposure_amount")
+
+
+def _compact_finding(f: dict) -> dict:
+    return {k: f[k] for k in _COMPACT_FINDING_KEYS}
+
+
 def _make_findings(run_id: str) -> list:
     return [
         {
             "finding_id": f"{run_id}:T4_1",
+            "run_id": run_id,
+            "engagement_id": "ENG-DEFAULT",
             "rule_id": "SKILL-001.T4_1",
+            "skill_id": "SKILL-001",
+            "skill_version": "1.2",
             "test_id": "T4.1",
             "title": "Missing Receipt Documentation",
             "severity": "High",
+            "severity_rule": "missing_receipt_pct > thresholds.missing_receipt_high",
             "severity_basis": "threshold",
             "analyst_set_severity": True,
             "threshold_refs": [],
+            "proposed_severity": None,
+            "proposed_severity_reason": None,
             "metrics_cited": {
                 "missing_receipt_count": {"value": 12, "unit": "count", "source_ref": "expense_report@v1"},
                 "missing_receipt_pct": {"value": 8.5, "unit": "%", "source_ref": "expense_report@v1"},
             },
+            "evidence_refs": [],
             "observation": "12 claims (8.5% of total) are missing receipt documentation.",
             "recommendation": "Enforce mandatory receipt attachment.",
             "management_questions": ["What is the current policy for claims without receipts?"],
@@ -120,7 +149,12 @@ def _make_findings(run_id: str) -> list:
             "assertion": "operating",
             "exposure_amount": None,
             "exposure_basis": "pending P3 de-duplicated exposure",
+            "theme_id": None,
             "review_state": "draft",
+            "prior_finding_id": None,
+            "recurrence_count": 0,
+            "created_at": "2026-09-23T00:00:00Z",
+            "updated_at": "2026-09-23T00:00:00Z",
         },
     ]
 
@@ -139,6 +173,7 @@ def start_audit_run(
 ) -> str:
     run_id = f"RUN-{uuid.uuid4().hex[:8].upper()}"
     status = "awaiting_confirmation" if review_plan_first else "awaiting_signoff"
+    full_findings = _make_findings(run_id)
     ctx.runs[run_id] = {
         "run_id": run_id,
         "skill_id": skill_id,
@@ -154,7 +189,12 @@ def start_audit_run(
         "status_reason": None,
         "state_version": 1,
         "progress": {"node_index": 2, "total_nodes": 9, "current_stage": "plan"},
-        "findings": _make_findings(run_id),
+        # findings: the compact RunState.findings projection, same shape
+        # get_run() returns for real (CLAUDE.md P2/P3 gate review item 2) --
+        # _findings_full is this fake's own bookkeeping for get_run_payload
+        # and list_management_actions, never returned from get_run().
+        "findings": [_compact_finding(f) for f in full_findings],
+        "_findings_full": full_findings,
         "test_results": [
             {"test_id": "T4.1", "status": "exception", "reason": None, "exception_units": 12},
             {"test_id": "T5.1", "status": "pass", "reason": None, "exception_units": 0},
@@ -165,7 +205,13 @@ def start_audit_run(
 
 
 def get_run(ctx, run_id: str):
-    return ctx.runs.get(run_id)
+    run = ctx.runs.get(run_id)
+    if run is None:
+        return None
+    # Defence against a future edit accidentally re-adding full finding
+    # fields to "findings" above: get_run() must never leak observation/
+    # recommendation/metrics_cited (CLAUDE.md P2/P3 gate review item 2).
+    return {k: v for k, v in run.items() if k != "_findings_full"}
 
 
 def list_runs(ctx, filters=None) -> list:
@@ -205,7 +251,7 @@ def list_trace_events(ctx, run_id=None) -> list:
 def list_management_actions(ctx, filters=None) -> list:
     out = []
     for run_id, run in ctx.runs.items():
-        for f in run.get("findings", []):
+        for f in run.get("_findings_full", []):
             out.append({
                 "action_id": f"MA-{f['finding_id']}",
                 "finding_id": f["finding_id"],
@@ -267,7 +313,7 @@ def get_run_payload(ctx, run_id) -> dict:
             "claims_combined_amount": {"value": 6825.0, "unit": "AUD", "source_ref": {}},
         },
         "test_results": run.get("test_results", []),
-        "findings": run.get("findings", []),
+        "findings": run.get("_findings_full", []),
         "reconciliation": {
             "expense_report": {"engine_rows": 6, "independent_rows": 6, "variance": 0,
                                "amount": 6825.0, "min_date": "2025-02-01", "max_date": "2025-06-15"},

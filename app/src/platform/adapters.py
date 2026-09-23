@@ -36,6 +36,15 @@ def get_context():
     return _ctx
 
 
+class MissingIdentityHeader(Exception):
+    """CLAUDE.md §9A.1 / P2/P3 gate review item 7: the deployed (non-local)
+    backend requires a verified identity (X-Forwarded-Email / X-Forwarded-
+    User, set by the platform's front door) for run_owner/actor -- it must
+    never silently fall back to "local-user" the way the local backend does.
+    Raised by run_setup.py/run_status.py's identity helpers, caught by their
+    callbacks and shown as a blocking error, never swallowed into a default."""
+
+
 # ── Environment label ────────────────────────────────────────────────────────
 
 def get_environment_label() -> str:
@@ -46,6 +55,14 @@ def get_environment_label() -> str:
     ctx = get_context()
     r = service.ready(ctx)
     return "Local test data" if r.get("backend") == "local" else "Unity Catalog"
+
+
+def is_local_backend() -> bool:
+    """True only when this process is actually talking to the local backend
+    (LocalPersistence/local file sources) -- the one place run_owner/actor
+    may fall back to the "local-user" label without a verified identity
+    header (CLAUDE.md §9A.1, P2/P3 gate review item 7)."""
+    return service.ready(get_context()).get("backend") == "local"
 
 
 # ── Skill registry ───────────────────────────────────────────────────────────

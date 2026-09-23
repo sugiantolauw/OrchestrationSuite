@@ -104,24 +104,50 @@ def _load_bundle(run_id: str) -> dict | None:
     if cached is not None:
         return cached
 
+    # payload/frame load failures are never swallowed into an empty dict --
+    # that used to render a page that looked merely sparse instead of
+    # broken, and hid genuine data-integrity failures such as
+    # orchestrator.frames.FrameSnapshotIntegrityError (a sha256 mismatch on
+    # a run's persisted row snapshot) behind what looked like "no data yet"
+    # (CLAUDE.md NN14, P2/P3 gate review item 7). Caught here (this module
+    # never imports orchestrator directly) and surfaced by
+    # tne_workspace_layout as an explicit error panel naming the exception
+    # class, instead of a silent empty page.
+    load_error: Exception | None = None
     try:
         payload = adapters.get_run_payload(run_id) or {}
-    except Exception:
+    except Exception as exc:
         payload = {}
+        load_error = exc
     try:
         frames = adapters.get_run_frames(run_id) or {}
-    except Exception:
+    except Exception as exc:
         frames = {}
+        load_error = load_error or exc
     skill = adapters.get_skill(run.get("skill_id")) if run.get("skill_id") else None
     try:
         actions = adapters.list_management_actions(filters={"run_id": run_id}) or []
     except Exception:
         actions = []
 
-    bundle = {"run": run, "payload": payload, "frames": frames, "skill": skill or {}, "actions": actions}
+    bundle = {
+        "run": run, "payload": payload, "frames": frames, "skill": skill or {},
+        "actions": actions, "load_error": load_error,
+    }
     _CACHE.clear()
     _CACHE[key] = bundle
     return bundle
+
+
+def _load_error_panel(run_id: str, exc: Exception) -> html.Div:
+    return html.Div([
+        html.Div([
+            html.H2("This run's data could not be loaded", className="page-title"),
+            html.P(f"{type(exc).__name__}: {exc}", className="page-subtitle",
+                   style={"fontFamily": "monospace", "color": "#b85042"}),
+            html.P(f"run_id: {run_id}", className="sub"),
+        ], className="showcase-hero"),
+    ], className="shell dashboard-shell")
 
 
 def latest_completed_run_id() -> str | None:
@@ -541,11 +567,23 @@ def _finding_card(idx: int, finding: dict) -> html.Article:
     q1 = questions[0] if questions else ""
     exposure = finding.get("exposure_amount")
 
+    # CLAUDE.md §0.4/G8, P2/P3 gate review item 3: analyst_set_severity is a
+    # persisted tri-state (True/False/None), never a value this render
+    # function is allowed to default. None means the run never persisted it
+    # (a write_findings caller bug) -- that must fail loudly, not silently
+    # render as "not analyst-set" (False), which is exactly the wrong,
+    # undefensible label CLAUDE.md §0.4 exists to prevent.
+    if "analyst_set_severity" not in finding or finding["analyst_set_severity"] is None:
+        raise ValueError(
+            f"finding {finding.get('finding_id')!r}: analyst_set_severity was not persisted "
+            "-- a severity's provenance must never be assumed (CLAUDE.md §0.4)"
+        )
+
     summary_items = [
         html.Span(severity, className="chip", style={"color": color, "borderColor": color}),
         html.Span(test_id, className="chip mono", style={"color": "#6b7283"}),
     ]
-    if finding.get("analyst_set_severity"):
+    if finding["analyst_set_severity"]:
         summary_items.append(html.Span(
             "Analyst-set threshold — pending policy confirmation", className="chip",
             style={"color": "#6b4a00", "borderColor": "#e0952a", "fontSize": 10.5},
@@ -682,10 +720,14 @@ def _findings_analytics(frames: dict, findings: list[dict], meta: dict[str, dict
 
 
 def _findings_tab(bundle: dict) -> html.Div:
-    findings = bundle["run"].get("findings", [])
+    # Full findings (observation/recommendation/management_questions) come from
+    # get_run_payload's persisted rows, never RunState.findings (get_run) -- the
+    # latter is the compact node-output projection and carries no prose
+    # (CLAUDE.md P2/P3 gate review item 2).
+    payload = bundle["payload"]
+    findings = payload.get("findings", [])
     frames = bundle["frames"]
     tests = bundle["skill"].get("tests", [])
-    payload = bundle["payload"]
     meta = _skill_flag_meta(bundle["run"].get("skill_id"), tests)
 
     n_high = sum(1 for f in findings if f.get("severity") == "High")
@@ -1365,12 +1407,20 @@ def tne_workspace_layout(run_id: str | None) -> html.Div:
     bundle = _load_bundle(run_id)
     if bundle is None:
         return _empty_state()
+    if bundle.get("load_error") is not None:
+        return _load_error_panel(run_id, bundle["load_error"])
 
     run = bundle["run"]
-    findings = run.get("findings", [])
+    payload = bundle["payload"]
+    # Full findings (observation/recommendation/management_questions/metrics_cited)
+    # come from get_run_payload's persisted rows, never RunState.findings (get_run)
+    # -- the latter is the compact node-output projection and feeds this same
+    # value into tne-findings-store, so every downstream callback (filter,
+    # evidence drill-down, executive brief) was rendering empty prose
+    # (CLAUDE.md P2/P3 gate review item 2).
+    findings = payload.get("findings", [])
     tests = bundle["skill"].get("tests", [])
     test_results = run.get("test_results", [])
-    payload = bundle["payload"]
     actions = bundle["actions"]
 
     findings_and_actions = dbc.Tabs([

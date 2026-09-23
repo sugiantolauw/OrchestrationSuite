@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import flask
 import pytest
 
+import fake_service
 from src import run_setup
 from src.platform import adapters
 
@@ -56,6 +58,28 @@ def test_start_audit_run_creates_an_awaiting_signoff_run():
     run = adapters.get_run(run_id)
     assert run["status"] == "awaiting_signoff"
     assert run["run_owner"] == "auditor@example.com"
+
+
+_probe_app = flask.Flask(__name__)
+
+
+def test_request_owner_uses_forwarded_header_when_present():
+    with _probe_app.test_request_context("/", headers={"X-Forwarded-Email": "auditor@example.com"}):
+        assert run_setup._request_owner() == "auditor@example.com"
+
+
+def test_request_owner_falls_back_to_local_user_on_local_backend():
+    with _probe_app.test_request_context("/"):
+        assert run_setup._request_owner() == "local-user"
+
+
+def test_request_owner_blocks_on_deployed_backend_with_no_identity_header(monkeypatch):
+    """CLAUDE.md §9A.1, P2/P3 gate review item 7: the deployed backend must
+    never silently record run_owner='local-user' for an unverified caller."""
+    monkeypatch.setattr(fake_service, "ready", lambda ctx: {"ready": True, "backend": "uc", "detail": None})
+    with _probe_app.test_request_context("/"):
+        with pytest.raises(adapters.MissingIdentityHeader):
+            run_setup._request_owner()
 
 
 def test_start_audit_run_review_plan_first_awaits_confirmation():

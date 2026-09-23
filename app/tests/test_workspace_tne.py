@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fake_service
 from src import workspace_tne
 from src.platform import adapters
 
@@ -46,6 +47,27 @@ def test_workspace_layout_with_no_run_id_shows_empty_state():
     assert "No completed run yet" in str(layout)
 
 
+def test_workspace_layout_shows_error_panel_when_payload_load_fails(monkeypatch):
+    """CLAUDE.md NN14, P2/P3 gate review item 7: a get_run_payload failure
+    (e.g. orchestrator.frames.FrameSnapshotIntegrityError -- a sha256
+    mismatch on a run's persisted row snapshot) must render an explicit
+    error panel naming the exception, never a silent empty-looking page."""
+    run_id = _completed_run()
+
+    class _FrameSnapshotIntegrityError(Exception):
+        pass
+
+    def _raise(ctx, rid):
+        raise _FrameSnapshotIntegrityError("sha256 mismatch for source expense_report")
+
+    monkeypatch.setattr(fake_service, "get_run_payload", _raise)
+    layout = workspace_tne.tne_workspace_layout(run_id)
+    text = str(layout)
+    assert "could not be loaded" in text
+    assert "_FrameSnapshotIntegrityError" in text
+    assert "sha256 mismatch" in text
+
+
 def test_finding_card_flags_analyst_set_threshold():
     finding = {
         "severity": "High", "test_id": "T4.1", "title": "Missing receipts",
@@ -58,9 +80,23 @@ def test_finding_card_flags_analyst_set_threshold():
     assert "not yet computed" in text
 
 
+def test_finding_card_raises_if_analyst_set_severity_was_never_persisted():
+    """CLAUDE.md §0.4/G8, P2/P3 gate review item 3: never render an
+    unattributed severity as if it were policy-backed."""
+    import pytest
+
+    finding = {
+        "severity": "High", "test_id": "T4.1", "title": "Missing receipts",
+        "observation": "obs", "recommendation": "rec", "management_questions": ["q?"],
+        "exposure_amount": None,
+    }
+    with pytest.raises(ValueError, match="analyst_set_severity"):
+        workspace_tne._finding_card(0, finding)
+
+
 def test_render_filtered_findings_shows_top_three_and_collapses_rest():
     findings = [{"severity": "High", "title": f"F{i}", "observation": "", "recommendation": "",
-                 "management_questions": []} for i in range(5)]
+                 "management_questions": [], "analyst_set_severity": False} for i in range(5)]
     children = workspace_tne._render_filtered_findings(findings, [], [], "authored")
     assert "Showing the top 3" in str(children[0])
 
@@ -68,8 +104,8 @@ def test_render_filtered_findings_shows_top_three_and_collapses_rest():
 def test_render_filtered_findings_applies_category_filter():
     tests = [{"test_id": "T4.1", "category": "Spend compliance"}, {"test_id": "T5.1", "category": "Fraud risk"}]
     findings = [
-        {"severity": "High", "test_id": "T4.1", "title": "Missing Receipts Finding", "observation": "", "recommendation": "", "management_questions": []},
-        {"severity": "High", "test_id": "T5.1", "title": "Split Claims Finding", "observation": "", "recommendation": "", "management_questions": []},
+        {"severity": "High", "test_id": "T4.1", "title": "Missing Receipts Finding", "observation": "", "recommendation": "", "management_questions": [], "analyst_set_severity": False},
+        {"severity": "High", "test_id": "T5.1", "title": "Split Claims Finding", "observation": "", "recommendation": "", "management_questions": [], "analyst_set_severity": True},
     ]
     children = workspace_tne._render_filtered_findings(findings, [], ["Fraud risk"], "authored", tests)
     text = str(children)
