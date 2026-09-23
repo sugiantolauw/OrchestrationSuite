@@ -60,3 +60,30 @@ class FingerprintConflict(Exception):
             f"fingerprint_id {fingerprint_id!r} already exists with different content "
             f"in fields: {differing_fields}"
         )
+
+
+class NodeContractViolation(Exception):
+    pass
+
+
+class AttemptNotFound(Exception):
+    def __init__(self, execution_key: str):
+        self.execution_key = execution_key
+        super().__init__(f"node attempt not found: {execution_key!r}")
+
+
+class AttemptAlreadyClosed(Exception):
+    def __init__(self, execution_key: str, existing_outcome: str, requested_outcome: str):
+        self.execution_key = execution_key
+        self.existing_outcome = existing_outcome
+        self.requested_outcome = requested_outcome
+        super().__init__(
+            f"node attempt {execution_key!r} already closed with outcome "
+            f"{existing_outcome!r}, cannot close again with {requested_outcome!r}"
+        )
+
+
+class EngagementNotFound(Exception):
+    def __init__(self, engagement_id: str):
+        self.engagement_id = engagement_id
+        super().__init__(f"engagement not found: {engagement_id!r}")

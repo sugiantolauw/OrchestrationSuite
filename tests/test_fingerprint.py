@@ -107,10 +107,18 @@ def test_changes_when_requirements_change(tmp_path):
 
 
 def test_changes_when_config_value_changes():
-    fp1 = _fp(settings=_settings(max_concurrent_runs=2))
-    fp2 = _fp(settings=_settings(max_concurrent_runs=3))
+    fp1 = _fp(settings=_settings(demo_mode=False))
+    fp2 = _fp(settings=_settings(demo_mode=True))
     assert fp1["fingerprint_id"] != fp2["fingerprint_id"]
     assert fp1["runtime_config_hash"] != fp2["runtime_config_hash"]
+
+
+def test_unchanged_when_operational_knobs_change():
+    # max_concurrent_runs and executor are scheduling knobs, not part of what a run
+    # computes -- excluded from runtime_config_hash (CLAUDE.md §4.1).
+    fp1 = _fp(settings=_settings(max_concurrent_runs=2, executor="thread"))
+    fp2 = _fp(settings=_settings(max_concurrent_runs=6, executor="jobs"))
+    assert fp1["fingerprint_id"] == fp2["fingerprint_id"]
 
 
 def test_changes_when_endpoint_changes():
@@ -136,6 +144,23 @@ def test_changes_when_prompt_file_changes(tmp_path):
 def test_prompt_template_version_is_explicit_none_sentinel_when_absent():
     fp = _fp(prompts_dirs=[])
     assert fp["prompt_template_version"] == "none"
+
+
+def test_changes_when_reference_file_byte_changes(tmp_path):
+    ref = tmp_path / "sgd_aud_rate.csv"
+    ref.write_text("rate,effective_date\n0.90,2026-01-01\n")
+    fp1 = _fp(reference_files=[ref])
+
+    ref.write_text("rate,effective_date\n0.91,2026-01-01\n")
+    fp2 = _fp(reference_files=[ref])
+
+    assert fp1["fingerprint_id"] != fp2["fingerprint_id"]
+    assert fp1["reference_data_hashes"] != fp2["reference_data_hashes"]
+
+
+def test_reference_data_hashes_empty_when_absent():
+    fp = _fp(reference_files=None)
+    assert json.loads(fp["reference_data_hashes"]) == {}
 
 
 def test_secrets_never_included(monkeypatch):

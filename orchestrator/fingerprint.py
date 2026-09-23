@@ -18,6 +18,7 @@ _SKILL_FILES = ("manifest.yaml", "contract.yaml", "plan.yaml", "thresholds.yaml"
 _HASHED_FIELDS = (
     "source_table_versions",
     "uploaded_file_hashes",
+    "reference_data_hashes",
     "skill_content_hash",
     "code_revision",
     "dependency_lock_hash",
@@ -64,6 +65,18 @@ def _skill_content_hash(skill_dir: Path | None) -> str | None:
             if p.is_file():
                 entries.append((str(p.relative_to(skill_dir)), p.read_bytes()))
     return _hash_entries(entries)
+
+
+def _reference_data_hashes(reference_files: list[Path] | None) -> dict[str, str]:
+    hashes: dict[str, str] = {}
+    for raw in reference_files or []:
+        p = Path(raw)
+        try:
+            rel = str(p.resolve().relative_to(_REPO_ROOT))
+        except ValueError:
+            rel = str(p)
+        hashes[rel] = sha256_file(p)
+    return hashes
 
 
 def _prompt_template_version(prompts_dirs: list[Path]) -> str:
@@ -120,12 +133,14 @@ def compute_fingerprint(
     skill_dir: Path | None,
     requirements_path: Path,
     prompts_dirs: list[Path],
+    reference_files: list[Path] | None = None,
     code_revision: str | None = None,
 ) -> dict:
     requirements_path = Path(requirements_path)
     fields = {
         "source_table_versions": _canonical_json(source_table_versions),
         "uploaded_file_hashes": _canonical_json(uploaded_file_hashes),
+        "reference_data_hashes": _canonical_json(_reference_data_hashes(reference_files)),
         "skill_content_hash": _skill_content_hash(skill_dir),
         "code_revision": _resolve_code_revision(code_revision, settings.code_revision),
         "dependency_lock_hash": sha256_bytes(requirements_path.read_bytes()),

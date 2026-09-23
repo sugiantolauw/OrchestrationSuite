@@ -59,7 +59,7 @@ def test_trivial_fieldwork_playbook_run_end_to_end(persistence, clock, tmp_path)
     )
     assert state.status == "queued"
 
-    state = run_phase(persistence, state.run_id, nodes_for=NODES_FOR, clock=clock)
+    state = run_phase(persistence, state.run_id, nodes_for=NODES_FOR, clock=clock, current_fingerprint=fingerprint)
     assert state.status == "awaiting_confirmation"
     assert state.phase == "plan"
 
@@ -68,7 +68,7 @@ def test_trivial_fieldwork_playbook_run_end_to_end(persistence, clock, tmp_path)
     assert state.phase == "execute"
     assert state.plan_confirmed is True
 
-    state = run_phase(persistence, state.run_id, nodes_for=NODES_FOR, clock=clock)
+    state = run_phase(persistence, state.run_id, nodes_for=NODES_FOR, clock=clock, current_fingerprint=fingerprint)
     assert state.status == "awaiting_signoff"
     assert state.phase == "execute"
 
@@ -77,7 +77,7 @@ def test_trivial_fieldwork_playbook_run_end_to_end(persistence, clock, tmp_path)
     assert state.phase == "export"
     assert state.signoff == {"approver": "alice", "timestamp": state.signoff["timestamp"]}
 
-    state = run_phase(persistence, state.run_id, nodes_for=NODES_FOR, clock=clock)
+    state = run_phase(persistence, state.run_id, nodes_for=NODES_FOR, clock=clock, current_fingerprint=fingerprint)
     assert state.status == "completed"
     assert state.phase == "export"
     assert state.completed_at is not None

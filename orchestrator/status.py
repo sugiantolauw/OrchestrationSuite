@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+from typing import Callable
 
 from orchestrator.errors import InvalidTransition
 from orchestrator.state import RunState
@@ -30,6 +31,20 @@ _PHASE_REQUIRED_FOR_STATUS: dict[str, str] = {
     "completed": "export",
 }
 
+# CLAUDE.md §2.4 / NN3: the only two phase changes a run may ever make, each gated on
+# the human decision that authorises it. `state` here is the state passed INTO
+# transition() -- confirm_plan/sign_off set plan_confirmed/signoff on it (via
+# dataclasses.replace) before calling transition(), so the gate sees the field it
+# needs. Explorer mode can never satisfy the auto-confirm clause because it checks
+# `mode == "playbook"` explicitly -- Explorer can only pass via plan_confirmed, which
+# only the explicit confirm_plan() call sets.
+_PHASE_CHANGE_GATES: dict[tuple[str, str], Callable[[RunState], bool]] = {
+    ("plan", "execute"): lambda s: bool(
+        s.plan_confirmed or (s.mode == "playbook" and bool(s.options.get("auto_confirm_plan")))
+    ),
+    ("execute", "export"): lambda s: s.signoff is not None,
+}
+
 
 def transition(
     state: RunState,
@@ -44,14 +59,33 @@ def transition(
     if to_status not in allowed:
         raise InvalidTransition(from_status, to_status)
 
-    if from_status == "running" and to_status == "running":
-        new_phase = phase if phase is not None else state.phase
-        if new_phase == state.phase:
+    new_phase = phase if phase is not None else state.phase
+
+    if from_status == "running" and to_status == "running" and new_phase == state.phase:
+        raise InvalidTransition(
+            from_status, to_status, detail="running->running requires a phase change"
+        )
+
+    if new_phase != state.phase:
+        if from_status == "interrupted":
+            # A resume must never smuggle a phase change past a gate -- it continues
+            # exactly where the run was interrupted, nothing more (CLAUDE.md §9C).
             raise InvalidTransition(
-                from_status, to_status, detail="running->running requires a phase change"
+                from_status, to_status, detail="interrupted->queued must not change phase"
             )
-    else:
-        new_phase = phase if phase is not None else state.phase
+        gate = _PHASE_CHANGE_GATES.get((state.phase, new_phase))
+        if gate is None:
+            raise InvalidTransition(
+                from_status,
+                to_status,
+                detail=f"phase change {state.phase!r} -> {new_phase!r} is not permitted",
+            )
+        if not gate(state):
+            raise InvalidTransition(
+                from_status,
+                to_status,
+                detail=f"phase change {state.phase!r} -> {new_phase!r} blocked: gate condition not satisfied",
+            )
 
     required_phase = _PHASE_REQUIRED_FOR_STATUS.get(to_status)
     if required_phase is not None and new_phase != required_phase:
@@ -69,6 +103,7 @@ def transition(
     }
     if new_phase != state.phase:
         updates["next_node_index"] = 0
+        updates["phase_epoch"] = state.state_version + 1
     if to_status == "running" and state.started_at is None:
         updates["started_at"] = now
     if to_status in ("completed", "failed"):

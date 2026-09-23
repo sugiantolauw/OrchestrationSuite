@@ -86,8 +86,18 @@ def load_settings(env: dict | None = None) -> Settings:
     )
 
 
+# Operational knobs excluded from the runtime config hash: they change how a run is
+# scheduled (concurrency cap, which Executor runs it), never what it computes, so two
+# runs configured identically except for these should share a fingerprint (CLAUDE.md
+# §4.1, non-blocking item).
+_RUNTIME_HASH_EXCLUDED_FIELDS = frozenset({"max_concurrent_runs", "executor"})
+
+
 def runtime_config_hash(settings: Settings) -> str:
-    payload = json.dumps(asdict(settings), sort_keys=True, separators=(",", ":"))
+    payload_dict = {
+        k: v for k, v in asdict(settings).items() if k not in _RUNTIME_HASH_EXCLUDED_FIELDS
+    }
+    payload = json.dumps(payload_dict, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 

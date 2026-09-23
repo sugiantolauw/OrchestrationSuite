@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS ${catalog}.${schema}.run_state (
   run_id STRING NOT NULL,
   state_version BIGINT NOT NULL,
   state_json STRING NOT NULL,
+  status STRING NOT NULL,
   updated_at TIMESTAMP NOT NULL,
   CONSTRAINT run_state_pk PRIMARY KEY (run_id)
 ) USING DELTA TBLPROPERTIES (
@@ -42,6 +43,7 @@ CREATE TABLE IF NOT EXISTS ${catalog}.${schema}.run_fingerprints (
   fingerprint_id STRING NOT NULL,
   source_table_versions STRING NOT NULL,
   uploaded_file_hashes STRING NOT NULL,
+  reference_data_hashes STRING NOT NULL,
   skill_content_hash STRING,
   code_revision STRING NOT NULL,
   dependency_lock_hash STRING NOT NULL,
@@ -59,6 +61,7 @@ CREATE TABLE IF NOT EXISTS ${catalog}.${schema}.node_attempts (
   execution_key STRING NOT NULL,
   run_id STRING NOT NULL,
   phase STRING NOT NULL,
+  phase_epoch BIGINT NOT NULL,
   node_index INT NOT NULL,
   node_name STRING NOT NULL,
   attempt_number INT NOT NULL,
@@ -116,6 +119,10 @@ ALTER TABLE ${catalog}.${schema}.runs ADD CONSTRAINT runs_status CHECK (status I
 ALTER TABLE ${catalog}.${schema}.runs ADD CONSTRAINT runs_state_version CHECK (state_version >= 1);
 
 ALTER TABLE ${catalog}.${schema}.run_state ADD CONSTRAINT run_state_state_version CHECK (state_version >= 1);
+
+ALTER TABLE ${catalog}.${schema}.run_state ADD CONSTRAINT run_state_status CHECK (status IN ('queued', 'running', 'awaiting_confirmation', 'awaiting_signoff', 'completed', 'failed', 'interrupted'));
+
+ALTER TABLE ${catalog}.${schema}.node_attempts ADD CONSTRAINT node_attempts_phase_epoch CHECK (phase_epoch >= 1);
 
 ALTER TABLE ${catalog}.${schema}.node_attempts ADD CONSTRAINT node_attempts_attempt_number CHECK (attempt_number >= 1);
 

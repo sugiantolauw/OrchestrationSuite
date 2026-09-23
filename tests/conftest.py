@@ -11,14 +11,20 @@ from orchestrator.config import load_settings
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
+def canonical_ts(n: int = 0) -> str:
+    """A deterministic canonical (YYYY-MM-DDTHH:MM:SS.ffffffZ) timestamp for tests,
+    replacing the old 't0'/'t1' placeholders that validate() now rejects."""
+    minutes, seconds = divmod(n, 60)
+    return f"2026-01-01T00:{minutes:02d}:{seconds:02d}.000000Z"
+
+
 @pytest.fixture
 def clock():
     state = {"n": 0}
 
     def _clock() -> str:
         state["n"] += 1
-        minutes, seconds = divmod(state["n"], 60)
-        return f"2026-01-01T00:{minutes:02d}:{seconds:02d}.000000+00:00"
+        return canonical_ts(state["n"])
 
     return _clock
 

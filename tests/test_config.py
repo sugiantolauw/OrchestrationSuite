@@ -43,8 +43,17 @@ def test_runtime_config_hash_stable_for_same_settings():
 
 def test_runtime_config_hash_changes_with_a_field():
     s1 = Settings(catalog="cat", schema="sch")
-    s2 = dataclasses.replace(s1, max_concurrent_runs=5)
+    s2 = dataclasses.replace(s1, demo_mode=True)
     assert runtime_config_hash(s1) != runtime_config_hash(s2)
+
+
+def test_runtime_config_hash_excludes_operational_knobs():
+    # max_concurrent_runs and executor change how a run is scheduled, never what it
+    # computes -- CLAUDE.md §4.1 non-blocking item, two runs differing only in these
+    # should fingerprint identically.
+    s1 = Settings(catalog="cat", schema="sch", max_concurrent_runs=2, executor="thread")
+    s2 = dataclasses.replace(s1, max_concurrent_runs=7, executor="jobs")
+    assert runtime_config_hash(s1) == runtime_config_hash(s2)
 
 
 def test_runtime_config_hash_excludes_secrets():

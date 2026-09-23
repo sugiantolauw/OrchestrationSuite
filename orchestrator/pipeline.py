@@ -2,11 +2,39 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import json
 import time
 
-from orchestrator.errors import InvalidTransition
-from orchestrator.state import RunState, from_json, to_json
+from orchestrator.errors import FingerprintMismatch, InvalidTransition, NodeContractViolation
+from orchestrator.fingerprint import verify_fingerprint
+from orchestrator.state import LIFECYCLE, RunState, apply_node_output, from_json, node_owned_json
 from orchestrator.status import transition
+
+# Display labels for the Trace page (CLAUDE.md §9C non-blocking item; the UI's
+# trace_event_row renders `stage` as plain text). A node name not listed here (there
+# shouldn't be one, but a Skill's custom.py primitive could in principle add one) falls
+# back to the raw node name rather than raising.
+NODE_STAGE_LABELS: dict[str, str] = {
+    "discover": "Source data",
+    "profile": "Data profiling",
+    "plan": "Plan",
+    "execute": "Tests",
+    "classify": "Exceptions",
+    "find": "Findings",
+    "prioritise": "Insights",
+    "act": "Actions",
+    "export": "Exports",
+}
+
+# node_attempts outcome/event_type -> the Trace page's status vocabulary
+# (reference_app/src/platform/components.py's _TRACE_STATUS_STYLE: complete/running/
+# pending/failed/awaiting_confirmation). node_started is the node currently executing,
+# so it maps to 'running', not a bespoke 'started'.
+_NODE_EVENT_STATUS: dict[str, str] = {
+    "node_started": "running",
+    "node_completed": "complete",
+    "node_failed": "failed",
+}
 
 
 def _node_event_id(execution_key: str, event_type: str) -> str:
@@ -23,8 +51,8 @@ def _emit_node_event(
             "engagement_id": state.engagement_id,
             "event_type": event_type,
             "event_time": now,
-            "stage": attempt["node_name"],
-            "status": event_type.replace("node_", ""),
+            "stage": NODE_STAGE_LABELS.get(attempt["node_name"], attempt["node_name"]),
+            "status": _NODE_EVENT_STATUS.get(event_type, event_type),
             "message": message,
             "duration_s": duration_s,
             "node_name": attempt["node_name"],
@@ -40,10 +68,56 @@ def _transition_and_save(persistence, state: RunState, to_status: str, *, now: s
     return persistence.save_state(new_state)
 
 
-def run_phase(persistence, run_id: str, *, nodes_for: dict, skill=None, clock, worker_alive=None) -> RunState:
+def _check_lifecycle_unchanged(state: RunState, result: RunState) -> None:
+    # A node may only write NODE_OWNED fields (CLAUDE.md §4.1, B1) -- the pipeline loop
+    # enforces this rather than trusting it, comparing every LIFECYCLE field between
+    # the state a node was handed and the state it returned.
+    changed = [
+        name for name in LIFECYCLE
+        if getattr(state, name) != getattr(result, name)
+    ]
+    if changed:
+        raise NodeContractViolation(
+            f"node returned changed lifecycle field(s) {sorted(changed)!r}; a node may "
+            f"only write NODE_OWNED fields, lifecycle fields belong to the pipeline"
+        )
+
+
+def _select_recovered_attempt(attempts: list[dict], *, node_name: str, phase: str, phase_epoch: int, node_index: int) -> dict | None:
+    # Recovery match (CLAUDE.md §9C/B2): same run/phase/phase_epoch/node_name/node_index,
+    # outcome succeeded, highest attempt_number -- never ordered by a caller-supplied
+    # timestamp, which is not trustworthy across a crash/restart.
+    matching = [
+        a for a in attempts
+        if a["node_name"] == node_name
+        and a["phase"] == phase
+        and a.get("phase_epoch") == phase_epoch
+        and a["node_index"] == node_index
+        and a["outcome"] == "succeeded"
+    ]
+    if not matching:
+        return None
+    return max(matching, key=lambda a: a["attempt_number"])
+
+
+def run_phase(persistence, run_id: str, *, nodes_for: dict, skill=None, clock, worker_alive=None, current_fingerprint: dict) -> RunState:
     state = persistence.load_state(run_id)
 
     if state.status == "queued":
+        # Fingerprint verification happens on EVERY executor pass, not just the first
+        # (CLAUDE.md §3 non-negotiable 8, §9C non-blocking item): a run must never
+        # execute a node against a setup that has drifted from the one it was created
+        # under. A mismatch fails the run outright -- it never runs a node.
+        stored_fingerprint = persistence.get_fingerprint(state.fingerprint_id)
+        try:
+            verify_fingerprint(stored_fingerprint, current_fingerprint)
+        except FingerprintMismatch as exc:
+            now_fail = clock()
+            failed_state = transition(
+                state, "failed", now=now_fail,
+                reason=f"fingerprint mismatch, run never executed: {sorted(exc.differing_fields)}",
+            )
+            return persistence.save_state(failed_state)
         state = _transition_and_save(persistence, state, "running", now=clock())
 
     if state.status != "running":
@@ -58,25 +132,41 @@ def run_phase(persistence, run_id: str, *, nodes_for: dict, skill=None, clock, w
                 return state
 
             node_name, fn = nodes[idx]
-            existing = [a for a in persistence.list_node_attempts(run_id) if a["node_name"] == node_name]
-            latest = existing[-1] if existing else None
+            attempts = persistence.list_node_attempts(run_id)
+            recovered_attempt = _select_recovered_attempt(
+                attempts, node_name=node_name, phase=state.phase, phase_epoch=state.phase_epoch, node_index=idx,
+            )
 
-            if latest is not None and latest["outcome"] == "succeeded":
+            if recovered_attempt is not None:
                 # Write-ahead recovery: the node already ran and its attempt was durably
-                # recorded as succeeded, but the authoritative run_state was never advanced
-                # past it (crash between complete_node_attempt and save_state). The loop
-                # invariant idx == state.next_node_index at this point is what tells us this
-                # attempt has not yet been incorporated — do not re-execute fn.
-                recovered = from_json(latest["result_state_json"])
-                recovered = dataclasses.replace(recovered, state_version=state.state_version)
+                # recorded as succeeded, but the authoritative run_state was never
+                # advanced past it (crash between complete_node_attempt and save_state).
+                # The loop invariant idx == state.next_node_index at this point is what
+                # tells us this attempt has not yet been incorporated -- do not
+                # re-execute fn.
+                owned = json.loads(recovered_attempt["result_state_json"])
+                recovered = apply_node_output(state, owned)
+                recovered = dataclasses.replace(
+                    recovered, next_node_index=idx + 1, current_node_attempt_id=recovered_attempt["attempt_id"],
+                )
                 state = persistence.save_state(recovered)
+                _emit_node_event(
+                    persistence, state, recovered_attempt, event_type="node_completed",
+                    message=f"{node_name} completed", now=recovered_attempt.get("completed_at") or clock(),
+                )
                 idx += 1
                 continue
 
+            # current_node_attempt_id is set below on completion (succeeded or failed),
+            # not here on start: "currently executing" is already observable as the
+            # open (outcome IS NULL) row this begin_node_attempt call creates, so
+            # setting it here too would just be an extra CAS write per node for no new
+            # information (CLAUDE.md §9C/B1).
             now_start = clock()
             attempt = persistence.begin_node_attempt(
                 run_id=run_id,
                 phase=state.phase,
+                phase_epoch=state.phase_epoch,
                 node_index=idx,
                 node_name=node_name,
                 state_version_before=state.state_version,
@@ -87,6 +177,12 @@ def run_phase(persistence, run_id: str, *, nodes_for: dict, skill=None, clock, w
             started_at = time.monotonic()
             try:
                 result = fn(skill, state)
+                _check_lifecycle_unchanged(state, result)
+                # apply_node_output's own append-only check (events/errors must extend,
+                # never rewrite) is a NodeContractViolation exactly like a bad lifecycle
+                # write -- computed inside this same try so either is a node failure,
+                # not an uncaught exception out of run_phase.
+                new_state = apply_node_output(state, result)
             except Exception as exc:
                 duration = time.monotonic() - started_at
                 now_fail = clock()
@@ -94,6 +190,7 @@ def run_phase(persistence, run_id: str, *, nodes_for: dict, skill=None, clock, w
                     attempt["execution_key"], outcome="failed", now=now_fail, error_detail=repr(exc)
                 )
                 failed_state = transition(state, "failed", now=now_fail, reason=f"node {node_name!r} failed: {exc!r}")
+                failed_state = dataclasses.replace(failed_state, current_node_attempt_id=attempt["attempt_id"])
                 state = persistence.save_state(failed_state)
                 _emit_node_event(
                     persistence, state, attempt, event_type="node_failed",
@@ -103,13 +200,15 @@ def run_phase(persistence, run_id: str, *, nodes_for: dict, skill=None, clock, w
 
             duration = time.monotonic() - started_at
             now_end = clock()
-            new_state = dataclasses.replace(result, next_node_index=idx + 1)
+            new_state = dataclasses.replace(
+                new_state, next_node_index=idx + 1, current_node_attempt_id=attempt["attempt_id"],
+            )
             persistence.complete_node_attempt(
                 attempt["execution_key"],
                 outcome="succeeded",
                 now=now_end,
                 state_version_after=state.state_version + 1,
-                result_state_json=to_json(new_state),
+                result_state_json=node_owned_json(new_state),
             )
             state = persistence.save_state(new_state)
             _emit_node_event(
@@ -123,6 +222,11 @@ def run_phase(persistence, run_id: str, *, nodes_for: dict, skill=None, clock, w
             auto_confirm = state.mode == "playbook" and bool(state.options.get("auto_confirm_plan"))
             if not auto_confirm:
                 return _transition_and_save(persistence, state, "awaiting_confirmation", now=clock())
+            # The plan->execute gate (status.py) accepts this via the auto-confirm
+            # clause, but plan_confirmed is still set explicitly here so the audit
+            # trail on `state` reflects that the plan WAS confirmed, not silently
+            # skipped (CLAUDE.md §2.4, B3).
+            state = dataclasses.replace(state, plan_confirmed=True)
             state = _transition_and_save(persistence, state, "running", now=clock(), phase="execute")
             continue
         if state.phase == "execute":

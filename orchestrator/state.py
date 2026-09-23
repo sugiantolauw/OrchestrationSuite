@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import dataclasses
 import json
 import math
 from dataclasses import asdict, dataclass, field, fields
 from datetime import date
 from typing import Any, Literal
 
-from orchestrator.errors import NotJsonSafe
+from orchestrator.errors import NodeContractViolation, NotJsonSafe
+from orchestrator.timeutil import is_canonical_date, is_canonical_ts
 
 RunKind = Literal["fieldwork", "sensing", "assessment", "planning"]
 Mode = Literal["playbook", "explorer"]
@@ -56,6 +58,7 @@ class RunState:
     run_owner: str
     fingerprint_id: str
     state_version: int = 0
+    phase_epoch: int = 1  # the state_version at which the run entered `phase` (CLAUDE.md §9C, B2)
 
     # timestamps
     created_at: str
@@ -99,6 +102,117 @@ class RunState:
     status: Status
 
 
+# The node function's job is to produce these; the pipeline loop never trusts a node
+# to leave everything else alone -- it enforces it (B1). Every RunState field belongs
+# to exactly one of these two sets. test_state.py asserts the partition is complete
+# and disjoint against fields(RunState), so this can never silently drift.
+NODE_OWNED: frozenset[str] = frozenset(
+    {
+        "data_assets",
+        "uploaded_files",
+        "profile_result",
+        "plan",
+        "plan_rationale",
+        "test_results",
+        "flagged_table",
+        "reconciliation",
+        "exceptions",
+        "findings",
+        "management_actions",
+        "exports",
+        "profile_narrative",
+        "classification_reasoning",
+        "finding_narratives",
+        "priority_rationale",
+        "remediation_drafts",
+        "exec_summary",
+        "chart_captions",
+        "events",
+        "errors",
+    }
+)
+
+LIFECYCLE: frozenset[str] = frozenset(
+    {
+        "run_id",
+        "run_kind",
+        "engagement_id",
+        "skill_id",
+        "skill_version",
+        "mode",
+        "phase",
+        "next_node_index",
+        "audit_period",
+        "objective",
+        "business_unit",
+        "materiality",
+        "options",
+        "run_owner",
+        "fingerprint_id",
+        "state_version",
+        "phase_epoch",
+        "created_at",
+        "started_at",
+        "completed_at",
+        "last_state_change_at",
+        "current_node_attempt_id",
+        "plan_confirmed",
+        "plan_edits",
+        "signoff",
+        "status_reason",
+        "status",
+    }
+)
+
+_APPEND_ONLY_NODE_FIELDS = ("events", "errors")
+
+
+def _field_value(obj: Any, name: str) -> Any:
+    if isinstance(obj, dict):
+        return obj[name]
+    return getattr(obj, name)
+
+
+def apply_node_output(current: "RunState", node_result: Any) -> "RunState":
+    """Merges a node's output into `current`: NODE_OWNED fields come from
+    `node_result`, every LIFECYCLE field is preserved unchanged from `current`.
+    `node_result` may be a full RunState (the normal path, a node function's return
+    value) or a plain dict holding only the node-owned fields (the recovery path,
+    read back from `node_attempts.result_state_json`) -- both are read the same way.
+
+    `events` and `errors` are append-only node-owned lists: node_result's list must
+    start with current's list (the node may only append), or this raises
+    NodeContractViolation. The merged value is node_result's own list, since the
+    prefix check already proves it equals current's list plus a new tail.
+    """
+    updates: dict[str, Any] = {}
+    for name in NODE_OWNED:
+        if name in _APPEND_ONLY_NODE_FIELDS:
+            continue
+        updates[name] = _field_value(node_result, name)
+    for name in _APPEND_ONLY_NODE_FIELDS:
+        cur_list = getattr(current, name)
+        new_list = _field_value(node_result, name)
+        if list(new_list[: len(cur_list)]) != list(cur_list):
+            raise NodeContractViolation(
+                f"{name}: node result does not start with the current state's {name} "
+                f"(a node may only append, never rewrite or drop entries)"
+            )
+        updates[name] = new_list
+    return dataclasses.replace(current, **updates)
+
+
+def node_owned_snapshot(state: "RunState") -> dict:
+    return {name: getattr(state, name) for name in NODE_OWNED}
+
+
+def node_owned_json(state: "RunState") -> str:
+    snapshot = node_owned_snapshot(state)
+    for name, value in snapshot.items():
+        _walk(value, name)
+    return json.dumps(snapshot, sort_keys=True, separators=(",", ":"))
+
+
 def _walk(value: Any, path: str) -> None:
     if value is None or isinstance(value, (bool, int, str)):
         return
@@ -106,7 +220,13 @@ def _walk(value: Any, path: str) -> None:
         if not math.isfinite(value):
             raise NotJsonSafe(f"{path}: non-finite float {value!r}")
         return
-    if isinstance(value, (list, tuple)):
+    if isinstance(value, tuple):
+        # Tuples don't round-trip through JSON (they come back as lists), so the only
+        # place one is allowed is RunState.audit_period, which assert_json_safe unwraps
+        # to a list before walking it. Anywhere else a tuple means the node put one in
+        # by accident.
+        raise NotJsonSafe(f"{path}: tuple is not JSON-safe outside audit_period ({value!r})")
+    if isinstance(value, list):
         for i, item in enumerate(value):
             _walk(item, f"{path}[{i}]")
         return
@@ -121,7 +241,11 @@ def _walk(value: Any, path: str) -> None:
 
 def assert_json_safe(state: RunState) -> None:
     for f in fields(state):
-        _walk(getattr(state, f.name), f.name)
+        value = getattr(state, f.name)
+        if f.name == "audit_period":
+            _walk(list(value), f.name)
+        else:
+            _walk(value, f.name)
 
 
 def _to_jsonable(state: RunState) -> dict:
@@ -170,3 +294,17 @@ def validate(state: RunState) -> None:
             f"engagement_id: required when run_kind={state.run_kind!r} "
             f"(only 'sensing' may omit it)"
         )
+
+    if state.phase_epoch < 1:
+        raise ValueError(f"phase_epoch: must be >= 1, got {state.phase_epoch!r}")
+
+    for name in ("created_at", "last_state_change_at"):
+        value = getattr(state, name)
+        if not is_canonical_ts(value):
+            raise ValueError(f"{name}: not a canonical timestamp: {value!r}")
+    for name in ("started_at", "completed_at"):
+        value = getattr(state, name)
+        if value is not None and not is_canonical_ts(value):
+            raise ValueError(f"{name}: not a canonical timestamp: {value!r}")
+    if not is_canonical_date(start_s) or not is_canonical_date(end_s):
+        raise ValueError(f"audit_period: dates must be YYYY-MM-DD: {state.audit_period!r}")

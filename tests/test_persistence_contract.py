@@ -5,12 +5,15 @@ import dataclasses
 import pytest
 
 from orchestrator.errors import (
+    AttemptAlreadyClosed,
+    AttemptNotFound,
     FingerprintConflict,
     RunAlreadyExists,
     RunNotFound,
     StaleStateError,
 )
 from orchestrator.state import RunState
+from tests.conftest import canonical_ts
 
 # Runs against every persistence backend (local_memory, local_file, delta) via the
 # `persistence` fixture in conftest.py. This is the shared contract test suite referenced
@@ -23,13 +26,14 @@ def _fingerprint(fp_id="FP-1", **overrides):
         fingerprint_id=fp_id,
         source_table_versions="{}",
         uploaded_file_hashes="{}",
+        reference_data_hashes="{}",
         skill_content_hash=None,
         code_revision="rev1",
         dependency_lock_hash="dep1",
         runtime_config_hash="rc1",
         endpoint_config="{}",
         prompt_template_version="none",
-        created_at="2026-01-01T00:00:00+00:00",
+        created_at=canonical_ts(0),
     )
     base.update(overrides)
     return base
@@ -45,8 +49,8 @@ def _state(run_id="RUN-1", **overrides):
         objective="test",
         run_owner="alice",
         fingerprint_id="FP-1",
-        created_at="2026-01-01T00:00:00+00:00",
-        last_state_change_at="2026-01-01T00:00:00+00:00",
+        created_at=canonical_ts(0),
+        last_state_change_at=canonical_ts(0),
         status="queued",
         engagement_id="ENG-DEFAULT",
     )
@@ -158,13 +162,40 @@ def test_complete_node_attempt_never_overwrites_succeeded(persistence):
         a1["execution_key"], outcome="succeeded", now="t2",
         state_version_after=2, result_state_json="{\"marker\": 1}",
     )
-    persistence.complete_node_attempt(
-        a1["execution_key"], outcome="failed", now="t3", error_detail="should not apply"
-    )
+    # closing again with a DIFFERENT outcome is a genuine contract violation, not a
+    # silent no-op (CLAUDE.md §9C non-blocking item).
+    with pytest.raises(AttemptAlreadyClosed):
+        persistence.complete_node_attempt(
+            a1["execution_key"], outcome="failed", now="t3", error_detail="should not apply"
+        )
     rows = [a for a in persistence.list_node_attempts("RUN-OVERWRITE") if a["node_name"] == "discover"]
     assert len(rows) == 1
     assert rows[0]["outcome"] == "succeeded"
     assert rows[0]["result_state_json"] == "{\"marker\": 1}"
+
+
+def test_complete_node_attempt_same_outcome_is_idempotent_noop(persistence):
+    persistence.create_run(_state(run_id="RUN-IDEMPOTENT"), _fingerprint(fp_id="FP-IDEMPOTENT"))
+    a1 = persistence.begin_node_attempt(
+        run_id="RUN-IDEMPOTENT", phase="plan", node_index=0, node_name="discover",
+        state_version_before=1, now="t1",
+    )
+    persistence.complete_node_attempt(
+        a1["execution_key"], outcome="succeeded", now="t2",
+        state_version_after=2, result_state_json="{\"marker\": 1}",
+    )
+    persistence.complete_node_attempt(  # same outcome again -- no-op, no raise
+        a1["execution_key"], outcome="succeeded", now="t3",
+        state_version_after=2, result_state_json="{\"marker\": 1}",
+    )
+    rows = [a for a in persistence.list_node_attempts("RUN-IDEMPOTENT") if a["node_name"] == "discover"]
+    assert len(rows) == 1
+    assert rows[0]["outcome"] == "succeeded"
+
+
+def test_complete_node_attempt_missing_raises_attempt_not_found(persistence):
+    with pytest.raises(AttemptNotFound):
+        persistence.complete_node_attempt("RUN-NOPE:plan:1:discover:1", outcome="failed", now="t1")
 
 
 def test_trace_events_idempotent_and_ui_shape(persistence):

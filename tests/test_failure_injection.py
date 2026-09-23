@@ -12,6 +12,7 @@ from orchestrator.pipeline import run_phase
 from orchestrator.reaper import reap_orphaned_runs
 from orchestrator.status import transition
 from orchestrator.state import RunState
+from tests.conftest import canonical_ts
 
 
 def _fingerprint(fp_id="FP-FI"):
@@ -19,13 +20,14 @@ def _fingerprint(fp_id="FP-FI"):
         fingerprint_id=fp_id,
         source_table_versions="{}",
         uploaded_file_hashes="{}",
+        reference_data_hashes="{}",
         skill_content_hash=None,
         code_revision="rev1",
         dependency_lock_hash="dep1",
         runtime_config_hash="rc1",
         endpoint_config="{}",
         prompt_template_version="none",
-        created_at="2026-01-01T00:00:00+00:00",
+        created_at="2026-01-01T00:00:00.000000Z",
     )
 
 
@@ -34,7 +36,7 @@ def _make_clock():
 
     def clock():
         counter["n"] += 1
-        return f"t{counter['n']}"
+        return canonical_ts(counter["n"])
 
     return clock
 
@@ -87,7 +89,7 @@ def test_write_ahead_recovery_node_not_re_executed(local_persistence):
     persistence.save_state = patched_save_state
     try:
         with pytest.raises(RuntimeError, match="simulated crash"):
-            run_phase(persistence, state.run_id, nodes_for=nodes_for, clock=clock)
+            run_phase(persistence, state.run_id, nodes_for=nodes_for, clock=clock, current_fingerprint=_fingerprint())
     finally:
         persistence.complete_node_attempt = orig_complete
         persistence.save_state = orig_save_state
@@ -100,7 +102,7 @@ def test_write_ahead_recovery_node_not_re_executed(local_persistence):
     resumed = runs.resume(persistence, state.run_id, actor="alice", now=clock(), current_fingerprint=_fingerprint())
     assert resumed.status == "queued"
 
-    final = run_phase(persistence, state.run_id, nodes_for=nodes_for, clock=clock)
+    final = run_phase(persistence, state.run_id, nodes_for=nodes_for, clock=clock, current_fingerprint=_fingerprint())
     assert final.status == "awaiting_confirmation"
     assert call_counts["discover"] == 1
     assert call_counts["profile"] == 1
@@ -119,7 +121,7 @@ def test_duplicate_cas_second_call_rejected(persistence):
         RunState(
             run_id="RUN-DUPCAS", run_kind="fieldwork", mode="playbook", phase="plan",
             audit_period=("2026-01-01", "2026-01-31"), objective="t", run_owner="alice",
-            fingerprint_id="FP-DUPCAS", created_at="t0", last_state_change_at="t0",
+            fingerprint_id="FP-DUPCAS", created_at=canonical_ts(0), last_state_change_at=canonical_ts(0),
             status="queued", engagement_id="ENG-DEFAULT",
         ),
         _fingerprint("FP-DUPCAS"),
@@ -141,14 +143,14 @@ def test_concurrent_resume_only_one_succeeds_threads(local_persistence):
         RunState(
             run_id="RUN-RACE-T", run_kind="fieldwork", mode="playbook", phase="plan",
             audit_period=("2026-01-01", "2026-01-31"), objective="t", run_owner="alice",
-            fingerprint_id="FP-RACE-T", created_at="t0", last_state_change_at="t0",
+            fingerprint_id="FP-RACE-T", created_at=canonical_ts(0), last_state_change_at=canonical_ts(0),
             status="queued", engagement_id="ENG-DEFAULT",
         ),
         _fingerprint("FP-RACE-T"),
     )
-    running = transition(created, "running", now="t1")
+    running = transition(created, "running", now=canonical_ts(1))
     persistence.save_state(running)
-    interrupted = transition(persistence.load_state("RUN-RACE-T"), "interrupted", now="t2")
+    interrupted = transition(persistence.load_state("RUN-RACE-T"), "interrupted", now=canonical_ts(2))
     persistence.save_state(interrupted)
 
     barrier = threading.Barrier(2)
@@ -157,7 +159,7 @@ def test_concurrent_resume_only_one_succeeds_threads(local_persistence):
     def attempt_resume():
         barrier.wait()
         try:
-            r = runs.resume(persistence, "RUN-RACE-T", actor="alice", now="t3", current_fingerprint=_fingerprint("FP-RACE-T"))
+            r = runs.resume(persistence, "RUN-RACE-T", actor="alice", now=canonical_ts(3), current_fingerprint=_fingerprint("FP-RACE-T"))
             results.append(("ok", r.status))
         except (StaleStateError, InvalidTransition):
             # Both are the accepted "lost the race" outcomes (CLAUDE.md §9C scenario c):
@@ -202,8 +204,10 @@ def _child_resume(db_path, ddl_dir, run_id, fp_dict, barrier_file, result_file):
                 break
         time.sleep(0.01)
 
+    from tests.conftest import canonical_ts as _canonical_ts
+
     try:
-        r = runs_mod.resume(p, run_id, actor="proc", now=f"t-{os.getpid()}", current_fingerprint=fp_dict)
+        r = runs_mod.resume(p, run_id, actor="proc", now=_canonical_ts(os.getpid() % 3600), current_fingerprint=fp_dict)
         outcome = f"ok:{r.status}"
     except (SSE, IT):
         # Both are the accepted "lost the race" outcomes (CLAUDE.md §9C scenario c).
@@ -226,14 +230,14 @@ def test_concurrent_resume_only_one_succeeds_processes(tmp_path):
         RunState(
             run_id="RUN-RACE-P", run_kind="fieldwork", mode="playbook", phase="plan",
             audit_period=("2026-01-01", "2026-01-31"), objective="t", run_owner="alice",
-            fingerprint_id="FP-RACE-P", created_at="t0", last_state_change_at="t0",
+            fingerprint_id="FP-RACE-P", created_at=canonical_ts(0), last_state_change_at=canonical_ts(0),
             status="queued", engagement_id="ENG-DEFAULT",
         ),
         fp,
     )
-    running = transition(created, "running", now="t1")
+    running = transition(created, "running", now=canonical_ts(1))
     p.save_state(running)
-    interrupted = transition(p.load_state("RUN-RACE-P"), "interrupted", now="t2")
+    interrupted = transition(p.load_state("RUN-RACE-P"), "interrupted", now=canonical_ts(2))
     p.save_state(interrupted)
 
     barrier_file = str(tmp_path / "barrier.txt")
@@ -299,7 +303,7 @@ def test_executor_dies_mid_node_only_that_node_reexecutes(local_persistence):
     )
 
     with pytest.raises(_SimulatedProcessDeath):
-        run_phase(persistence, state.run_id, nodes_for=nodes_for, clock=clock)
+        run_phase(persistence, state.run_id, nodes_for=nodes_for, clock=clock, current_fingerprint=_fingerprint("FP-DIE"))
 
     attempts = {a["node_name"]: a for a in persistence.list_node_attempts(state.run_id)}
     assert attempts["discover"]["outcome"] == "succeeded"
@@ -312,7 +316,7 @@ def test_executor_dies_mid_node_only_that_node_reexecutes(local_persistence):
     resumed = runs.resume(persistence, state.run_id, actor="alice", now=clock(), current_fingerprint=_fingerprint("FP-DIE"))
     assert resumed.status == "queued"
 
-    final = run_phase(persistence, state.run_id, nodes_for=nodes_for, clock=clock)
+    final = run_phase(persistence, state.run_id, nodes_for=nodes_for, clock=clock, current_fingerprint=_fingerprint("FP-DIE"))
     assert final.status == "awaiting_confirmation"
 
     assert call_counts["discover"] == 1  # earlier node not re-run

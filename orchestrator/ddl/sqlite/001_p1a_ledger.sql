@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS run_state (
   run_id TEXT NOT NULL PRIMARY KEY,
   state_version INTEGER NOT NULL CHECK (state_version >= 1),
   state_json TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'awaiting_confirmation', 'awaiting_signoff', 'completed', 'failed', 'interrupted')),
   updated_at TEXT NOT NULL
 );
 
@@ -34,6 +35,7 @@ CREATE TABLE IF NOT EXISTS run_fingerprints (
   fingerprint_id TEXT NOT NULL PRIMARY KEY,
   source_table_versions TEXT NOT NULL,
   uploaded_file_hashes TEXT NOT NULL,
+  reference_data_hashes TEXT NOT NULL,
   skill_content_hash TEXT,
   code_revision TEXT NOT NULL,
   dependency_lock_hash TEXT NOT NULL,
@@ -48,6 +50,7 @@ CREATE TABLE IF NOT EXISTS node_attempts (
   execution_key TEXT NOT NULL UNIQUE,
   run_id TEXT NOT NULL,
   phase TEXT NOT NULL,
+  phase_epoch BIGINT NOT NULL CHECK (phase_epoch >= 1),
   node_index INTEGER NOT NULL,
   node_name TEXT NOT NULL,
   attempt_number INTEGER NOT NULL CHECK (attempt_number >= 1),

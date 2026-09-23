@@ -13,11 +13,18 @@ class DataSourceAdapter(Protocol):
     def resolve_source_versions(self, table_fqns: list[str]) -> dict[str, str]:
         ...
 
+    def resolve_version(self, source: str) -> str:
+        """Resolve a single source's version (e.g. via DESCRIBE HISTORY). Callers must
+        resolve_version() first and pass the *same* version into read_population's
+        VERSION AS OF -- resolving after the read would leave a TOCTOU gap between what
+        was read and what provenance records were captured (CLAUDE.md §4.1)."""
+        ...
+
     def read_population(
         self,
-        table_fqn: str,
+        source: str,
         *,
-        version: str | None = None,
+        version: int | str,
         columns: list[str] | None = None,
         filters: dict[str, Any] | None = None,
     ) -> Any:
@@ -72,6 +79,7 @@ class PersistenceAdapter(Protocol):
         *,
         run_id: str,
         phase: str,
+        phase_epoch: int = 1,
         node_index: int,
         node_name: str,
         state_version_before: int,
@@ -109,6 +117,18 @@ class PersistenceAdapter(Protocol):
     def close_open_attempts(
         self, run_id: str, *, outcome: str, now: str, error_detail: str | None = None
     ) -> None:
+        ...
+
+    def repair_projections(self) -> int:
+        """Rewrites any `runs` row whose state_version lags its `run_state` row (a save
+        whose projection update failed and was swallowed, CLAUDE.md §9C/B4). Returns the
+        number of rows repaired. Called at App start alongside the reaper."""
+        ...
+
+    def get_engagement(self, engagement_id: str) -> dict | None:
+        ...
+
+    def list_engagements(self) -> list[dict]:
         ...
 
 
