@@ -5,6 +5,7 @@ import hashlib
 import json
 import time
 
+from orchestrator.adapters.protocols import NullTracing
 from orchestrator.errors import FingerprintMismatch, InvalidTransition, NodeContractViolation
 from orchestrator.fingerprint import verify_fingerprint
 from orchestrator.state import LIFECYCLE, RunState, apply_node_output, from_json, node_owned_json
@@ -68,6 +69,75 @@ def _transition_and_save(persistence, state: RunState, to_status: str, *, now: s
     return persistence.save_state(new_state)
 
 
+def _tracing_unavailable_event_id(run_id: str) -> str:
+    # Keyed on run_id ONLY (never state_version) so this is written at most
+    # once per run regardless of how many executor passes or node attempts
+    # see tracing unavailable -- `append_trace_event` is INSERT OR IGNORE on
+    # event_id (CLAUDE.md §2.3 rule 4 / non-negotiable 13: report it, don't
+    # spam it, and never let it slow down or fail node execution).
+    return hashlib.sha256(f"{run_id}:tracing_unavailable".encode("utf-8")).hexdigest()[:32]
+
+
+def _note_tracing_unavailable(persistence, state: RunState, *, reason: str, now: str) -> None:
+    persistence.append_trace_event(
+        {
+            "event_id": _tracing_unavailable_event_id(state.run_id),
+            "run_id": state.run_id,
+            "engagement_id": state.engagement_id,
+            "event_type": "tracing_unavailable",
+            "event_time": now,
+            "stage": "Tracing",
+            "status": state.status,
+            "message": f"MLflow tracing unavailable -- run proceeding without it: {reason}",
+            "duration_s": None,
+            "node_name": None,
+            "execution_key": None,
+            "actor": "tracing",
+            "state_version": state.state_version,
+        }
+    )
+
+
+def _start_pipeline_trace(tracing, persistence, state: RunState, *, current_fingerprint: dict | None, now: str) -> None:
+    # One MLflow run per pipeline run (CLAUDE.md §2.3), never per executor
+    # pass -- start_run is idempotent per run_id. Never allowed to affect the
+    # audit result: any failure here is caught and reported as a single
+    # trace_event, never raised into the node loop.
+    try:
+        tracing.start_run(
+            state.run_id,
+            params={
+                "run_id": state.run_id,
+                "skill_id": state.skill_id,
+                "skill_version": state.skill_version,
+                "fingerprint_id": state.fingerprint_id,
+                "code_revision": (current_fingerprint or {}).get("code_revision"),
+            },
+        )
+    except Exception as exc:
+        _note_tracing_unavailable(persistence, state, reason=repr(exc), now=now)
+        return
+    if not tracing.available:
+        _note_tracing_unavailable(persistence, state, reason=tracing.unavailable_reason or "unknown", now=now)
+
+
+def _start_node_span(tracing, persistence, state: RunState, *, node_name: str, now: str) -> str:
+    try:
+        return tracing.start_span(run_id=state.run_id, node_name=node_name) or ""
+    except Exception as exc:  # never let a tracing failure fail or slow the node
+        _note_tracing_unavailable(persistence, state, reason=repr(exc), now=now)
+        return ""
+
+
+def _end_node_span(tracing, span_id: str, *, outcome: str, attributes: dict | None = None) -> None:
+    if not span_id:
+        return
+    try:
+        tracing.end_span(span_id, outcome=outcome, attributes=attributes)
+    except Exception:
+        pass  # CLAUDE.md §2.3: tracing never changes the audit result
+
+
 def _check_lifecycle_unchanged(state: RunState, result: RunState) -> None:
     # A node may only write NODE_OWNED fields (CLAUDE.md §4.1, B1) -- the pipeline loop
     # enforces this rather than trusting it, comparing every LIFECYCLE field between
@@ -100,8 +170,12 @@ def _select_recovered_attempt(attempts: list[dict], *, node_name: str, phase: st
     return max(matching, key=lambda a: a["attempt_number"])
 
 
-def run_phase(persistence, run_id: str, *, nodes_for: dict, skill=None, clock, worker_alive=None, current_fingerprint: dict) -> RunState:
+def run_phase(
+    persistence, run_id: str, *, nodes_for: dict, skill=None, clock, worker_alive=None,
+    current_fingerprint: dict, tracing=None,
+) -> RunState:
     state = persistence.load_state(run_id)
+    tracing = tracing or NullTracing()
 
     if state.status == "queued":
         # Fingerprint verification happens on EVERY executor pass, not just the first
@@ -122,6 +196,8 @@ def run_phase(persistence, run_id: str, *, nodes_for: dict, skill=None, clock, w
 
     if state.status != "running":
         raise InvalidTransition(state.status, "running", detail="run_phase requires the run to be queued or running")
+
+    _start_pipeline_trace(tracing, persistence, state, current_fingerprint=current_fingerprint, now=clock())
 
     while True:
         nodes = nodes_for[state.run_kind][state.phase]
@@ -174,6 +250,7 @@ def run_phase(persistence, run_id: str, *, nodes_for: dict, skill=None, clock, w
             )
             _emit_node_event(persistence, state, attempt, event_type="node_started", message=f"{node_name} started", now=now_start)
 
+            span_id = _start_node_span(tracing, persistence, state, node_name=node_name, now=now_start)
             started_at = time.monotonic()
             try:
                 result = fn(skill, state)
@@ -189,6 +266,10 @@ def run_phase(persistence, run_id: str, *, nodes_for: dict, skill=None, clock, w
                 persistence.complete_node_attempt(
                     attempt["execution_key"], outcome="failed", now=now_fail, error_detail=repr(exc)
                 )
+                _end_node_span(
+                    tracing, span_id, outcome="failed",
+                    attributes={"attempt_number": attempt.get("attempt_number"), "duration_s": duration, "error": repr(exc)},
+                )
                 failed_state = transition(state, "failed", now=now_fail, reason=f"node {node_name!r} failed: {exc!r}")
                 failed_state = dataclasses.replace(failed_state, current_node_attempt_id=attempt["attempt_id"])
                 state = persistence.save_state(failed_state)
@@ -199,6 +280,10 @@ def run_phase(persistence, run_id: str, *, nodes_for: dict, skill=None, clock, w
                 return state
 
             duration = time.monotonic() - started_at
+            _end_node_span(
+                tracing, span_id, outcome="succeeded",
+                attributes={"attempt_number": attempt.get("attempt_number"), "duration_s": duration},
+            )
             now_end = clock()
             new_state = dataclasses.replace(
                 new_state, next_node_index=idx + 1, current_node_attempt_id=attempt["attempt_id"],

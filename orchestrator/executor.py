@@ -19,6 +19,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Callable
 
+from orchestrator.adapters.protocols import NullTracing
 from orchestrator.errors import StaleStateError
 from orchestrator.nodes.fieldwork import NODES_FOR
 from orchestrator.pipeline import run_phase
@@ -108,6 +109,7 @@ class ThreadExecutor:
         poll_interval_s: float = _DEFAULT_POLL_INTERVAL_S,
         lease_ttl_s: float = _DEFAULT_LEASE_TTL_S,
         heartbeat_interval_s: float = _DEFAULT_HEARTBEAT_INTERVAL_S,
+        tracing=None,
     ):
         self._persistence = persistence
         self._settings = settings
@@ -116,6 +118,7 @@ class ThreadExecutor:
         self._fingerprint_factory = fingerprint_factory
         self._clock = clock
         self._nodes_for = nodes_for or NODES_FOR
+        self._tracing = tracing or NullTracing()
         self._poll_interval_s = poll_interval_s
         self._lease_ttl_s = lease_ttl_s
         self._heartbeat_interval_s = heartbeat_interval_s
@@ -233,6 +236,7 @@ class ThreadExecutor:
                 clock=self._clock,
                 worker_alive=lambda: self.worker_alive(run_id),
                 current_fingerprint=fingerprint,
+                tracing=self._tracing,
             )
         except StaleStateError:
             # Another worker (or a resume racing this one) already moved the

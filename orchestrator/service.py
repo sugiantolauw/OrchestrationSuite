@@ -98,6 +98,10 @@ class AppContext:
     # suggest_bindings) without the UI ever branching on it itself.
     backend: str = "uc"
     local_data_root: Path | None = None
+    # MLflow per-node tracing (CLAUDE.md §2.3, P2/P3 gate review item 4).
+    # Defaults to NullTracing (a documented no-op) so every existing caller
+    # that never passed one keeps behaving exactly as before this feature.
+    tracing: Any = None
 
 
 # ── construction ──────────────────────────────────────────────────────────────
@@ -189,6 +193,16 @@ def build_app_context(env: dict | None = None) -> AppContext:
     skills_dir = Path(env.get("SKILLS_DIR") or (REPO_ROOT / "skills"))
     clock = utc_now
 
+    # CLAUDE.md §2.3 / P2/P3 gate review item 4: constructed once, shared by
+    # every run this App executes. Never raises -- MLflowTracingAdapter's own
+    # constructor catches everything and reports `available=False` instead
+    # (orchestrator.pipeline.run_phase logs the ONE "tracing unavailable"
+    # trace_event per run that follows from that; App startup is never
+    # blocked by a tracing backend problem).
+    from orchestrator.adapters.tracing_mlflow import MLflowTracingAdapter
+
+    tracing = MLflowTracingAdapter(tracking_uri=settings.mlflow_tracking_uri)
+
     if backend == "local":
         db_path = env.get("ORCH_LOCAL_DB") or str(REPO_ROOT / ".local" / "orchestrator.db")
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
@@ -201,7 +215,7 @@ def build_app_context(env: dict | None = None) -> AppContext:
         ctx = AppContext(
             settings=settings, persistence=persistence, skills_dir=skills_dir,
             data_source_factory=data_source_factory, export_storage=export_storage,
-            clock=clock, backend="local", local_data_root=data_root,
+            clock=clock, backend="local", local_data_root=data_root, tracing=tracing,
         )
     else:
         persistence = DeltaPersistence(settings)
@@ -223,7 +237,7 @@ def build_app_context(env: dict | None = None) -> AppContext:
         ctx = AppContext(
             settings=settings, persistence=persistence, skills_dir=skills_dir,
             data_source_factory=_uc_factory, export_storage=export_storage,
-            clock=clock, backend="uc",
+            clock=clock, backend="uc", tracing=tracing,
         )
 
     worker_id = env.get("ORCH_WORKER_ID") or f"worker-{uuid.uuid4().hex[:8]}"
@@ -235,6 +249,7 @@ def build_app_context(env: dict | None = None) -> AppContext:
         fingerprint_factory=lambda run_id: build_run_fingerprint(ctx, persistence.load_state(run_id)),
         clock=clock,
         nodes_for=NODES_FOR,
+        tracing=tracing,
     )
     ctx.executor = executor
     return ctx

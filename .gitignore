@@ -29,3 +29,9 @@ _test_*.py
 
 # Local run outputs (ORCH_BACKEND=local exports, sqlite ledgers)
 .local/
+
+# MLflow's own default local tracking store (created if MLFLOW_TRACKING_URI /
+# Settings.mlflow_tracking_uri is unset and mlflow falls back to its default,
+# e.g. running orchestrator.adapters.tracing_mlflow ad hoc from the repo root)
+mlruns/
+mlflow.db

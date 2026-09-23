@@ -274,6 +274,31 @@ class TracingAdapter(Protocol):
         ...
 
 
+class NullTracing:
+    """The default TracingAdapter when none is configured: every call is a
+    documented no-op returning `""` (never raises, never records anything).
+    `available=True` is deliberate -- distinct from a real adapter's own
+    "unavailable" mode (e.g. MLflowTracingAdapter when `mlflow` cannot be
+    imported, orchestrator/adapters/tracing_mlflow.py), which reports
+    `available=False`/`unavailable_reason` so the pipeline logs ONE "tracing
+    unavailable" trace_event (CLAUDE.md §2.3, non-negotiable 13: never
+    silently pretend). A caller that never wired a tracing adapter at all
+    (most tests, and any environment before this feature was wired) gets
+    silence, not a spurious warning about a feature it never asked for."""
+
+    available = True
+    unavailable_reason: str | None = None
+
+    def start_run(self, run_id: str, **kwargs: Any) -> str:
+        return ""
+
+    def start_span(self, *, run_id: str, node_name: str) -> str:
+        return ""
+
+    def end_span(self, span_id: str, *, outcome: str, attributes: dict | None = None) -> None:
+        return None
+
+
 class ExportStorageAdapter(Protocol):
     def write(self, path: str, content: bytes) -> str:
         ...

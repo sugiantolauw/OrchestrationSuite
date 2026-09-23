@@ -45,6 +45,7 @@ class Settings:
     max_concurrent_runs: int = 2
     demo_mode: bool = False
     code_revision: str | None = None
+    mlflow_tracking_uri: str | None = None
 
     def __post_init__(self) -> None:
         _validate_identifier("catalog", self.catalog)
@@ -83,6 +84,15 @@ def load_settings(env: dict | None = None) -> Settings:
         max_concurrent_runs=_parse_int(env.get("MAX_CONCURRENT_RUNS"), 2),
         demo_mode=_parse_bool(env.get("DEMO_MODE"), False),
         code_revision=env.get("CODE_REVISION") or None,
+        # P2/P3 gate review item 4 (MLflow per-node spans, CLAUDE.md §2.3).
+        # Unset -- never hardcoded here -- means mlflow's own default
+        # resolution: MLFLOW_TRACKING_URI if the process environment already
+        # sets it (mlflow reads that itself), else a local `./mlruns` file
+        # store. "databricks" (the managed-tracking URI scheme, not a
+        # workspace name) is a valid value for this same variable, set
+        # through the environment like every other workspace-specific value
+        # (CLAUDE.md §7/non-negotiable 16).
+        mlflow_tracking_uri=env.get("MLFLOW_TRACKING_URI") or None,
     )
 
 
@@ -90,7 +100,7 @@ def load_settings(env: dict | None = None) -> Settings:
 # scheduled (concurrency cap, which Executor runs it), never what it computes, so two
 # runs configured identically except for these should share a fingerprint (CLAUDE.md
 # §4.1, non-blocking item).
-_RUNTIME_HASH_EXCLUDED_FIELDS = frozenset({"max_concurrent_runs", "executor"})
+_RUNTIME_HASH_EXCLUDED_FIELDS = frozenset({"max_concurrent_runs", "executor", "mlflow_tracking_uri"})
 
 
 def runtime_config_hash(settings: Settings) -> str:
