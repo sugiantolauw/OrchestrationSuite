@@ -45,11 +45,29 @@ def test_accepts_threshold_reference():
     assert evaluate(c, {"missing_receipt_pct": 5}, {"missing_receipt_high": 10}) is False
 
 
-def test_accepts_zero_and_boolean_constants():
+def test_accepts_zero_constants():
     compile_expr("a > 0")
     compile_expr("a == 0.0")
-    compile_expr("a == True")
-    compile_expr("a == False")
+
+
+def test_rejects_boolean_constants_inside_a_comparison():
+    # N3: True/False smuggle 1/0 past the "no non-zero constants" rule --
+    # Python's bool-is-an-int means `a == True` is silently `a == 1`.
+    with pytest.raises(ExpressionError):
+        compile_expr("a == True")
+    with pytest.raises(ExpressionError):
+        compile_expr("a == False")
+    with pytest.raises(ExpressionError):
+        compile_expr("a > False")
+
+
+def test_accepts_bare_boolean_constant_outside_a_comparison():
+    # A standalone boolean is not a comparison operand -- it does not smuggle
+    # anything, and is a legitimate always-fire/never-fire expression.
+    c = compile_expr("True")
+    assert evaluate(c, {}, {}) is True
+    c = compile_expr("False")
+    assert evaluate(c, {}, {}) is False
 
 
 def test_rejects_calls():
@@ -115,6 +133,36 @@ def test_none_metric_in_boolean_combination():
     c = compile_expr("hv_count > 0 or missing_count > 0")
     assert evaluate(c, {"hv_count": None, "missing_count": 3}, {}) is True
     assert evaluate(c, {"hv_count": None, "missing_count": None}, {}) is False
+
+
+def test_kleene_not_of_unknown_is_unknown_not_true():
+    # N3: `not (x > 0)` with x None must be Unknown -> False at the top level,
+    # never True -- the old code's per-comparison "None -> False" made `not`
+    # flip that False to True, which is exactly backwards for a not_testable
+    # metric.
+    c = compile_expr("not (a > 0)")
+    assert evaluate(c, {"a": None}, {}) is False
+
+
+def test_kleene_and_with_unknown_and_true_is_unknown():
+    c = compile_expr("a > 0 and b > 0")
+    assert evaluate(c, {"a": None, "b": 5}, {}) is False  # Unknown and True -> Unknown -> False
+    assert evaluate(c, {"a": 0, "b": 5}, {}) is False  # known False and True -> False (not Unknown)
+
+
+def test_kleene_and_with_known_false_dominates_even_with_unknown():
+    c = compile_expr("a > 0 and b > 0")
+    assert evaluate(c, {"a": 0, "b": None}, {}) is False
+
+
+def test_kleene_or_with_known_true_dominates_even_with_unknown():
+    c = compile_expr("a > 0 or b > 0")
+    assert evaluate(c, {"a": 5, "b": None}, {}) is True
+
+
+def test_kleene_or_with_unknown_and_false_is_unknown():
+    c = compile_expr("a > 0 or b > 0")
+    assert evaluate(c, {"a": None, "b": 0}, {}) is False  # Unknown or False -> Unknown -> False
 
 
 def test_never_uses_eval_semantics_malicious_string_stays_inert():

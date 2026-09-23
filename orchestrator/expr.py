@@ -20,9 +20,6 @@ _ALLOWED_CMP_OPS: dict[type, Any] = {
     ast.NotEq: operator.ne,
 }
 
-_ALLOWED_CONSTANTS = (0, 0.0, True, False)
-
-
 @dataclass(frozen=True)
 class CompiledExpr:
     """A findings.yaml `trigger` or `severity[].when` expression, parsed once and
@@ -35,15 +32,21 @@ class CompiledExpr:
     threshold_ids: frozenset[str]
 
 
-def _is_allowed_constant(value: Any) -> bool:
+def _is_allowed_bare_constant(value: Any) -> bool:
+    # A bare boolean is allowed OUTSIDE a comparison (e.g. a standalone
+    # `trigger: True` for an always-fire rule) -- N3 only forbids True/False
+    # as a COMPARISON operand, where Python's bool-is-an-int would silently
+    # compare a metric or threshold against 1 or 0.
     if isinstance(value, bool):
         return True
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
+    if isinstance(value, (int, float)):
         return value == 0
     return False
 
 
-def _validate(node: ast.AST, metric_names: set[str], threshold_ids: set[str]) -> None:
+def _validate(
+    node: ast.AST, metric_names: set[str], threshold_ids: set[str], *, in_compare: bool = False
+) -> None:
     if isinstance(node, ast.BoolOp):
         if not isinstance(node.op, _ALLOWED_BOOL_OPS):
             raise ExpressionError(f"disallowed boolean operator: {type(node.op).__name__}")
@@ -53,15 +56,15 @@ def _validate(node: ast.AST, metric_names: set[str], threshold_ids: set[str]) ->
     if isinstance(node, ast.UnaryOp):
         if not isinstance(node.op, ast.Not):
             raise ExpressionError(f"disallowed unary operator: {type(node.op).__name__}")
-        _validate(node.operand, metric_names, threshold_ids)
+        _validate(node.operand, metric_names, threshold_ids, in_compare=in_compare)
         return
     if isinstance(node, ast.Compare):
-        _validate(node.left, metric_names, threshold_ids)
+        _validate(node.left, metric_names, threshold_ids, in_compare=True)
         for op in node.ops:
             if type(op) not in _ALLOWED_CMP_OPS:
                 raise ExpressionError(f"disallowed comparison operator: {type(op).__name__}")
         for comparator in node.comparators:
-            _validate(comparator, metric_names, threshold_ids)
+            _validate(comparator, metric_names, threshold_ids, in_compare=True)
         return
     if isinstance(node, ast.Name):
         metric_names.add(node.id)
@@ -75,7 +78,20 @@ def _validate(node: ast.AST, metric_names: set[str], threshold_ids: set[str]) ->
         threshold_ids.add(node.attr)
         return
     if isinstance(node, ast.Constant):
-        if not _is_allowed_constant(node.value):
+        # N3: True/False are rejected as a COMPARISON operand -- Python's
+        # bool-subclasses-int means `x == True` silently becomes `x == 1`, a
+        # non-zero numeric literal smuggled past the "no non-zero constants"
+        # rule under a boolean spelling. Outside a comparison a bare boolean
+        # is still a legitimate constant expression.
+        if in_compare:
+            if isinstance(node.value, bool):
+                raise ExpressionError(
+                    f"boolean constant not allowed as a comparison operand (smuggles "
+                    f"1/0): {node.value!r}"
+                )
+            if not (isinstance(node.value, (int, float)) and node.value == 0):
+                raise ExpressionError(f"disallowed constant: {node.value!r}")
+        elif not _is_allowed_bare_constant(node.value):
             raise ExpressionError(f"disallowed constant: {node.value!r}")
         return
     raise ExpressionError(f"disallowed expression node: {type(node).__name__}")
@@ -129,27 +145,49 @@ def _eval_operand(node: ast.AST, metrics: dict[str, Any], thresholds: dict[str, 
     raise ExpressionError(f"cannot evaluate node: {type(node).__name__}")
 
 
-def _eval(node: ast.AST, metrics: dict[str, Any], thresholds: dict[str, Any]) -> bool:
+def _eval(node: ast.AST, metrics: dict[str, Any], thresholds: dict[str, Any]) -> bool | None:
+    """Kleene three-valued logic (N3): a comparison against a metric whose value
+    is None (a not_testable test) is UNKNOWN, not False -- `not Unknown` is
+    Unknown, and And/Or follow the standard Kleene tables (a known False
+    dominates And; a known True dominates Or; otherwise Unknown propagates).
+    Only the top-level `evaluate()` collapses a remaining Unknown to False."""
     if isinstance(node, ast.BoolOp):
         results = [_eval(v, metrics, thresholds) for v in node.values]
-        return all(results) if isinstance(node.op, ast.And) else any(results)
+        if isinstance(node.op, ast.And):
+            if any(r is False for r in results):
+                return False
+            if any(r is None for r in results):
+                return None
+            return True
+        if any(r is True for r in results):
+            return True
+        if any(r is None for r in results):
+            return None
+        return False
     if isinstance(node, ast.UnaryOp):
-        return not _eval(node.operand, metrics, thresholds)
+        r = _eval(node.operand, metrics, thresholds)
+        return None if r is None else (not r)
     if isinstance(node, ast.Compare):
         current = _eval_operand(node.left, metrics, thresholds)
+        if current is None:
+            return None
         for op, comparator in zip(node.ops, node.comparators):
             other = _eval_operand(comparator, metrics, thresholds)
-            if current is None or other is None:
-                return False
+            if other is None:
+                return None
             if not _ALLOWED_CMP_OPS[type(op)](current, other):
                 return False
             current = other
         return True
     value = _eval_operand(node, metrics, thresholds)
-    return bool(value) if value is not None else False
+    return None if value is None else bool(value)
 
 
 def evaluate(compiled: CompiledExpr, metrics: dict[str, Any], thresholds: dict[str, Any]) -> bool:
-    """A comparison involving a metric whose value is None (a not_testable test)
-    evaluates to False rather than raising -- CLAUDE.md §4.6."""
-    return _eval(compiled.tree.body, metrics, thresholds)
+    """Evaluates under Kleene logic (`_eval`) and collapses a top-level Unknown
+    to False -- CLAUDE.md §4.6: a not_testable test's missing metric must never
+    make a finding fire or a severity rule match by accident, but `not
+    (x > 0)` with x None must itself read as Unknown while nested inside a
+    larger expression, not silently become True."""
+    result = _eval(compiled.tree.body, metrics, thresholds)
+    return bool(result) if result is not None else False

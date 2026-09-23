@@ -53,11 +53,38 @@ def _walk_numeric_literals(obj, path, out):
         out.append((path, obj))
 
 
-# Keys under which a bare numeric literal is structurally required and is not a
-# test threshold: version pins, minItems-shaped list values, thresholds.yaml's
-# own `value` (the one place a real number belongs), and effective_date-shaped
-# strings are not numeric so need no exemption.
-_ALLOWED_NUMERIC_KEY_SUFFIXES = (".value", ".sample_days")
+# N3: no blanket "any key ending in .value is exempt" rule -- that would
+# silently wave through a future non-zero literal planted at ANY `.value` key
+# (e.g. a disguised threshold slipped into a filter). Every exempted path is
+# named explicitly, each with its own reason a bare number belongs there and
+# is not a disguised, unreviewed threshold. A bare 0 as a population
+# sign/existence filter (e.g. "amount > 0", never `gt 0.0` or any other value)
+# is a structural boundary, not a policy number -- the restricted evaluator
+# itself allows exactly this literal for the same reason (CLAUDE.md §4.6);
+# every entry here is exactly that shape and no other.
+_ALLOWED_NUMERIC_LITERAL_PATHS: dict[str, str] = {
+    "plan.yaml.populations.p_exp_split.filters[2].value": (
+        "T5.1 spec: p_exp_split excludes non-positive amounts before split detection "
+        "(a credit or zero-amount line cannot be part of a split claim) -- sign filter, not a threshold."
+    ),
+    "plan.yaml.populations.p_exp_hv.filters[1].value": (
+        "T4.4 spec 'Population: P_EXP, amount > 0' -- sign filter excluding credits from the "
+        "high-value population, not the $5,000 threshold itself (that is thresholds.high_value_limit)."
+    ),
+    "plan.yaml.populations.p_exp_dup.filters[1].value": (
+        "T5.2 spec: p_exp_dup excludes non-positive amounts before duplicate detection -- sign filter."
+    ),
+    "plan.yaml.populations.t61d_pop.filters[3].value": (
+        "N5: t61d_pop excludes non-positive amounts so a credit is never netted into a daily "
+        "total -- sign filter, not the per-diem limit (thresholds/per_diem_rates drive that)."
+    ),
+    "plan.yaml.populations.t61d_pop_dom.filters[3].value": (
+        "N5: same sign filter as t61d_pop, applied to the domestic-split population."
+    ),
+    "plan.yaml.populations.t61d_pop_int.filters[3].value": (
+        "N5: same sign filter as t61d_pop, applied to the international-split population."
+    ),
+}
 
 
 def test_plan_and_findings_yaml_have_no_numeric_literals_outside_thresholds():
@@ -65,18 +92,28 @@ def test_plan_and_findings_yaml_have_no_numeric_literals_outside_thresholds():
     findings = yaml.safe_load((SKILLS_DIR / "tne_exco" / "findings.yaml").read_text())
 
     violations = []
-    for label, doc in (("plan.yaml", plan), ("findings.yaml", findings)):
+    for label, doc, prefix in (("plan.yaml", plan, "plan.yaml"), ("findings.yaml", findings, "findings.yaml")):
         found: list = []
-        _walk_numeric_literals(doc, label, found)
+        _walk_numeric_literals(doc, prefix, found)
         for path, value in found:
-            if any(path.endswith(suffix) for suffix in _ALLOWED_NUMERIC_KEY_SUFFIXES):
-                continue
-            # A bare 0 as an `exclude`/filter comparison value (e.g. "amount > 0")
-            # is a population-boundary constant, not a disguised threshold -- the
-            # restricted evaluator itself allows exactly this literal for the
-            # same reason (CLAUDE.md §4.6). Anything else is a violation.
-            if value == 0:
+            if path in _ALLOWED_NUMERIC_LITERAL_PATHS:
+                assert value == 0, f"{path}: allow-listed sign filter must be exactly 0, got {value!r}"
                 continue
             violations.append(f"{path} = {value!r}")
 
     assert not violations, "numeric literals outside thresholds.yaml:\n" + "\n".join(violations)
+
+
+def test_allow_listed_numeric_literal_paths_still_exist():
+    # Guards the allow-list itself against drift: every entry must correspond
+    # to a real path in the current plan.yaml, or it is dead and should be
+    # removed (and, if a path was renamed, this catches the stale entry
+    # silently exempting the WRONG key going forward).
+    plan = yaml.safe_load((SKILLS_DIR / "tne_exco" / "plan.yaml").read_text())
+    findings = yaml.safe_load((SKILLS_DIR / "tne_exco" / "findings.yaml").read_text())
+    found: list = []
+    _walk_numeric_literals(plan, "plan.yaml", found)
+    _walk_numeric_literals(findings, "findings.yaml", found)
+    live_paths = {path for path, _ in found}
+    stale = set(_ALLOWED_NUMERIC_LITERAL_PATHS) - live_paths
+    assert not stale, f"allow-list entries no longer present in plan.yaml/findings.yaml: {stale}"
