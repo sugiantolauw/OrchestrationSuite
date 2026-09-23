@@ -230,7 +230,7 @@ def main() -> None:
     app_name = args.app_name or settings.app_name
     if not app_name:
         raise SystemExit("DBX_APP_NAME is not set (env or --app-name).")
-    settings.require("catalog", "schema")
+    settings.require("catalog", "schema", "host")
 
     code_revision = _git_head(REPO_ROOT) or "unknown"
 
@@ -239,14 +239,21 @@ def main() -> None:
         "DBX_CATALOG": settings.catalog,
         "DBX_SCHEMA": settings.schema,
         "CODE_REVISION": code_revision,
-        # Part of the run fingerprint's runtime_config_hash (orchestrator/
-        # config.py) -- omitting it here made the deployed App's own
-        # runtime_config_hash differ from any caller's local one (app_name
-        # unset there, set here), so every fingerprint verify_fingerprint()
-        # does at admission failed with a spurious mismatch. Found live,
-        # driving a run against the deployed App's executor from a separate
-        # process (CLAUDE.md integration pass item 10).
+        # DBX_APP_NAME and DATABRICKS_HOST are both part of the run
+        # fingerprint's runtime_config_hash (orchestrator/config.py) --
+        # omitting either made the deployed App's own runtime_config_hash
+        # differ from any caller's local one, so every fingerprint
+        # verify_fingerprint() does at admission failed with a spurious
+        # mismatch. Found live, driving a run against the deployed App's
+        # executor from a separate process (CLAUDE.md integration pass item
+        # 10) -- DATABRICKS_HOST would otherwise depend on however the
+        # platform's own injected value happens to be formatted, rather than
+        # matching the exact host string a caller's own DATABRICKS_HOST
+        # (e.g. from .env) resolves to. Setting it explicitly here does not
+        # change the App's identity -- that is always the platform-injected
+        # DATABRICKS_CLIENT_ID/SECRET, never a value from this file.
         "DBX_APP_NAME": app_name,
+        "DATABRICKS_HOST": settings.host,
     }
     if settings.volume:
         env_vars["DBX_VOLUME"] = settings.volume
