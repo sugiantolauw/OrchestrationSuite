@@ -400,32 +400,6 @@ def find(ctx: NodeContext, state: RunState) -> RunState:
     return dataclasses.replace(state, findings=compact, events=state.events + [_event("find", message, now)])
 
 
-def _flags_for_test_id(flags_by_test_id: dict[str, set[str]], test_id: str) -> set[str]:
-    # A finding cites one plan.yaml test_id, but the T&E Skill splits several
-    # catalogue tests into several plan.yaml sub-tests sharing that prefix
-    # (e.g. finding T3_2a cites test_id "T3.2a", while plan.yaml has
-    # "T3.2a_air_dom", "T3.2a_air_int", ... each with its own flag) -- so a
-    # finding's flags are every plan.yaml test whose id equals or is prefixed
-    # by "<test_id>_", union of ALL flags each of those tests declares
-    # (orchestrator.skills.plan_test_flags -- not just the one top-level
-    # `flag` field, CLAUDE.md P2/P3 gate review item 5).
-    flags: set[str] = set()
-    for tid, fset in flags_by_test_id.items():
-        if tid == test_id or tid.startswith(f"{test_id}_"):
-            flags |= fset
-    return flags
-
-
-def _amount_metrics_for_test_id(amount_metrics_by_test_id: dict[str, set[str]], test_id: str) -> set[str]:
-    # Same test_id-prefix union as _flags_for_test_id above, over
-    # orchestrator.skills.plan_test_amount_metrics instead of flags.
-    names: set[str] = set()
-    for tid, nset in amount_metrics_by_test_id.items():
-        if tid == test_id or tid.startswith(f"{test_id}_"):
-            names |= nset
-    return names
-
-
 # Primitives whose group_id groups a set of rows that are genuinely ONE
 # monetary entry sharing a single amount, not several distinct entries
 # (CLAUDE.md P2/P3 gate review item 1). This is a property of the PRIMITIVE's
@@ -453,12 +427,25 @@ def prioritise(ctx: NodeContext, state: RunState) -> RunState:
     beyond the first in each group" and `daily_over_amount_*` (T6.1d) is an
     excess-over-limit, not a sum of full amounts -- shapes a generic row/group
     summation cannot reconstruct without reproducing each primitive's own
-    rule. Reading the metric the primitive already computed
-    (`orchestrator.skills.plan_test_amount_metrics`) is correct by
-    construction for every primitive, and guarantees the observation prose
-    and `exposure_amount` can never disagree. A test with no declared amount
-    metric gets `exposure_amount: None` / `exposure_basis: "non-monetary
-    finding"` -- never a fabricated 0.0 (CLAUDE.md NN14).
+    rule. A cited metric counts as an amount metric when it is an additive-AUD
+    metric declared by ANY plan.yaml test (`orchestrator.skills.
+    plan_test_amount_metrics`, flattened across the whole plan) -- NOT
+    filtered to "the tests whose id equals or is prefixed by this finding's
+    own test_id" (CLAUDE.md P2/P3 gate review item B1, fixed here). That
+    prefix filter silently dropped a cited metric whenever the T&E Skill
+    split one catalogue test into sibling plan.yaml sub-tests that do not
+    share a prefix with each other -- T6.1d_dom/T6.1d_int, T3.2a_air_dom/
+    _air_int/_car_dom/_car_int, T3.3a_dom/_int/_very_late: a finding cites one
+    of those test_ids but its metrics_cited legitimately spans several, so
+    "starts with this finding's test_id + '_'" matched none of the true
+    siblings and under-stated exposure (T6_1d: $446.40 counted, $998.53
+    dropped). Reading the metric the primitive already computed is correct by
+    construction for every primitive, and this fix is what actually
+    guarantees the observation prose and `exposure_amount` can never
+    disagree -- the claim the pre-fix docstring made without it being true. A
+    test with no declared amount metric gets `exposure_amount: None` /
+    `exposure_basis: "non-monetary finding"` -- never a fabricated 0.0
+    (CLAUDE.md NN14).
 
     The run's headline exposure is a separate figure: the sum, over every
     monetary finding's flagged rows, of each DISTINCT MONETARY ENTRY's full
@@ -535,6 +522,9 @@ def prioritise(ctx: NodeContext, state: RunState) -> RunState:
         flags_by_test_id.setdefault(e["test_id"], set()).add(e["flag"])
         primitive_by_flag[e["flag"]] = e.get("primitive")
     amount_metrics_by_test_id = plan_test_amount_metrics(plan_tests)
+    all_additive_amount_names: set[str] = set()
+    for names in amount_metrics_by_test_id.values():
+        all_additive_amount_names |= names
 
     rows_by_flag: dict[str, list[dict]] = {}
     for r in ctx.persistence.list_flagged_rows(state.run_id):
@@ -571,18 +561,35 @@ def prioritise(ctx: NodeContext, state: RunState) -> RunState:
     all_entry_ids: set[tuple] = set()
     updated_findings: list[dict] = []
     for f in persisted:
-        test_id = f.get("test_id") or ""
-        flags = _flags_for_test_id(flags_by_test_id, test_id)
-        rows = [r for flag in flags for r in rows_by_flag.get(flag, [])]
-        declared_amount_names = _amount_metrics_for_test_id(amount_metrics_by_test_id, test_id)
-        # Restricted to what this finding's OWN metrics_cited actually names
-        # (CLAUDE.md P2/P3 gate review item 1: "exposure_amount must be
-        # consistent with the at-risk metric it CITES") -- a plan-declared
-        # amount metric the finding's findings.yaml rule does not cite (e.g.
-        # a worst-single-day `max` figure a different rule cites for its own
-        # purposes) never silently enters this finding's exposure.
         cited_metrics = f.get("metrics_cited") or {}
-        amount_metric_names = declared_amount_names & set(cited_metrics)
+
+        # B1: which plan.yaml test(s) actually produced each of this
+        # finding's cited metrics -- read from the RECORDED metric->test
+        # mapping this run's own execute() persisted (metrics_rows' test_id
+        # column, CLAUDE.md build brief P3 §1), never re-derived by matching
+        # the finding's single `test_id` against plan.yaml ids by string
+        # prefix. A finding cites one test_id but its metrics can legitimately
+        # come from several sibling sub-tests that do not share a prefix with
+        # each other or with the finding's own test_id (see docstring above).
+        producing_test_ids = {
+            existing_metrics[name]["test_id"]
+            for name in cited_metrics
+            if name in existing_metrics and existing_metrics[name].get("test_id")
+        }
+        # This finding's flags = flags of every test that produced any of its
+        # cited metrics -- no prefix matching.
+        flags = {flag for tid in producing_test_ids for flag in flags_by_test_id.get(tid, set())}
+        rows = [r for flag in flags for r in rows_by_flag.get(flag, [])]
+
+        # This finding's amount metrics = its metrics_cited that are additive
+        # AUD metrics (unit-based), produced by ANY plan test -- restricted to
+        # what this finding's OWN metrics_cited actually names (CLAUDE.md
+        # P2/P3 gate review item 1: "exposure_amount must be consistent with
+        # the at-risk metric it CITES") so a plan-declared amount metric the
+        # finding's findings.yaml rule does not cite (e.g. a worst-single-day
+        # `max` figure a different rule cites for its own purposes) never
+        # silently enters this finding's exposure.
+        amount_metric_names = all_additive_amount_names & set(cited_metrics)
 
         if not amount_metric_names:
             updated_findings.append(
@@ -606,8 +613,8 @@ def prioritise(ctx: NodeContext, state: RunState) -> RunState:
                 "exposure_amount": exposure,
                 "exposure_basis": (
                     f"Sum of this finding's own cited amount metric(s) {sorted(amount_metric_names)} "
-                    f"for test {test_id} -- the same figure(s) rendered into its observation text, "
-                    f"never re-derived from raw rows (CLAUDE.md P2/P3 gate review item 1)."
+                    f"-- the same figure(s) rendered into its observation text, never re-derived from "
+                    f"raw rows (CLAUDE.md P2/P3 gate review item 1)."
                 ),
             }
         )
@@ -793,7 +800,15 @@ def _write_xlsx_workpaper(state: RunState, findings: list[dict], metrics: dict[s
         _write_str(ws, r, 6, f["title"])
         _write_str(ws, r, 7, f.get("observation"))
         _write_str(ws, r, 8, f.get("recommendation"))
-        ws.write_number(r, 9, f.get("exposure_amount") or 0.0, money)
+        # B4 (CLAUDE.md NN14): a non-monetary finding's exposure_amount is
+        # None, not a fabricated $0.00 -- an auditor reading this column must
+        # not be able to mistake "not assessed in dollars" for "assessed at
+        # zero risk". Blank cell, same money format, never a written 0.
+        exposure_amount = f.get("exposure_amount")
+        if exposure_amount is None:
+            ws.write_blank(r, 9, None, money)
+        else:
+            ws.write_number(r, 9, exposure_amount, money)
         _write_str(ws, r, 10, f.get("exposure_basis"))
         _write_str(ws, r, 11, f.get("review_state"))
     _write_str(ws, len(findings) + 2, 0, footer)
@@ -838,9 +853,20 @@ def _write_xlsx_workpaper(state: RunState, findings: list[dict], metrics: dict[s
         ws4.write_number(r, 1, rec.get("engine_rows") or 0)
         ws4.write_number(r, 2, rec.get("independent_rows") or 0)
         ws4.write_number(r, 3, rec.get("variance") or 0)
-        ws4.write_number(r, 4, rec.get("amount") or 0.0, money)
-        ws4.write_number(r, 5, rec.get("independent_amount") or 0.0, money)
-        ws4.write_number(r, 6, rec.get("amount_variance") or 0.0, money)
+        # B4 (CLAUDE.md NN14): a source whose raw_<source> population declares
+        # no amount_column has no amount to reconcile at all -- `rec["amount"]`
+        # is None (orchestrator.populations.build_population), never a real
+        # 0.0. Writing 0.0 here would read as "this source's amounts
+        # reconcile to zero", which is a fabricated claim, not an absence.
+        # Explicit text, never a number, when the column was never declared.
+        if rec.get("amount") is None:
+            _write_str(ws4, r, 4, "n/a — no amount column declared")
+            _write_str(ws4, r, 5, "n/a — no amount column declared")
+            _write_str(ws4, r, 6, "n/a — no amount column declared")
+        else:
+            ws4.write_number(r, 4, rec["amount"], money)
+            ws4.write_number(r, 5, rec.get("independent_amount") or 0.0, money)
+            ws4.write_number(r, 6, rec.get("amount_variance") or 0.0, money)
         _write_str(ws4, r, 7, rec.get("min_date"))
         _write_str(ws4, r, 8, rec.get("independent_min_date"))
         _write_str(ws4, r, 9, str(rec.get("min_date_match")))

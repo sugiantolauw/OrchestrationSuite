@@ -108,6 +108,11 @@ def test_ratio_per_group_shared_amount_collapses_to_one_headline_entry(local_per
         _flagged_row("claims", "a2", "RF_ENTERTAIN", group_id="G1"),
         _flagged_row("claims", "a3", "RF_ENTERTAIN", group_id="G1"),
     ])
+    # B1: flags are now looked up via the RECORDED metric->test mapping
+    # (write_run_metrics' own test_id column), not the finding's test_id.
+    h.persistence.write_run_metrics(h.state.run_id, [
+        {"metric_name": "ent_amount", "value": 900.0, "unit": "AUD", "source_ref": {}, "test_id": "TG1"},
+    ])
     finding = _finding("F1", test_id="TG1", metrics_cited={"ent_amount": _metric(900.0)})
     h.persistence.write_findings(
         h.state.run_id, [finding],
@@ -150,6 +155,9 @@ def test_duplicate_detection_group_with_equal_amounts_is_not_collapsed(local_per
         _flagged_row("claims", "d1", "RF_DUP", group_id="D1"),
         _flagged_row("claims", "d2", "RF_DUP", group_id="D1"),
     ])
+    h.persistence.write_run_metrics(h.state.run_id, [
+        {"metric_name": "dup_amount", "value": 500.0, "unit": "AUD", "source_ref": {}, "test_id": "TG4"},
+    ])
     # duplicate_amount's real shape (spec T5.2) is "sum of extra lines beyond
     # the first in each group" -- one $500 line here, not both.
     finding = _finding("F4", test_id="TG4", metrics_cited={"dup_amount": _metric(500.0)})
@@ -190,6 +198,9 @@ def test_split_detection_group_of_different_amounts_is_not_collapsed(local_persi
         _flagged_row("claims", "c1", "RF_SPLIT_SAMEDAY", group_id="SPLIT1"),
         _flagged_row("claims", "c2", "RF_SPLIT_SAMEDAY", group_id="SPLIT1"),
         _flagged_row("claims", "c3", "RF_SPLIT_SAMEDAY", group_id="SPLIT1"),
+    ])
+    h.persistence.write_run_metrics(h.state.run_id, [
+        {"metric_name": "split_amount", "value": 4500.0, "unit": "AUD", "source_ref": {}, "test_id": "TG2"},
     ])
     finding = _finding("F2", test_id="TG2", metrics_cited={"split_amount": _metric(4500.0)})
     h.persistence.write_findings(
@@ -274,6 +285,10 @@ def test_overlapping_findings_never_double_count_the_headline(local_persistence,
         _flagged_row("claims", "r2", "RF_A"),
         _flagged_row("claims", "r2", "RF_B"),  # shared row between TA and TB
         _flagged_row("claims", "r3", "RF_B"),
+    ])
+    h.persistence.write_run_metrics(h.state.run_id, [
+        {"metric_name": "a_amount", "value": 300.0, "unit": "AUD", "source_ref": {}, "test_id": "TA"},
+        {"metric_name": "b_amount", "value": 500.0, "unit": "AUD", "source_ref": {}, "test_id": "TB"},
     ])
     fa = _finding("FA", test_id="TA", metrics_cited={"a_amount": _metric(300.0)})
     fb = _finding("FB", test_id="TB", metrics_cited={"b_amount": _metric(500.0)})
@@ -360,6 +375,9 @@ def test_group_collapse_primitive_with_disagreeing_amounts_raises(local_persiste
         _flagged_row("claims", "a1", "RF_ENTERTAIN", group_id="G1"),
         _flagged_row("claims", "a2", "RF_ENTERTAIN", group_id="G1"),
     ])
+    h.persistence.write_run_metrics(h.state.run_id, [
+        {"metric_name": "ent_amount", "value": 1850.0, "unit": "AUD", "source_ref": {}, "test_id": "TG1"},
+    ])
     finding = _finding("F1", test_id="TG1", metrics_cited={"ent_amount": _metric(1850.0)})
     h.persistence.write_findings(
         h.state.run_id, [finding],
@@ -369,3 +387,56 @@ def test_group_collapse_primitive_with_disagreeing_amounts_raises(local_persiste
 
     with pytest.raises(ContractViolation):
         prioritise(h.ctx, h.state)
+
+
+def test_finding_citing_a_sibling_sub_tests_metrics_is_not_dropped(local_persistence, tmp_path):
+    """B1 (CLAUDE.md P2/P3 gate review, RUN-5C6A997EC940): the T&E Skill
+    splits one catalogue test into plan.yaml sub-tests that do NOT share a
+    prefix with each other -- T6.1d_dom / T6.1d_int is exactly this shape,
+    neither is a prefix of the other. A finding names only T6.1d_dom as its
+    own test_id but cites metrics from BOTH sub-tests. The old
+    `tid.startswith(f"{test_id}_")` matching silently dropped T6.1d_int's
+    metric and flagged rows (exposure 446.40 when the observation text reads
+    $446.40 AND $998.53). Fixed: a finding's amount metrics/flags are drawn
+    from whichever test produced each cited metric (the run's own recorded
+    metric->test mapping), never from string-matching the finding's test_id."""
+    def read_population(source, *, version=None):
+        return pd.DataFrame({"__row_key": ["d1", "i1"], "Amount": [446.40, 998.53]})
+
+    h = _rig(
+        local_persistence, tmp_path,
+        populations={"pop": {"source": "claims", "amount_column": "Amount"}},
+        tests=[
+            {"test_id": "T6.1d_dom", "flag": "RF_DAILY_DOM", "primitive": "threshold_exceedance",
+             "params": {"flag": "RF_DAILY_DOM",
+                        "metrics": {"daily_over_amount_dom": {"kind": "sum", "column": "Amount", "unit": "AUD"}}}},
+            {"test_id": "T6.1d_int", "flag": "RF_DAILY_INT", "primitive": "threshold_exceedance",
+             "params": {"flag": "RF_DAILY_INT",
+                        "metrics": {"daily_over_amount_int": {"kind": "sum", "column": "Amount", "unit": "AUD"}}}},
+        ],
+        read_population=read_population,
+    )
+    h.persistence.write_flagged_rows(h.state.run_id, [
+        _flagged_row("claims", "d1", "RF_DAILY_DOM"),
+        _flagged_row("claims", "i1", "RF_DAILY_INT"),
+    ])
+    h.persistence.write_run_metrics(h.state.run_id, [
+        {"metric_name": "daily_over_amount_dom", "value": 446.40, "unit": "AUD", "source_ref": {}, "test_id": "T6.1d_dom"},
+        {"metric_name": "daily_over_amount_int", "value": 998.53, "unit": "AUD", "source_ref": {}, "test_id": "T6.1d_int"},
+    ])
+    finding = _finding(
+        "F6", test_id="T6.1d_dom",
+        metrics_cited={"daily_over_amount_dom": _metric(446.40), "daily_over_amount_int": _metric(998.53)},
+    )
+    h.persistence.write_findings(
+        h.state.run_id, [finding],
+        engagement_id=h.state.engagement_id, skill_id=h.state.skill_id,
+        skill_version=h.state.skill_version, now="2026-01-01T00:00:00.000000Z",
+    )
+
+    state = prioritise(h.ctx, h.state)
+    f = state.findings[0]
+    assert f["exposure_amount"] == 1444.93, "must sum BOTH sub-tests' cited amount metrics, not just T6.1d_dom's"
+
+    headline = h.persistence.get_run_metrics(state.run_id)["run_exposure_headline"]
+    assert headline["value"] == 1444.93, "the headline must include the sibling sub-test's flagged row too"

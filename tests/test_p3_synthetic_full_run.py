@@ -68,38 +68,60 @@ def test_full_run_against_real_synthetic_data(tmp_path):
         for source, rec in payload["reconciliation"].items():
             assert rec["variance"] == 0, f"{source}: {rec}"  # G6, real data
 
-        # CLAUDE.md P2/P3 gate review item 1: every monetary finding's
+        # CLAUDE.md P2/P3 gate review item B1: every monetary finding's
         # exposure_amount must be consistent with the amount metric(s) it
-        # cites -- the regression this guards against (RUN-AE7BB758A9B9,
-        # T5.2 duplicate claims) is that a SEPARATE row/group re-derivation
-        # of exposure disagreed with the finding's own observation text.
-        # "Consistent" means: for a finding with a declared amount metric,
-        # exposure_amount equals the sum of that finding's own cited
-        # additive-AUD metric(s), to the cent.
-        from orchestrator.skills import load_skill, plan_test_amount_metrics
-
-        tne_skill = load_skill(REPO_ROOT / "skills" / "tne_exco")
-        amount_metrics_by_test_id = plan_test_amount_metrics(tne_skill.plan["tests"])
+        # cites -- the regression this guards against (RUN-5C6A997EC940,
+        # T6.1d daily-spend exceedances) is that exposure_amount was computed
+        # by matching a finding's single `test_id` against plan.yaml test
+        # ids by STRING PREFIX, which silently dropped a sibling sub-test's
+        # metrics whenever the two sub-test ids do not share a prefix with
+        # each other (T6.1d_dom / T6.1d_int is exactly this shape -- neither
+        # is a prefix of the other).
+        #
+        # This oracle is deliberately NOT built from the engine's own
+        # plan_test_amount_metrics()/test_id matching -- reusing that code
+        # would let the very same bug re-pass this test. Instead it is a
+        # hand-authored table of which of each finding's `metrics_cited`
+        # names are genuine dollar-amount-at-risk figures, read directly off
+        # skills/tne_exco/findings.yaml's prose (every {metric} the
+        # observation text quotes as an amount) rather than off any Python
+        # mapping. Independently, a metric name ending in "_max" is a
+        # worst-single-instance ceiling (T6.1d's daily_over_max_dom/_int),
+        # never an amount to sum -- confirmed by reading each metric's own
+        # AUD-unit value in the payload, not by importing plan.yaml's `kind`.
+        expected_amount_metrics_by_finding_rule_id: dict[str, set[str]] = {
+            "T3_1a": {"preapproval_unlinked_amount"},
+            "T3_1b": set(),
+            "T3_2a": set(),
+            "T3_3a": set(),
+            "T3_3b": {"ent_over_amount"},
+            "T4_1": {"missing_receipt_amount"},
+            "T4_2": set(),
+            "T4_4": {"hv_amount"},
+            "T5_1": {"split_amount"},
+            "T5_2": {"duplicate_amount"},
+            "T6_1a": set(),
+            "T6_1c": set(),
+            "T6_1d": {"daily_over_amount_dom", "daily_over_amount_int"},
+        }
         monetary_findings_checked = 0
         for f in payload["findings"]:
-            test_id = f.get("test_id") or ""
-            declared = set()
-            for tid, names in amount_metrics_by_test_id.items():
-                if tid == test_id or tid.startswith(f"{test_id}_"):
-                    declared |= names
-            cited_amount_names = declared & set(f.get("metrics_cited") or {})
-            if not cited_amount_names:
+            rule_id = f["rule_id"].rsplit(".", 1)[-1]  # "SKILL-001.T6_1d" -> "T6_1d"
+            expected_names = expected_amount_metrics_by_finding_rule_id[rule_id]
+            cited = f.get("metrics_cited") or {}
+            for name in expected_names:
+                assert name in cited, f"{f['finding_id']}: expected amount metric {name!r} not cited"
+                assert not name.endswith("_max"), f"{name}: a ceiling metric was listed as additive by mistake"
+            if not expected_names:
                 assert f["exposure_amount"] is None, f"{f['finding_id']}: non-monetary but exposure_amount set"
                 continue
             monetary_findings_checked += 1
             expected = round(
-                sum(f["metrics_cited"][n]["value"] for n in cited_amount_names
-                    if f["metrics_cited"][n].get("value") is not None),
-                2,
+                sum(cited[n]["value"] for n in expected_names if cited[n].get("value") is not None), 2,
             )
             assert f["exposure_amount"] == expected, (
-                f"{f['finding_id']} ({test_id}): exposure_amount {f['exposure_amount']} != "
-                f"sum of its own cited amount metric(s) {sorted(cited_amount_names)} = {expected}"
+                f"{f['finding_id']} ({rule_id}): exposure_amount {f['exposure_amount']} != "
+                f"independently-computed sum of {sorted(expected_names)} = {expected}"
             )
         assert monetary_findings_checked > 0, "no monetary SKILL-001 finding fired on this data -- test is not exercising anything"
 
