@@ -164,6 +164,59 @@ def test_admission_takes_over_an_expired_lease(local_persistence):
     assert run_id not in lease_rows_after
 
 
+# ── mid-session reaping, no App restart (CLAUDE.md §2.3 rule 2, P2/P3 gate
+#    review item 8) ───────────────────────────────────────────────────────
+
+
+def test_admission_loop_reaps_an_orphan_without_an_app_restart(local_persistence):
+    """Previously the reaper (reap_orphaned_runs_with_leases) ran only once,
+    at App start (app/app.py's _start_executor_once) -- a run left `running`
+    by a dead worker AFTER that point stayed `running` forever until the
+    next full App restart (found live: a run sat `running` for ~58 minutes).
+    The admission loop must reap on its own, every poll tick, with no
+    restart and no external call to the reaper."""
+    persistence = local_persistence
+    run_id = "RUN-ORPHAN-MIDSESSION"
+    state = _create(persistence, run_id, lambda: "2026-01-01T00:00:00.000000Z")
+    # Simulate a worker that claimed this run, moved it to `running`, then
+    # died -- lease acquired, then left to expire, with nobody around to
+    # renew it. No queued->running transition goes through _try_admit here,
+    # so this executor never touched this run itself.
+    from orchestrator.status import transition
+
+    running_state = transition(state, "running", now="2026-01-01T00:00:01.000000Z")
+    persistence.save_state(running_state)
+    persistence.acquire_lease(run_id, "dead-worker", ttl_s=1, now="2026-01-01T00:00:01.000000Z")
+
+    later = "2026-01-01T00:05:00.000000Z"  # well past the 1s TTL
+    nodes_for = {"fieldwork": {"plan": [], "execute": [], "export": []}}
+    executor = ThreadExecutor(
+        persistence=persistence, settings=_Settings(), worker_id="worker-live",
+        ctx_factory=lambda rid: object(),
+        fingerprint_factory=lambda rid: _fingerprint(f"FP-{rid}"),
+        clock=lambda: later, nodes_for=nodes_for, poll_interval_s=0.05, lease_ttl_s=30,
+    )
+    try:
+        executor.start()  # no run_id/phase args -- this is the background-loop start, not a start_audit_run kick
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            if persistence.load_state(run_id).status == "interrupted":
+                break
+            time.sleep(0.05)
+    finally:
+        executor.stop()
+
+    reaped = persistence.load_state(run_id)
+    assert reaped.status == "interrupted"
+    assert reaped.status_reason and "orphaned" in reaped.status_reason.lower()
+    # never delete, never auto-resume (CLAUDE.md §2.3 rule 2) -- the row
+    # still exists and stays interrupted, the executor does not queue it
+    # back up on its own.
+    assert persistence.load_state(run_id) is not None
+    time.sleep(0.2)  # give a couple more ticks a chance to misbehave
+    assert persistence.load_state(run_id).status == "interrupted"
+
+
 # ── StaleStateError is a normal admission skip, not a crash ────────────────
 
 

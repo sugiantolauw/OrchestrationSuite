@@ -169,10 +169,31 @@ class ThreadExecutor:
     def _admission_loop(self) -> None:
         while not self._stop_event.is_set():
             try:
+                self._reap_orphans()
                 self._admit_all_queued()
             except Exception:  # pragma: no cover - defensive, the loop must not die
                 logger.exception("admission loop error")
             self._stop_event.wait(self._poll_interval_s)
+
+    def _reap_orphans(self) -> None:
+        # CLAUDE.md §2.3 rule 2 / P2/P3 gate review item 8: App-start reaping
+        # alone leaves a run orphaned WITHOUT a restart permanently `running`
+        # -- a live run whose worker died (or a lease that simply expired for
+        # any other reason) between App starts was never caught (found live:
+        # a run sat `running` for ~58 minutes with nothing marking it
+        # `interrupted` or offering Resume). Every admission tick also reaps,
+        # using the exact same lease-aware semantics as App start (never
+        # delete, never auto-resume -- reap_orphaned_runs_with_leases only
+        # ever moves a run to `interrupted`) -- cheap when there is nothing
+        # to reap (one query, `find_runs(["running"])`, short-circuits to a
+        # no-op), so running it every poll tick is not a meaningful cost.
+        try:
+            reaped = reap_orphaned_runs_with_leases(self._persistence, now=self._clock())
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("reap_orphaned_runs_with_leases failed")
+            return
+        if reaped:
+            logger.info("admission loop reaped orphaned run(s): %s", sorted(reaped))
 
     def _admit_all_queued(self) -> None:
         for run_id in self._persistence.find_runs(["queued"]):
