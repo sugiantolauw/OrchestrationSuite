@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime as _dt
 import hashlib
 import logging
 import threading
@@ -18,7 +19,7 @@ from orchestrator.errors import (
 )
 from orchestrator.migrations import plan_migrations, split_statements
 from orchestrator.state import RunState, assert_json_safe, from_json, to_json, validate
-from orchestrator.timeutil import utc_now
+from orchestrator.timeutil import normalise_ts, utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -117,9 +118,23 @@ def _is_already_exists_error(exc: Exception) -> bool:
     return any(marker in text for marker in _ALREADY_EXISTS_MARKERS)
 
 
+def _normalise_value(value):
+    # The driver hands back native datetime.datetime/datetime.date objects for
+    # TIMESTAMP/DATE columns (verified live, CLAUDE.md §9B Layer 4); LocalPersistence's
+    # sqlite backend stores and returns plain strings for the same columns. Normalise
+    # here so both backends hand callers the same canonical string shape (CLAUDE.md
+    # §4.1 P1A gate review) rather than leaking a driver-specific type into the shared
+    # contract. datetime is a subclass of date, so it must be checked first.
+    if isinstance(value, _dt.datetime):
+        return normalise_ts(value)
+    if isinstance(value, _dt.date):
+        return value.isoformat()
+    return value
+
+
 def _row_to_dict(cursor, row) -> dict:
     columns = [d[0] for d in cursor.description]
-    return dict(zip(columns, row))
+    return {col: _normalise_value(val) for col, val in zip(columns, row)}
 
 
 def _fetchall_dicts(cursor) -> list[dict]:
