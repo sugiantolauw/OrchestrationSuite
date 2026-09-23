@@ -37,7 +37,14 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from datetime import timedelta
 from pathlib import Path
+
+# App create/start and deployment can each take minutes (CLAUDE.md §11
+# recorded results: app creation ~139s) -- the SDK's wait helpers require a
+# real timedelta, not None (passing timeout=None raises AttributeError
+# inside wait_get_app_active: it unconditionally calls timeout.total_seconds()).
+_WAIT_TIMEOUT = timedelta(minutes=20)
 
 from dotenv import load_dotenv
 
@@ -134,16 +141,27 @@ def _ensure_app(w, app_name: str, warehouse_id: str):
             break
 
     if existing is not None:
-        existing.resources = [resource]
-        app = w.apps.update(app_name, existing)
+        # w.apps.update() (a plain PATCH with the whole App object) rejects
+        # this: "Compute size updates are not supported in this update API."
+        # -- some field on the fetched `existing` object (unrelated to what
+        # we're actually changing) trips that check when sent back
+        # unconditionally. create_update_and_wait's update_mask targets only
+        # `resources`, which is both what we want and what this API supports.
+        w.apps.create_update_and_wait(
+            app_name, update_mask="resources", app=App(name=app_name, resources=[resource]),
+            timeout=_WAIT_TIMEOUT,
+        )
         print(f"App {app_name!r} already exists — updated its resources.")
-        return app
+    else:
+        app = App(name=app_name, resources=[resource])
+        wait = w.apps.create(app)
+        wait.result(timeout=_WAIT_TIMEOUT) if hasattr(wait, "result") else wait
+        print(f"Created App {app_name!r}.")
 
-    app = App(name=app_name, resources=[resource])
-    wait = w.apps.create(app)
-    app = wait.result(timeout=None) if hasattr(wait, "result") else wait
-    print(f"Created App {app_name!r}.")
-    return app
+    # Always re-fetch the canonical App afterward: create's and update's own
+    # wait results have different shapes (App vs AppUpdate), and the caller
+    # needs service_principal_* off the real App object either way.
+    return w.apps.get(app_name)
 
 
 def _ensure_volume(w, catalog: str, schema: str, volume: str) -> None:
@@ -269,7 +287,13 @@ def main() -> None:
         print(f"Uploaded {n} files to {workspace_dir}.")
 
         app = _ensure_app(w, app_name, warehouse_id)
-        principal = app.service_principal_name or app.service_principal_client_id or app.service_principal_id
+        # service_principal_client_id (a UUID) first: Unity Catalog GRANT ...
+        # TO `<principal>` needs the application/client id, not
+        # service_principal_name -- that field is a human-readable DISPLAY
+        # name ("app-2kxaxf ai-audit-analyst", with a space in it) and is
+        # never a valid grant principal (CLAUDE.md §11 recorded results:
+        # "GRANT ... TO `<sp client id>`").
+        principal = app.service_principal_client_id or app.service_principal_id or app.service_principal_name
         if not principal:
             raise SystemExit(f"App {app_name!r} has no service principal yet — try again once it is provisioned.")
 
@@ -279,7 +303,7 @@ def main() -> None:
 
         deployment = AppDeployment(source_code_path=workspace_dir)
         wait = w.apps.deploy(app_name, deployment)
-        result = wait.result(timeout=None) if hasattr(wait, "result") else wait
+        result = wait.result(timeout=_WAIT_TIMEOUT) if hasattr(wait, "result") else wait
 
         app = w.apps.get(app_name)
         print("\n--- Deployed ---")
