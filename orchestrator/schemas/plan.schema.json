@@ -48,6 +48,23 @@
         ],
         "additionalProperties": false
       }
+    },
+    "run_metrics": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": ["sum_rows", "count_populations", "months_in_period", "population", "population_union"]
+          },
+          "populations": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+          "population": {"type": "string"},
+          "unit": {"type": "string"}
+        },
+        "required": ["kind"],
+        "additionalProperties": false
+      }
     }
   },
   "required": ["populations", "tests"],

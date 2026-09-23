@@ -11,16 +11,39 @@ E2E standards — see _PIPELINE_TIMEOUT_S. Nothing here is mocked: if
 orchestrator.service is missing or broken, this fails for real reasons,
 not a stub gap.
 
-Marked xfail(strict=False): verified live against the real local backend
-while building this (Home -> bindings auto-filled by suggest_bindings ->
-period/objective -> "Run audit analysis" -> real navigation to /run/<id> ->
-real pipeline execution reaching `awaiting_signoff` with actual findings,
-~4 minutes; sign-off accepted and the run moves into the `export` phase).
-But the `export` node itself did not complete in two separate ~10-15 minute
-observations -- `node_attempts` never gained a row for it, i.e. it appears
-to hang rather than merely run long. That node is orchestrator/'s, not
-app/'s; nothing in app/ was found broken. Once the export node is fixed,
-remove this marker -- the assertions below are real, not placeholders.
+Originally marked xfail(strict=False) over a different defect: two live
+observations showed the `export` node never gaining a node_attempts row
+after sign-off, appearing to hang for 10-15 minutes. Root-caused since: it
+was never orchestrator/'s `export` node at all. app/src/run_status.py's
+sign-off control used to be a server-rendered confirm/cancel panel living
+INSIDE run-page-body, the same subtree the page's 3s dcc.Interval poll
+re-renders. dash-renderer does not guarantee callback response ordering
+across separate in-flight requests, so a poll response for a request
+dispatched a moment before "Sign off findings" was clicked could still land
+(and silently revert the open panel to the bare button) after the
+open-confirm response — before sign_off was ever called, well before the
+export phase could even be admitted. Fixed by moving the confirmation to a
+dcc.ConfirmDialog (a native browser popup living outside run-page-body, so
+it cannot be raced by the poll at all): verified deterministically, repeatedly,
+against a fast fixture Skill (no manual page.reload() needed at all -- the
+dialog opens and submits inside the page's own natural render cycle), and
+via a new orchestrator-level regression test that drives plan -> execute ->
+sign_off -> export -> completed through a real ThreadExecutor
+(tests/test_p3_executor.py::test_full_run_reaches_completed_via_thread_executor).
+
+The marker below is for a DIFFERENT, separately-observed issue: against the
+real ~30MB synthetic_data/ xlsx (this test's own fixture), this sandbox's
+single-process, single-CPU-constrained container cannot serve even a plain
+page reload within 120s while profile/execute hold the GIL parsing that
+file with openpyxl -- CLAUDE.md §2.5 names exactly this risk ("No
+isolation... a heavy run degrades the UI for every user"). That is a real
+performance characteristic of in-App execution under CPU contention, not a
+callback-ordering bug, and is out of this pass's scope to fix (it would mean
+moving Excel parsing off the request-serving thread's GIL budget, e.g.
+chunked/async reads or a process pool). Re-run this test on a host with more
+than one CPU core (or once source reads are less GIL-heavy) before relying
+on it to gate a release; APP_URL against a real deployed App is the more
+representative way to check this today.
 """
 
 from __future__ import annotations
@@ -132,14 +155,20 @@ def _poll_until(page, predicate, *, timeout_s: float, interval_ms: int = 3000, o
 @pytest.mark.xfail(
     strict=False,
     reason=(
-        "orchestrator's `export` node did not complete in two separate live "
-        "observations (no node_attempts row for it after 10-15 minutes) -- "
-        "see this module's docstring. Everything up to and including "
-        "sign-off was verified working against the real local backend."
+        "page.reload() during profile/execute's real ~30MB xlsx parse "
+        "exceeds even a 120s timeout in this single-CPU sandbox -- a GIL-"
+        "contention performance characteristic (CLAUDE.md §2.5), not the "
+        "sign-off race this test used to be xfailed for (see module "
+        "docstring; that defect is fixed and independently verified)."
     ),
 )
 def test_full_playbook_run_via_home_to_signoff_to_workspace(watched_page, connected_app_url):
     page, watcher = watched_page
+    # dcc.ConfirmDialog's sign-off confirmation is a native browser confirm()
+    # popup; Playwright auto-dismisses (cancels) any dialog with no handler
+    # registered, so accept it explicitly -- this is the real user action,
+    # not a workaround.
+    page.on("dialog", lambda d: d.accept())
     goto(page, connected_app_url, "/")
 
     # Skill defaults to SKILL-001 (Home's only real Skill with a Skill dir),
@@ -168,13 +197,23 @@ def test_full_playbook_run_via_home_to_signoff_to_workspace(watched_page, connec
         return page.locator("#run-signoff-open-btn").count() > 0
 
     def _tick():
-        page.reload(wait_until="networkidle")
+        # "load" rather than "networkidle": app.py's external_stylesheets
+        # pulls Bootstrap from a CDN, and this sandbox's outbound network
+        # policy fails that request (TLS interception, unrelated to this
+        # app) -- a resource the browser keeps retrying can hold
+        # "networkidle" open indefinitely. A generous explicit timeout
+        # (Playwright's default is 30s): the profile/execute nodes hold the
+        # GIL for tens of seconds at a time parsing the ~30MB
+        # Expense_Report_Combined.xlsx (openpyxl, not chunked), which can
+        # delay even a same-process static response.
+        page.reload(wait_until="load", timeout=120_000)
 
     _poll_until(page, _reached_signoff, timeout_s=_PIPELINE_TIMEOUT_S, on_tick=_tick)
 
+    # Single click: opens the native confirm() dialog, auto-accepted by the
+    # page.on("dialog", ...) handler registered above, which fires
+    # sign_off() synchronously in that same round trip.
     page.locator("#run-signoff-open-btn").click()
-    page.wait_for_selector("#run-signoff-confirm-btn")
-    page.locator("#run-signoff-confirm-btn").click()
 
     def _completed() -> bool:
         return page.get_by_text("Run complete").count() > 0

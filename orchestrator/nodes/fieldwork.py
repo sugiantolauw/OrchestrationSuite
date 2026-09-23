@@ -172,18 +172,17 @@ def execute(ctx: NodeContext, state: RunState) -> RunState:
     re-derived from the same in-memory frame. A non-zero variance fails the
     run outright (CLAUDE.md §5 G6); it is never silently reported and ignored.
 
-    Known gap, not owned by this node: orchestrator.engine.execute_skill
-    re-resolves each source's version itself via data_source.resolve_version()
-    rather than reading the versions already pinned in state.data_assets at run
-    creation. In the time between start_audit_run pinning a version and this
-    node running (same pipeline pass, normally seconds), that is not expected
-    to differ -- but it is a TOCTOU gap engine.py (owned by the P2 primitives
-    work) would need to close by accepting pre-resolved versions."""
+    Passes state.data_assets' versions (resolved once, at start_audit_run, per
+    source) straight through as execute_skill's pinned_versions -- a source
+    that changes between run creation and this node running does not change
+    what gets read (CLAUDE.md §4.1 TOCTOU ordering)."""
+    pinned_versions = {b["source"]: b["version"] for b in state.data_assets}
     result = execute_skill(
         ctx.skill,
         data_source=ctx.data_source,
         audit_period=state.audit_period,
         run_context={"run_id": state.run_id},
+        pinned_versions=pinned_versions,
     )
 
     metric_test_id: dict[str, str] = {}
@@ -203,17 +202,17 @@ def execute(ctx: NodeContext, state: RunState) -> RunState:
     ]
     ctx.persistence.write_run_metrics(state.run_id, metrics_rows)
 
-    # Long-format flagged rows, un-pivoted from the engine's wide RF_* frame
-    # (result.flags: __source, __row_key, one 0/1 column per flag). group_id is
-    # left null here -- the wide pivot (orchestrator/engine.py's _wide_flags,
-    # owned by the P2 primitives work) does not carry it through, so it is
-    # never guessed (CLAUDE.md NN14).
-    flag_cols = [c for c in result.flags.columns if c not in ("__source", "__row_key")]
-    flagged_rows: list[dict] = []
-    for col in flag_cols:
-        present = result.flags[result.flags[col] == 1]
-        for src, row_key in zip(present["__source"], present["__row_key"]):
-            flagged_rows.append({"source": src, "row_key": row_key, "flag": col, "group_id": None})
+    # Long-format flagged rows, straight from the engine's own long frame
+    # (result.flags_long: __source, __row_key, flag, group_id -- one row per
+    # exception instance, exactly as each primitive produced it) rather than
+    # un-pivoting result.flags (the wide RF_* frame): that pivot never
+    # carried group_id through, so reconstructing from it could only ever
+    # persist a null group_id (CLAUDE.md NN14 -- never guess what was never
+    # computed, when the real value is available one step earlier).
+    flagged_rows: list[dict] = [
+        {"source": r["__source"], "row_key": r["__row_key"], "flag": r["flag"], "group_id": r["group_id"]}
+        for r in result.flags_long.to_dict("records")
+    ]
     ctx.persistence.write_flagged_rows(state.run_id, flagged_rows)
 
     if ctx.settings.catalog and ctx.settings.schema:

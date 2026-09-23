@@ -134,7 +134,13 @@ if __name__ == "__main__":
     # Databricks Apps serve on DATABRICKS_APP_PORT; PORT is the local-dev
     # fallback (default when neither is set).
     port = int(os.environ.get("DATABRICKS_APP_PORT") or os.environ.get("PORT", 8050))
-    app.run(host="0.0.0.0", port=port, debug=False)
+    # threaded=True: Werkzeug's dev server defaults to handling one request
+    # at a time, which is fine for the background executor (its own threads,
+    # unaffected either way) but not for the web tier -- a browser holding
+    # one connection open (a slow download, a stalled request) must not
+    # block every other user's poll/callback. Still not the "real" WSGI
+    # server the startup banner warns about; that's a separate P9-scope item.
+    app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
 else:
     # Imported (e.g. under a WSGI server, or by tests that don't want the
     # executor running). Tests exercise routing/layout without starting it;

@@ -987,3 +987,50 @@ tests:
         daily_over_count_int: {kind: count}
         daily_over_amount_int: {kind: excess, unit: AUD}
         daily_over_max_int: {kind: max, column: Expense Amount (reimbursement currency), unit: AUD}
+
+# --- run-level reporting metrics (spec §2 "Run-level metrics (all computed)";
+# CLAUDE.md §0.2 -- replaces the fixed row/file/month-count constants
+# computation.py hardcoded at :641-643). Domain-agnostic engine, Skill-declared mapping:
+# orchestrator/engine.py only knows the five `kind`s below; which
+# populations feed which metric is this Skill's own data. ---
+run_metrics:
+  total_records:
+    kind: sum_rows
+    populations:
+      - raw_expense_report
+      - raw_attendee_validity
+      - raw_missing_receipt
+      - raw_approval_aging
+      - raw_travel_requests_no_expense
+      - raw_travel_request_segment
+      - raw_booking_detail
+      - raw_per_diem_rates
+  total_files:
+    kind: count_populations
+    populations:
+      - raw_expense_report
+      - raw_attendee_validity
+      - raw_missing_receipt
+      - raw_approval_aging
+      - raw_travel_requests_no_expense
+      - raw_travel_request_segment
+      - raw_booking_detail
+      - raw_per_diem_rates
+  months_covered:
+    kind: months_in_period
+  # P_EXP role sets (spec §0 "Expense population P_EXP"): prepared, approved,
+  # and combined (the row-key union of both -- a row counts once, unlike
+  # computation.py's concatenation, which double-counted rows in both roles).
+  # Unfiltered by period, matching total_records' own scope.
+  claims_prepared:
+    kind: population
+    population: p_exp_prepared_all
+    unit: AUD
+  claims_approved:
+    kind: population
+    population: p_exp_approved_all
+    unit: AUD
+  claims_combined:
+    kind: population_union
+    populations: [p_exp_prepared_all, p_exp_approved_all]
+    unit: AUD

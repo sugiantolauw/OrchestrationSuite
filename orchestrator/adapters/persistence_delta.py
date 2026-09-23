@@ -1141,19 +1141,51 @@ class DeltaPersistence:
     # ── P3 run outputs ───────────────────────────────────────────────────────
 
     def write_flagged_rows(self, run_id: str, rows: list[dict]) -> None:
+        # MERGE (upsert) + prune, the same pattern write_findings uses (CLAUDE.md
+        # build brief P3 §1) -- never DELETE-then-INSERT, which leaves a window
+        # where this run's flagged_rows are entirely absent to any concurrent
+        # reader (a drill-down query, a re-admitted G6 pass) between the DELETE
+        # committing and the first INSERT landing.
+        new_keys = {(r["source"], r["row_key"], r["flag"]) for r in rows}
         with self._cursor_ctx() as conn:
-            self._execute(
-                conn, f"DELETE FROM {self._table('flagged_rows')} WHERE run_id = :run_id", {"run_id": run_id}
+            cur = self._execute(
+                conn,
+                f"SELECT source, row_key, flag FROM {self._table('flagged_rows')} WHERE run_id = :run_id",
+                {"run_id": run_id},
+            )
+            existing_keys = {(r["source"], r["row_key"], r["flag"]) for r in _fetchall_dicts(cur)}
+
+            merge_sql = (
+                f"MERGE INTO {self._table('flagged_rows')} t "
+                "USING (SELECT :run_id AS run_id, :source AS source, :row_key AS row_key, :flag AS flag) s "
+                "ON t.run_id = s.run_id AND t.source = s.source AND t.row_key = s.row_key AND t.flag = s.flag "
+                "WHEN MATCHED THEN UPDATE SET group_id = :group_id "
+                "WHEN NOT MATCHED THEN INSERT (run_id, source, row_key, flag, group_id) "
+                "VALUES (:run_id, :source, :row_key, :flag, :group_id)"
             )
             for r in rows:
                 self._execute(
                     conn,
-                    f"INSERT INTO {self._table('flagged_rows')} (run_id, source, row_key, flag, group_id) "
-                    "VALUES (:run_id, :source, :row_key, :flag, :group_id)",
+                    merge_sql,
                     {
                         "run_id": run_id, "source": r["source"], "row_key": r["row_key"],
                         "flag": r["flag"], "group_id": r.get("group_id"),
                     },
+                )
+
+            orphans = existing_keys - new_keys
+            if orphans:
+                clauses = []
+                params: dict = {"run_id": run_id}
+                for i, (source, row_key, flag) in enumerate(orphans):
+                    clauses.append(f"(source = :s{i} AND row_key = :rk{i} AND flag = :f{i})")
+                    params[f"s{i}"] = source
+                    params[f"rk{i}"] = row_key
+                    params[f"f{i}"] = flag
+                self._execute(
+                    conn,
+                    f"DELETE FROM {self._table('flagged_rows')} WHERE run_id = :run_id AND ({' OR '.join(clauses)})",
+                    params,
                 )
 
     def list_flagged_rows(self, run_id: str, flag: str | None = None) -> list[dict]:
@@ -1175,17 +1207,33 @@ class DeltaPersistence:
             return _fetchall_dicts(cur)
 
     def write_run_metrics(self, run_id: str, metrics: list[dict]) -> None:
+        # MERGE + prune (see write_flagged_rows above) -- a re-executed execute/
+        # prioritise node's metrics are never absent, even momentarily, to a
+        # concurrent get_run_payload/get_run_frames read.
+        new_names = {m["metric_name"] for m in metrics}
         with self._cursor_ctx() as conn:
-            self._execute(
-                conn, f"DELETE FROM {self._table('run_metrics')} WHERE run_id = :run_id", {"run_id": run_id}
+            cur = self._execute(
+                conn,
+                f"SELECT metric_name FROM {self._table('run_metrics')} WHERE run_id = :run_id",
+                {"run_id": run_id},
+            )
+            existing_names = {r["metric_name"] for r in _fetchall_dicts(cur)}
+
+            merge_sql = (
+                f"MERGE INTO {self._table('run_metrics')} t "
+                "USING (SELECT :run_id AS run_id, :metric_name AS metric_name) s "
+                "ON t.run_id = s.run_id AND t.metric_name = s.metric_name "
+                "WHEN MATCHED THEN UPDATE SET value = :value, value_text = :value_text, unit = :unit, "
+                "source_ref_json = :source_ref_json, test_id = :test_id "
+                "WHEN NOT MATCHED THEN INSERT (run_id, metric_name, value, value_text, unit, "
+                "source_ref_json, test_id) VALUES (:run_id, :metric_name, :value, :value_text, :unit, "
+                ":source_ref_json, :test_id)"
             )
             for m in metrics:
                 value, value_text = _metric_value_columns(m.get("value"))
                 self._execute(
                     conn,
-                    f"INSERT INTO {self._table('run_metrics')} (run_id, metric_name, value, value_text, "
-                    "unit, source_ref_json, test_id) VALUES (:run_id, :metric_name, :value, :value_text, "
-                    ":unit, :source_ref_json, :test_id)",
+                    merge_sql,
                     {
                         "run_id": run_id,
                         "metric_name": m["metric_name"],
@@ -1195,6 +1243,18 @@ class DeltaPersistence:
                         "source_ref_json": _canonical_json(m.get("source_ref", {})),
                         "test_id": m.get("test_id"),
                     },
+                )
+
+            orphans = existing_names - new_names
+            if orphans:
+                placeholders = ", ".join(f":m{i}" for i in range(len(orphans)))
+                params = {f"m{i}": name for i, name in enumerate(orphans)}
+                params["run_id"] = run_id
+                self._execute(
+                    conn,
+                    f"DELETE FROM {self._table('run_metrics')} WHERE run_id = :run_id "
+                    f"AND metric_name IN ({placeholders})",
+                    params,
                 )
 
     def get_run_metrics(self, run_id: str) -> dict[str, dict]:
@@ -1247,21 +1307,39 @@ class DeltaPersistence:
         return created
 
     def write_management_actions(self, run_id: str, actions: list[dict], *, now: str) -> None:
+        # MERGE + prune (see write_flagged_rows above) -- action_id is
+        # deterministic per finding_id (nodes/fieldwork.py's act()), so a
+        # re-executed act node upserts by that id instead of ever leaving
+        # management_actions momentarily empty for this run.
+        new_ids = {a["action_id"] for a in actions}
         with self._cursor_ctx() as conn:
-            self._execute(
+            cur = self._execute(
                 conn,
-                f"DELETE FROM {self._table('management_actions')} WHERE run_id = :run_id",
+                f"SELECT action_id FROM {self._table('management_actions')} WHERE run_id = :run_id",
                 {"run_id": run_id},
+            )
+            existing_ids = {r["action_id"] for r in _fetchall_dicts(cur)}
+
+            merge_sql = (
+                f"MERGE INTO {self._table('management_actions')} t "
+                "USING (SELECT :action_id AS action_id) s ON t.action_id = s.action_id "
+                "WHEN MATCHED THEN UPDATE SET issue_id = :issue_id, finding_id = :finding_id, "
+                "run_id = :run_id, engagement_id = :engagement_id, skill_id = :skill_id, "
+                "title = :title, description = :description, owner = :owner, risk = :risk, "
+                "status = :status, target_date = :target_date, "
+                "potential_exposure = :potential_exposure, evidence_link = :evidence_link, "
+                "last_updated = :last_updated "
+                "WHEN NOT MATCHED THEN INSERT (action_id, issue_id, finding_id, run_id, "
+                "engagement_id, skill_id, title, description, owner, risk, status, target_date, "
+                "potential_exposure, evidence_link, created_at, last_updated) VALUES (:action_id, "
+                ":issue_id, :finding_id, :run_id, :engagement_id, :skill_id, :title, :description, "
+                ":owner, :risk, :status, :target_date, :potential_exposure, :evidence_link, "
+                ":created_at, :last_updated)"
             )
             for a in actions:
                 self._execute(
                     conn,
-                    f"INSERT INTO {self._table('management_actions')} (action_id, issue_id, "
-                    "finding_id, run_id, engagement_id, skill_id, title, description, owner, risk, "
-                    "status, target_date, potential_exposure, evidence_link, created_at, "
-                    "last_updated) VALUES (:action_id, :issue_id, :finding_id, :run_id, "
-                    ":engagement_id, :skill_id, :title, :description, :owner, :risk, :status, "
-                    ":target_date, :potential_exposure, :evidence_link, :created_at, :last_updated)",
+                    merge_sql,
                     {
                         "action_id": a["action_id"],
                         "issue_id": a.get("issue_id"),
@@ -1280,6 +1358,18 @@ class DeltaPersistence:
                         "created_at": now,
                         "last_updated": now,
                     },
+                )
+
+            orphans = existing_ids - new_ids
+            if orphans:
+                placeholders = ", ".join(f":a{i}" for i in range(len(orphans)))
+                params = {f"a{i}": aid for i, aid in enumerate(orphans)}
+                params["run_id"] = run_id
+                self._execute(
+                    conn,
+                    f"DELETE FROM {self._table('management_actions')} WHERE run_id = :run_id "
+                    f"AND action_id IN ({placeholders})",
+                    params,
                 )
 
     def list_management_actions(self, filters: dict | None = None) -> list[dict]:

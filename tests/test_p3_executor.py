@@ -8,12 +8,17 @@ these stay fast and independent of any Skill or data fixture."""
 from __future__ import annotations
 
 import dataclasses
+import shutil
 import threading
 import time
+from pathlib import Path
 
 from orchestrator import runs as runs_module
+from orchestrator import service
 from orchestrator.executor import ThreadExecutor
 from tests.conftest import canonical_ts
+
+MINI_SKILL_DIR = Path(__file__).parent / "fixtures" / "skills" / "mini"
 
 
 def _fingerprint(fp_id: str) -> dict:
@@ -203,3 +208,89 @@ def test_run_one_swallows_stale_state_error(local_persistence):
     assert calls["n"] == 1
     # The run was never advanced past `queued` by this worker.
     assert persistence.load_state(run_id).status == "queued"
+
+
+# ── full pipeline regression: plan -> execute -> sign-off -> export -> completed ──
+
+
+def _wait_for_status(ctx, run_id, statuses, timeout=30):
+    deadline = time.time() + timeout
+    last = None
+    while time.time() < deadline:
+        last = service.get_run(ctx, run_id)["status"]
+        if last in statuses:
+            return last
+        time.sleep(0.05)
+    raise AssertionError(f"run {run_id} did not reach {statuses} in {timeout}s (last={last})")
+
+
+def test_full_run_reaches_completed_via_thread_executor(tmp_path):
+    """The regression case for the export stall (CLAUDE.md build brief P3
+    §1's integration pass): drives plan -> execute -> sign_off -> export ->
+    completed entirely through service.start_audit_run/sign_off and a real
+    ThreadExecutor (never calling a node function directly), using the mini
+    Skill fixture so this runs in well under a second rather than the
+    minutes a real synthetic_data/ pass takes. The actual defect that
+    produced the observed stall was in app/src/run_status.py's Dash
+    callbacks (a poll-vs-confirm race that meant sign_off was never called),
+    not here -- but this still asserts the orchestrator side of the journey
+    an auditor's sign-off must complete: the export phase gets admitted,
+    the export node runs and records a node_attempts row, and the run
+    reaches `completed` with an xlsx export recorded, all via the SAME
+    admission/execution path the deployed App uses."""
+    skills_dir = tmp_path / "skills"
+    skills_dir.mkdir()
+    shutil.copytree(MINI_SKILL_DIR, skills_dir / "mini")
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    (data_dir / "claims.csv").write_text(
+        "Employee ID,Transaction Date,Amount,Vendor\n"
+        "1,2026-01-05,600,Acme\n"
+        "2,2026-01-10,900,Beta\n"
+    )
+    (data_dir / "register.csv").write_text(
+        "Employee ID,Transaction Date,Vendor\n"
+        "1,2026-01-05,Acme\n"
+    )
+
+    env = {
+        "ORCH_BACKEND": "local",
+        "ORCH_LOCAL_DB": str(tmp_path / "orch.db"),
+        "SKILLS_DIR": str(skills_dir),
+        "ORCH_LOCAL_DATA_ROOT": str(data_dir),
+        "ORCH_LOCAL_EXPORT_ROOT": str(tmp_path / "exports"),
+        "ORCH_WORKER_ID": "test-full-run",
+    }
+    ctx = service.build_app_context(env)
+    ctx.executor.start()
+    try:
+        bindings = service.suggest_bindings(ctx, "SKILL-MINI")
+        assert all(bindings.values()), bindings
+
+        run_id = service.start_audit_run(
+            ctx, skill_id="SKILL-MINI", bindings=bindings,
+            audit_period=("2026-01-01", "2026-01-31"),
+            objective="regression: full run via ThreadExecutor", run_owner="tester",
+        )
+
+        status = _wait_for_status(ctx, run_id, {"awaiting_signoff", "failed"})
+        run = service.get_run(ctx, run_id)
+        assert status == "awaiting_signoff", run.get("status_reason")
+
+        service.sign_off(ctx, run_id, "approver")
+        status = _wait_for_status(ctx, run_id, {"completed", "failed"})
+        run = service.get_run(ctx, run_id)
+        assert status == "completed", run.get("status_reason")
+
+        # The export node actually ran (a node_attempts row for it, outcome
+        # succeeded) -- not just that the run's status reads "completed".
+        attempts = ctx.persistence.list_node_attempts(run_id)
+        export_attempts = [a for a in attempts if a["node_name"] == "export"]
+        assert export_attempts, f"no node_attempts row for the export node: {attempts}"
+        assert export_attempts[-1]["outcome"] == "succeeded"
+
+        filename, content = service.get_export(ctx, run_id, "xlsx")
+        assert filename == "workpaper.xlsx"
+        assert len(content) > 100
+    finally:
+        ctx.executor.stop()

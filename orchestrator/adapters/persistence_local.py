@@ -856,15 +856,34 @@ class LocalPersistence:
     # ── P3 run outputs ───────────────────────────────────────────────────────
 
     def write_flagged_rows(self, run_id: str, rows: list[dict]) -> None:
+        # ON CONFLICT DO UPDATE + prune, the same pattern write_findings uses --
+        # matches DeltaPersistence's MERGE + prune shape (CLAUDE.md build brief
+        # P3 §1) rather than DELETE-then-INSERT, even though this backend's own
+        # single-transaction write already made the delete/insert atomic to
+        # other readers; keeping both backends' upsert semantics identical is
+        # what the P1A cross-backend persistence-contract test relies on.
+        new_keys = {(r["source"], r["row_key"], r["flag"]) for r in rows}
         with self._writer() as conn:
-            conn.execute("DELETE FROM flagged_rows WHERE run_id = ?", (run_id,))
+            existing_keys = {
+                (r["source"], r["row_key"], r["flag"])
+                for r in conn.execute(
+                    "SELECT source, row_key, flag FROM flagged_rows WHERE run_id = ?", (run_id,)
+                ).fetchall()
+            }
             conn.executemany(
-                "INSERT INTO flagged_rows (run_id, source, row_key, flag, group_id) VALUES (?,?,?,?,?)",
+                "INSERT INTO flagged_rows (run_id, source, row_key, flag, group_id) VALUES (?,?,?,?,?) "
+                "ON CONFLICT(run_id, source, row_key, flag) DO UPDATE SET group_id = excluded.group_id",
                 [
                     (run_id, r["source"], r["row_key"], r["flag"], r.get("group_id"))
                     for r in rows
                 ],
             )
+            orphans = existing_keys - new_keys
+            if orphans:
+                conn.executemany(
+                    "DELETE FROM flagged_rows WHERE run_id = ? AND source = ? AND row_key = ? AND flag = ?",
+                    [(run_id, source, row_key, flag) for source, row_key, flag in orphans],
+                )
 
     def list_flagged_rows(self, run_id: str, flag: str | None = None) -> list[dict]:
         conn = self._connect()
@@ -884,11 +903,21 @@ class LocalPersistence:
         return [dict(r) for r in rows]
 
     def write_run_metrics(self, run_id: str, metrics: list[dict]) -> None:
+        # ON CONFLICT DO UPDATE + prune (see write_flagged_rows above).
+        new_names = {m["metric_name"] for m in metrics}
         with self._writer() as conn:
-            conn.execute("DELETE FROM run_metrics WHERE run_id = ?", (run_id,))
+            existing_names = {
+                r["metric_name"]
+                for r in conn.execute(
+                    "SELECT metric_name FROM run_metrics WHERE run_id = ?", (run_id,)
+                ).fetchall()
+            }
             conn.executemany(
                 "INSERT INTO run_metrics (run_id, metric_name, value, value_text, unit, "
-                "source_ref_json, test_id) VALUES (?,?,?,?,?,?,?)",
+                "source_ref_json, test_id) VALUES (?,?,?,?,?,?,?) "
+                "ON CONFLICT(run_id, metric_name) DO UPDATE SET value = excluded.value, "
+                "value_text = excluded.value_text, unit = excluded.unit, "
+                "source_ref_json = excluded.source_ref_json, test_id = excluded.test_id",
                 [
                     (
                         run_id,
@@ -901,6 +930,12 @@ class LocalPersistence:
                     for m in metrics
                 ],
             )
+            orphans = existing_names - new_names
+            if orphans:
+                conn.executemany(
+                    "DELETE FROM run_metrics WHERE run_id = ? AND metric_name = ?",
+                    [(run_id, name) for name in orphans],
+                )
 
     def get_run_metrics(self, run_id: str) -> dict[str, dict]:
         conn = self._connect()
@@ -954,14 +989,31 @@ class LocalPersistence:
         return created
 
     def write_management_actions(self, run_id: str, actions: list[dict], *, now: str) -> None:
+        # ON CONFLICT DO UPDATE + prune (see write_flagged_rows above) --
+        # action_id is deterministic per finding_id (nodes/fieldwork.py's
+        # act()), so a re-executed act node upserts by that id.
+        new_ids = {a["action_id"] for a in actions}
         with self._writer() as conn:
-            conn.execute("DELETE FROM management_actions WHERE run_id = ?", (run_id,))
+            existing_ids = {
+                r["action_id"]
+                for r in conn.execute(
+                    "SELECT action_id FROM management_actions WHERE run_id = ?", (run_id,)
+                ).fetchall()
+            }
             for a in actions:
                 conn.execute(
                     "INSERT INTO management_actions (action_id, issue_id, finding_id, run_id, "
                     "engagement_id, skill_id, title, description, owner, risk, status, "
                     "target_date, potential_exposure, evidence_link, created_at, last_updated) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+                    "ON CONFLICT(action_id) DO UPDATE SET issue_id = excluded.issue_id, "
+                    "finding_id = excluded.finding_id, run_id = excluded.run_id, "
+                    "engagement_id = excluded.engagement_id, skill_id = excluded.skill_id, "
+                    "title = excluded.title, description = excluded.description, "
+                    "owner = excluded.owner, risk = excluded.risk, status = excluded.status, "
+                    "target_date = excluded.target_date, "
+                    "potential_exposure = excluded.potential_exposure, "
+                    "evidence_link = excluded.evidence_link, last_updated = excluded.last_updated",
                     (
                         a["action_id"],
                         a.get("issue_id"),
@@ -980,6 +1032,12 @@ class LocalPersistence:
                         now,
                         now,
                     ),
+                )
+            orphans = existing_ids - new_ids
+            if orphans:
+                conn.executemany(
+                    "DELETE FROM management_actions WHERE run_id = ? AND action_id = ?",
+                    [(run_id, aid) for aid in orphans],
                 )
 
     def list_management_actions(self, filters: dict | None = None) -> list[dict]:

@@ -27,6 +27,21 @@ def run_page(run_id: str) -> html.Div:
     return html.Div([
         dcc.Store(id="run-page-run-id", data=run_id),
         dcc.Interval(id="run-poll", interval=_POLL_MS, n_intervals=0),
+        # A browser-native confirm popup, not a DOM subtree the 3s poll
+        # renders: dcc.ConfirmDialog lives here, outside run-page-body, so
+        # _poll's periodic re-render of run-page-body can never race with
+        # (and silently close) an open confirmation the way a server-rendered
+        # "confirm/cancel" panel living inside the polled subtree could --
+        # that was the actual cause of the export stall this page's docstring
+        # used to attribute to orchestrator/ (see git history): the confirm
+        # button was part of run-page-body, so a poll response landing
+        # between "Sign off findings" and the auditor's next click could
+        # revert it to the bare button before the click ever registered.
+        dcc.ConfirmDialog(
+            id="run-signoff-confirm-dialog",
+            message="Signing off records your identity and timestamp on the run and is "
+                    "required before export (CLAUDE.md §2.4).",
+        ),
         html.Div(id="run-page-body"),
     ], className="shell dashboard-shell")
 
@@ -87,7 +102,6 @@ def _render_body(run: dict | None, run_id: str) -> html.Div:
                    className="sub"),
             html.Button("Sign off findings", id="run-signoff-open-btn", className="btn-generate",
                         style={"width": "auto", "padding": "10px 24px"}),
-            html.Div(id="run-signoff-modal-container"),
         ], className="panel", style={"marginTop": 16}))
 
     elif status == "interrupted":
@@ -151,37 +165,31 @@ def register_callbacks(app) -> None:
         adapters.confirm_plan(run_id, _request_actor())
         return _render_body(adapters.get_run(run_id), run_id)
 
+    # "Sign off findings" only opens the native confirm dialog (a single-
+    # Input callback writing a single, ALWAYS-mounted component's own prop --
+    # never run-page-body, so it cannot race with _poll at all). The actual
+    # sign_off call happens in _confirm_signoff below, on the dialog's own
+    # submit_n_clicks, once the auditor confirms in the browser popup.
     @app.callback(
-        Output("run-signoff-modal-container", "children"),
+        Output("run-signoff-confirm-dialog", "displayed"),
         Input("run-signoff-open-btn", "n_clicks"),
-        State("run-page-run-id", "data"),
         prevent_initial_call=True,
     )
-    def _open_signoff(n_clicks, run_id):
+    def _open_signoff(n_clicks):
         if not n_clicks:
             raise PreventUpdate
-        actor = _request_actor()
-        return html.Div([
-            html.Div([
-                html.P(f"Signing off as {actor}. This records your identity and timestamp on the run "
-                       "and is required before export (CLAUDE.md §2.4).", style={"fontSize": 13}),
-                html.Button("Confirm sign-off", id="run-signoff-confirm-btn", className="btn-generate",
-                            style={"width": "auto", "padding": "8px 20px", "marginRight": 8}),
-                html.Button("Cancel", id="run-signoff-cancel-btn", className="ghost", style={"width": "auto"}),
-            ], className="panel", style={"marginTop": 10, "borderColor": "#e0952a"}),
-        ])
+        return True
 
     @app.callback(
         Output("run-page-body", "children", allow_duplicate=True),
-        Input("run-signoff-confirm-btn", "n_clicks"),
-        Input("run-signoff-cancel-btn", "n_clicks"),
+        Input("run-signoff-confirm-dialog", "submit_n_clicks"),
         State("run-page-run-id", "data"),
         prevent_initial_call=True,
     )
-    def _confirm_signoff(confirm_clicks, cancel_clicks, run_id):
-        from dash import ctx as dash_ctx
-        if dash_ctx.triggered_id == "run-signoff-confirm-btn" and confirm_clicks:
-            adapters.sign_off(run_id, _request_actor())
+    def _confirm_signoff(submit_n_clicks, run_id):
+        if not submit_n_clicks:
+            raise PreventUpdate
+        adapters.sign_off(run_id, _request_actor())
         return _render_body(adapters.get_run(run_id), run_id)
 
     @app.callback(

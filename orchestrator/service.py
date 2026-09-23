@@ -287,6 +287,34 @@ def list_skills(ctx: AppContext) -> list[dict]:
     return out
 
 
+def _plan_test_entries(plan_tests: list[dict]) -> list[dict]:
+    """Flattens plan.yaml's `tests` into {test_id, flag, primitive} rows the
+    UI can join against flagged_rows.flag -- one row per RF_* flag a plan
+    test declares, including a not_testable test's (plural) declared flags,
+    each with primitive=None since none ran."""
+    entries: list[dict] = []
+    for t in plan_tests:
+        test_id = t["test_id"]
+        if "not_testable" in t:
+            for flag in t["not_testable"].get("flags", []):
+                entries.append({"test_id": test_id, "flag": flag, "primitive": None})
+        elif t.get("flag"):
+            entries.append({"test_id": test_id, "flag": t["flag"], "primitive": t.get("primitive")})
+    return entries
+
+
+def _catalogue_id_for_plan_test(plan_test_id: str, catalogue_ids: set[str]) -> str:
+    # plan.yaml instantiates one catalogue test ("T3.3a") as several plan
+    # tests ("T3.3a_dom", "T3.3a_int", "T3.3a_very_late") -- never fuzzy:
+    # only an exact id match or an exact "<catalogue_id>_" prefix counts.
+    if plan_test_id in catalogue_ids:
+        return plan_test_id
+    for cid in catalogue_ids:
+        if plan_test_id.startswith(f"{cid}_"):
+            return cid
+    return plan_test_id
+
+
 def get_skill(ctx: AppContext, skill_id: str) -> dict | None:
     try:
         d = _skill_dir_for(ctx, skill_id)
@@ -304,7 +332,24 @@ def get_skill(ctx: AppContext, skill_id: str) -> dict | None:
     catalogue = _read_yaml(d / "catalogue.yaml")
     tests = catalogue.get("tests") or _read_yaml(d / "plan.yaml").get("tests", [])
 
-    return {**base, "sources": sources, "tests": tests}
+    # plan_tests / flag_to_test (drill-down mapping for the UI, CLAUDE.md
+    # build brief P3 §1): every catalogue test entry gains the plan.yaml
+    # primitive instance(s) -- and their RF_* flag(s) -- it actually resolves
+    # to, and flag_to_test gives the reverse lookup (a flagged_rows.flag ->
+    # the plan test that produced it) at the top level.
+    plan_tests_raw = _read_yaml(d / "plan.yaml").get("tests", [])
+    plan_entries = _plan_test_entries(plan_tests_raw)
+    catalogue_ids = {t["test_id"] for t in tests if t.get("test_id")}
+    plan_tests_by_catalogue: dict[str, list[dict]] = {}
+    for e in plan_entries:
+        cid = _catalogue_id_for_plan_test(e["test_id"], catalogue_ids)
+        plan_tests_by_catalogue.setdefault(cid, []).append(e)
+    tests_with_plan = [
+        {**t, "plan_tests": plan_tests_by_catalogue.get(t.get("test_id"), [])} for t in tests
+    ]
+    flag_to_test = {e["flag"]: e["test_id"] for e in plan_entries}
+
+    return {**base, "sources": sources, "tests": tests_with_plan, "flag_to_test": flag_to_test}
 
 
 # ── Governed data discovery ───────────────────────────────────────────────────

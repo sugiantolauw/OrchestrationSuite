@@ -1,6 +1,12 @@
 # Runtime
-dash>=2.14
-dash-bootstrap-components>=1.5
+# Pinned exactly (not >=): the connected App's UI was built and E2E-tested
+# against dash==2.17.1 / dash-bootstrap-components==1.6.0. An unpinned
+# `>=` install resolves to a much newer major (dash 4.x, dbc 2.x as of this
+# writing) whose DOM/behaviour differs from what was validated -- pin here
+# and in whatever requirements file scripts/deploy_app.py ships, so a
+# deploy never silently picks up a different major version.
+dash==2.17.1
+dash-bootstrap-components==1.6.0
 plotly>=5.18
 pandas>=2.1
 numpy>=1.26

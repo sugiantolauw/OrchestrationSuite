@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import date
 from typing import Any
 
 import jsonschema
@@ -8,11 +9,103 @@ import pandas as pd
 
 from orchestrator.contract import validate_contract
 from orchestrator.findings import build_findings
-from orchestrator.populations import PopulationContext, build_populations
+from orchestrator.populations import PopulationContext, PopulationResult, build_populations
 from orchestrator.primitives import PRIMITIVES, PrimitiveContext, PrimitiveParamsError, run_primitive
 from orchestrator.skills import Skill
 
 _FLAG_COLUMNS = ["__source", "__row_key", "flag", "group_id"]
+
+
+def _run_metric_source_ref(pops: list[PopulationResult], **extra: Any) -> dict:
+    seen: set[tuple[str, str]] = set()
+    sources = []
+    for p in pops:
+        key = (p.source, p.source_version)
+        if key in seen:
+            continue
+        seen.add(key)
+        sources.append({"name": p.source, "version": p.source_version})
+    return {"sources": sources, "populations": [p.name for p in pops], **extra}
+
+
+def _months_in_period(audit_period: tuple[str, str]) -> int:
+    start = date.fromisoformat(audit_period[0])
+    end = date.fromisoformat(audit_period[1])
+    if end < start:
+        raise ValueError(f"run_metrics months_in_period: audit_period end {end} precedes start {start}")
+    return (end.year - start.year) * 12 + (end.month - start.month) + 1
+
+
+def _population_union(pops: list[PopulationResult]) -> tuple[int, float | None, str | None]:
+    frames = [p.df for p in pops if len(p.df)]
+    amount_col = next((p.amount_column for p in pops if p.amount_column), None)
+    if not frames:
+        return 0, (0.0 if amount_col else None), amount_col
+    combined = pd.concat(frames, ignore_index=True).drop_duplicates(subset="__row_key")
+    rows = int(len(combined))
+    amount = float(combined[amount_col].sum()) if amount_col and amount_col in combined.columns else None
+    return rows, amount, amount_col
+
+
+def _evaluate_run_metrics(
+    spec: dict[str, dict], populations: dict[str, PopulationResult], audit_period: tuple[str, str]
+) -> dict[str, dict]:
+    """Run-level reporting metrics declared in plan.yaml's `run_metrics:`
+    (CLAUDE.md build brief P3 §2, N6) -- total_records, total_files,
+    months_covered, claims_prepared/approved/combined and similar for other
+    Skills. Domain-agnostic by design: the engine only knows five generic
+    aggregation kinds over already-built populations; which populations feed
+    which run metric, and what each one is called, is entirely the Skill's
+    plan.yaml, never a name this module hardcodes."""
+    metrics: dict[str, dict] = {}
+    for name, cfg in spec.items():
+        kind = cfg["kind"]
+        if kind == "sum_rows":
+            pops = [populations[p] for p in cfg["populations"]]
+            metrics[name] = {
+                "value": sum(p.rows for p in pops),
+                "unit": cfg.get("unit", "count"),
+                "source_ref": _run_metric_source_ref(pops, aggregation="sum of row counts"),
+            }
+        elif kind == "count_populations":
+            pops = [populations[p] for p in cfg["populations"]]
+            metrics[name] = {
+                "value": len(pops),
+                "unit": cfg.get("unit", "count"),
+                "source_ref": _run_metric_source_ref(pops, aggregation="population count"),
+            }
+        elif kind == "months_in_period":
+            metrics[name] = {
+                "value": _months_in_period(audit_period),
+                "unit": cfg.get("unit", "count"),
+                "source_ref": {"basis": "distinct calendar months spanned by audit_period, inclusive"},
+            }
+        elif kind == "population":
+            pop = populations[cfg["population"]]
+            metrics[f"{name}_rows"] = {
+                "value": pop.rows, "unit": "count",
+                "source_ref": _run_metric_source_ref([pop], aggregation="row count"),
+            }
+            metrics[f"{name}_amount"] = {
+                "value": pop.amount, "unit": cfg.get("unit", "AUD"),
+                "source_ref": _run_metric_source_ref([pop], aggregation=f"sum({pop.amount_column})"),
+            }
+        elif kind == "population_union":
+            pops = [populations[p] for p in cfg["populations"]]
+            rows, amount, amount_col = _population_union(pops)
+            metrics[f"{name}_rows"] = {
+                "value": rows, "unit": "count",
+                "source_ref": _run_metric_source_ref(pops, aggregation="distinct __row_key union"),
+            }
+            metrics[f"{name}_amount"] = {
+                "value": amount, "unit": cfg.get("unit", "AUD"),
+                "source_ref": _run_metric_source_ref(
+                    pops, aggregation=f"sum({amount_col}) over distinct __row_key union"
+                ),
+            }
+        else:  # pragma: no cover - the plan.yaml schema already restricts `kind`
+            raise ValueError(f"run_metrics {name!r}: unknown kind {kind!r}")
+    return metrics
 
 
 @dataclass
@@ -25,6 +118,15 @@ class ExecutionResult:
     flags: pd.DataFrame
     scored_units: dict[str, list[str]]
     findings: list[dict] = field(default_factory=list)
+    # Long-format flags (__source, __row_key, flag, group_id) -- one row per
+    # exception instance, group_id intact -- exactly what each primitive
+    # returned before `flags` pivoted it wide for the RF_* column shape
+    # ExecutionResult.flags/get_run_frames need. The `execute` node persists
+    # flagged_rows from THIS, never by un-pivoting `flags` back to long
+    # (which cannot recover group_id -- the pivot never carried it).
+    flags_long: pd.DataFrame = field(
+        default_factory=lambda: pd.DataFrame(columns=_FLAG_COLUMNS)
+    )
 
 
 def _run_test_primitive(skill: Skill, name: str, ctx: PrimitiveContext, params: dict):
@@ -66,17 +168,31 @@ def execute_skill(
     data_source,
     audit_period: tuple[str, str],
     run_context: dict,
+    pinned_versions: dict[str, str] | None = None,
 ) -> ExecutionResult:
     """The `execute` node's logic (CLAUDE.md §4.2): resolves every source version
     first, reads with that pinned version (TOCTOU ordering, §4.1), validates every
     source's contract (a ContractViolation here propagates -- the caller fails the
     run, NN14/G7), runs every test in plan order, then builds findings.
-    `execute` never calls an LLM (NN2)."""
+    `execute` never calls an LLM (NN2).
+
+    `pinned_versions`, when given, is used INSTEAD of calling
+    `data_source.resolve_version()` here -- the version each contract source was
+    already pinned to at run creation (`state.data_assets`), so a source that
+    changes between `start_audit_run` and this node running does not change what
+    gets read (CLAUDE.md §4.1 TOCTOU ordering, closing the exact gap this
+    function's docstring used to name as a known one). When absent, the
+    resolve-first behaviour is unchanged -- existing callers (Surface 2, the
+    engine's own tests) that never pinned a version keep working."""
     contract_sources = skill.contract.get("sources", {})
 
-    source_versions: dict[str, str] = {
-        name: data_source.resolve_version(name) for name in contract_sources
-    }
+    if pinned_versions is not None:
+        missing = sorted(set(contract_sources) - set(pinned_versions))
+        if missing:
+            raise ValueError(f"pinned_versions is missing contract source(s): {missing}")
+        source_versions: dict[str, str] = {name: pinned_versions[name] for name in contract_sources}
+    else:
+        source_versions = {name: data_source.resolve_version(name) for name in contract_sources}
     raw_sources: dict[str, dict] = {}
     for name in contract_sources:
         df = data_source.read_population(name, version=source_versions[name])
@@ -98,7 +214,9 @@ def execute_skill(
         references=skill.references,
     )
 
-    metrics: dict[str, dict] = {}
+    metrics: dict[str, dict] = _evaluate_run_metrics(
+        skill.plan.get("run_metrics", {}), populations, audit_period
+    )
     test_results: list[dict] = []
     scored_units: dict[str, list[str]] = {}
     long_flag_frames: list[pd.DataFrame] = []
@@ -151,6 +269,13 @@ def execute_skill(
         if col not in flags.columns:
             flags[col] = pd.array([pd.NA] * len(flags), dtype="Int8")
 
+    non_empty_long_frames = [f for f in long_flag_frames if len(f)]
+    flags_long = (
+        pd.concat(non_empty_long_frames, ignore_index=True)
+        if non_empty_long_frames
+        else pd.DataFrame(columns=_FLAG_COLUMNS)
+    )
+
     data_quality: dict[str, Any] = {}
     for name, pop in populations.items():
         for k, v in pop.excluded_counts.items():
@@ -169,6 +294,7 @@ def execute_skill(
         flags=flags,
         scored_units=scored_units,
         findings=findings,
+        flags_long=flags_long,
     )
 
 
