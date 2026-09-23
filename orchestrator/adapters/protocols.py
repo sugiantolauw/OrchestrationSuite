@@ -242,6 +242,23 @@ class PersistenceAdapter(Protocol):
     def list_exports(self, run_id: str) -> list[dict]:
         ...
 
+    # ── uploaded files (P5) ──────────────────────────────────────────────
+
+    def record_uploaded_file(self, row: dict) -> dict:
+        ...
+
+    def update_uploaded_file(
+        self, upload_id: str, *, status: str, row_count: int | None = None,
+        columns_json: str | None = None, error: str | None = None
+    ) -> None:
+        ...
+
+    def get_uploaded_file(self, upload_id: str) -> dict | None:
+        ...
+
+    def list_uploaded_files(self, engagement_id: str | None = None) -> list[dict]:
+        ...
+
     def acquire_lease(self, run_id: str, worker_id: str, *, ttl_s: float, now: str) -> bool:
         ...
 

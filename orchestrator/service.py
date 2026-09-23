@@ -26,6 +26,10 @@ Public API (signatures kept stable for the UI to import against):
     get_run_payload(ctx, run_id) -> dict
     get_run_frames(ctx, run_id) -> dict[str, pandas.DataFrame]
     get_export(ctx, run_id, kind) -> tuple[str, bytes]
+    get_upload_base_path(ctx) -> str
+    upload_file(ctx, *, filename, content, uploaded_by, engagement_id='ENG-DEFAULT') -> dict
+    list_uploaded_files(ctx, engagement_id=None) -> list[dict]
+    propose_plan(ctx, *, skill_id, mode='playbook') -> dict
     health(ctx) -> dict
     ready(ctx) -> dict
 
@@ -341,7 +345,12 @@ def get_skill(ctx: AppContext, skill_id: str) -> dict | None:
 
     contract = _read_yaml(d / "contract.yaml")
     sources = [
-        {"source": name, "columns": list((cfg or {}).get("columns", {}).keys())}
+        {
+            "source": name,
+            "columns": list((cfg or {}).get("columns", {}).keys()),
+            "file": (cfg or {}).get("file"),
+            "sheet": (cfg or {}).get("sheet"),
+        }
         for name, cfg in contract.get("sources", {}).items()
     ]
     catalogue = _read_yaml(d / "catalogue.yaml")
@@ -494,6 +503,10 @@ def start_audit_run(
     mode: str = "playbook",
     review_plan_first: bool = False,
     engagement_id: str = "ENG-DEFAULT",
+    business_unit: str | None = None,
+    materiality: float | None = None,
+    generate_management_actions: bool = True,
+    jira_preview_requested: bool = False,
 ) -> str:
     skill_dir = _skill_dir_for(ctx, skill_id)
     skill = load_skill(skill_dir)
@@ -532,7 +545,17 @@ def start_audit_run(
         for name in contract_sources
     ]
 
-    options = {"auto_confirm_plan": not review_plan_first}
+    # generate_management_actions/jira_preview_requested are recorded here,
+    # real and visible on the run (RunState.options, never fabricated), but
+    # are NOT YET wired to gate the `act` node or export's Jira-preview step
+    # -- that is pipeline-node work this change does not make (see the UI
+    # task's report). Recording them now means no run ever silently drops
+    # what the auditor asked for; it is simply not enforced yet.
+    options = {
+        "auto_confirm_plan": not review_plan_first,
+        "generate_management_actions": generate_management_actions,
+        "jira_preview_requested": jira_preview_requested,
+    }
     state = runs_module.create_run(
         ctx.persistence,
         run_kind="fieldwork",
@@ -543,6 +566,8 @@ def start_audit_run(
         audit_period=tuple(audit_period),
         objective=objective,
         run_owner=run_owner,
+        business_unit=business_unit,
+        materiality=materiality,
         options=options,
         data_assets=data_assets,
         fingerprint=fingerprint,
@@ -838,6 +863,149 @@ def _get_run_frames_from_sources(ctx: AppContext, state: RunState, skill) -> dic
         FRAME_COLUMNS[source] = tuple(df.columns)
 
     return frames
+
+
+# ── Uploaded files (build brief P5) ────────────────────────────────────────
+
+_DEFAULT_MAX_UPLOAD_MB = 100
+
+
+def get_upload_base_path(ctx: AppContext) -> str:
+    """The real configured destination for uploads -- DBX_VOLUME (via
+    ctx.settings.volume) for the UC backend, the local export root for the
+    local backend. Never the hardcoded `/Volumes/sdpt_gia/ep_temp/...` path
+    CLAUDE.md §0.2 flags as a portability violation (NN16)."""
+    if ctx.backend == "local":
+        return str(ctx.export_storage.root_dir)
+    if not ctx.settings.volume:
+        from orchestrator.errors import ConfigError
+
+        raise ConfigError("DBX_VOLUME is not configured -- uploads have nowhere to go")
+    return ctx.settings.volume
+
+
+def _profile_uploaded_bytes(filename: str, content: bytes) -> tuple[int, list[str]]:
+    """Parses the file to get a row count and column list (CLAUDE.md build
+    brief P5: 'profiling = parse CSV/XLSX/Parquet, row count + columns').
+    Raises on anything unparseable -- caught by the caller and recorded as a
+    Failed upload with the real error, never a silent partial result."""
+    import io
+
+    lower = filename.lower()
+    if lower.endswith(".csv"):
+        df = pd.read_csv(io.BytesIO(content))
+    elif lower.endswith((".xlsx", ".xls")):
+        df = pd.read_excel(io.BytesIO(content))
+    elif lower.endswith(".parquet"):
+        df = pd.read_parquet(io.BytesIO(content))
+    else:
+        raise ValueError(f"unsupported file type: {filename!r} (expected .csv, .xlsx or .parquet)")
+    return len(df), [str(c) for c in df.columns]
+
+
+def upload_file(
+    ctx: AppContext,
+    *,
+    filename: str,
+    content: bytes,
+    uploaded_by: str,
+    engagement_id: str = "ENG-DEFAULT",
+) -> dict:
+    """Writes `content` to the configured Volume/local export root at
+    uploads/<upload_id>/<filename>, records an `uploaded_files` row, and
+    profiles it inline (CSV/XLSX/Parquet -> row_count + columns_json).
+    Status moves Uploaded -> Profiling -> Ready|Failed; a profiling failure
+    never becomes a silent 0-row success (CLAUDE.md NN14)."""
+    import hashlib
+    import json
+    import uuid as _uuid
+
+    max_mb = float(os.environ.get("MAX_UPLOAD_MB") or _DEFAULT_MAX_UPLOAD_MB)
+    size_bytes = len(content)
+    if size_bytes > max_mb * 1_048_576:
+        raise ValueError(
+            f"{filename!r} is {size_bytes / 1_048_576:.1f} MB, over the configured "
+            f"{max_mb:.0f} MB upload limit (MAX_UPLOAD_MB)"
+        )
+
+    upload_id = f"UP-{_uuid.uuid4().hex[:12]}"
+    sha256 = hashlib.sha256(content).hexdigest()
+    dest_path = f"uploads/{upload_id}/{filename}"
+    volume_path = ctx.export_storage.write(dest_path, content)
+    now = ctx.clock()
+
+    row = {
+        "upload_id": upload_id,
+        "engagement_id": engagement_id,
+        "filename": filename,
+        "volume_path": volume_path,
+        "size_bytes": size_bytes,
+        "sha256": sha256,
+        "uploaded_by": uploaded_by,
+        "uploaded_at": now,
+        "status": "Uploaded",
+        "row_count": None,
+        "columns_json": None,
+        "error": None,
+    }
+    ctx.persistence.record_uploaded_file(row)
+    ctx.persistence.update_uploaded_file(upload_id, status="Profiling")
+
+    try:
+        row_count, columns = _profile_uploaded_bytes(filename, content)
+    except Exception as exc:
+        ctx.persistence.update_uploaded_file(upload_id, status="Failed", error=str(exc))
+        row["status"] = "Failed"
+        row["error"] = str(exc)
+        return row
+
+    columns_json = json.dumps(columns)
+    ctx.persistence.update_uploaded_file(
+        upload_id, status="Ready", row_count=row_count, columns_json=columns_json
+    )
+    row["status"] = "Ready"
+    row["row_count"] = row_count
+    row["columns_json"] = columns_json
+    return row
+
+
+def list_uploaded_files(ctx: AppContext, engagement_id: str | None = None) -> list[dict]:
+    return ctx.persistence.list_uploaded_files(engagement_id)
+
+
+# ── Explorer/Playbook workflow preview ───────────────────────────────────────
+
+
+def propose_plan(ctx: AppContext, *, skill_id: str, mode: str = "playbook") -> dict:
+    """The real node sequence for `mode` (CLAUDE.md §2.4/§4.2 NODES_FOR),
+    matching the shape the landing page's workflow preview renders --
+    {"stages": [{"stage", "status", "detail"}], "mode", "mock": False}.
+    Never fabricated: only the first two stages (source binding, which this
+    run's real suggest_bindings resolves; and the Skill/Explorer plan step,
+    which is `mode` itself) can honestly be called 'ready' before any node
+    has actually executed -- every later stage is genuinely 'pending'."""
+    skill = get_skill(ctx, skill_id) if skill_id else None
+    bindings = suggest_bindings(ctx, skill_id) if skill_id else {}
+    bound_count = sum(1 for v in bindings.values() if v)
+    tests = (skill.get("tests") if skill else None) or []
+    test_count = len(tests) if isinstance(tests, list) else tests
+
+    stages = [
+        {"stage": "Source data", "status": "ready" if bound_count == len(bindings) and bindings else "pending",
+         "detail": f"{bound_count} of {len(bindings)} sources bound" if bindings else "No sources declared"},
+        {"stage": "Data quality & reconciliation", "status": "pending"},
+        {"stage": "Skill / Explorer plan",
+         "status": "ready" if mode == "playbook" else "needs_confirmation",
+         "detail": skill["name"] if skill and mode == "playbook" else "Auditor confirmation required"},
+        {"stage": "Deterministic audit tests", "status": "pending",
+         "detail": f"{test_count if test_count else '?'} tests defined"},
+        {"stage": "Exception classification", "status": "pending"},
+        {"stage": "Evidence-linked findings", "status": "pending"},
+        {"stage": "Insights & prioritisation", "status": "pending"},
+        {"stage": "Management actions", "status": "pending"},
+        {"stage": "Export & Jira preview", "status": "pending"},
+    ]
+    return {"stages": stages, "mode": mode, "mock": False}
 
 
 def get_export(ctx: AppContext, run_id: str, kind: str) -> tuple[str, bytes]:

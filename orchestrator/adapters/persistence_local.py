@@ -1115,6 +1115,55 @@ class LocalPersistence:
             self._release(conn)
         return [dict(r) for r in rows]
 
+    # ── uploaded files (P5) ──────────────────────────────────────────────────
+
+    def record_uploaded_file(self, row: dict) -> dict:
+        with self._writer() as conn:
+            conn.execute(
+                "INSERT INTO uploaded_files (upload_id, engagement_id, filename, volume_path, "
+                "size_bytes, sha256, uploaded_by, uploaded_at, status, row_count, columns_json, error) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    row["upload_id"], row.get("engagement_id"), row["filename"], row["volume_path"],
+                    row["size_bytes"], row["sha256"], row["uploaded_by"], row["uploaded_at"],
+                    row["status"], row.get("row_count"), row.get("columns_json"), row.get("error"),
+                ),
+            )
+        return dict(row)
+
+    def update_uploaded_file(self, upload_id: str, *, status: str, row_count: int | None = None,
+                              columns_json: str | None = None, error: str | None = None) -> None:
+        with self._writer() as conn:
+            conn.execute(
+                "UPDATE uploaded_files SET status = ?, row_count = ?, columns_json = ?, error = ? "
+                "WHERE upload_id = ?",
+                (status, row_count, columns_json, error, upload_id),
+            )
+
+    def get_uploaded_file(self, upload_id: str) -> dict | None:
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT * FROM uploaded_files WHERE upload_id = ?", (upload_id,)
+            ).fetchone()
+        finally:
+            self._release(conn)
+        return dict(row) if row is not None else None
+
+    def list_uploaded_files(self, engagement_id: str | None = None) -> list[dict]:
+        conn = self._connect()
+        try:
+            if engagement_id:
+                rows = conn.execute(
+                    "SELECT * FROM uploaded_files WHERE engagement_id = ? ORDER BY uploaded_at DESC",
+                    (engagement_id,),
+                ).fetchall()
+            else:
+                rows = conn.execute("SELECT * FROM uploaded_files ORDER BY uploaded_at DESC").fetchall()
+        finally:
+            self._release(conn)
+        return [dict(r) for r in rows]
+
     # ── leases (CLAUDE.md §9C P1A concurrency foundation, §2.3 rule 3) ──────
 
     def acquire_lease(self, run_id: str, worker_id: str, *, ttl_s: float, now: str) -> bool:

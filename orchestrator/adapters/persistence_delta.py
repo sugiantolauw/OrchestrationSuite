@@ -1534,6 +1534,66 @@ class DeltaPersistence:
             )
             return _fetchall_dicts(cur)
 
+    # ── uploaded files (P5) ──────────────────────────────────────────────────
+
+    def record_uploaded_file(self, row: dict) -> dict:
+        with self._cursor_ctx() as conn:
+            self._execute(
+                conn,
+                f"INSERT INTO {self._table('uploaded_files')} (upload_id, engagement_id, filename, "
+                "volume_path, size_bytes, sha256, uploaded_by, uploaded_at, status, row_count, "
+                "columns_json, error) VALUES (:upload_id, :engagement_id, :filename, :volume_path, "
+                ":size_bytes, :sha256, :uploaded_by, :uploaded_at, :status, :row_count, "
+                ":columns_json, :error)",
+                {
+                    "upload_id": row["upload_id"], "engagement_id": row.get("engagement_id"),
+                    "filename": row["filename"], "volume_path": row["volume_path"],
+                    "size_bytes": row["size_bytes"], "sha256": row["sha256"],
+                    "uploaded_by": row["uploaded_by"], "uploaded_at": row["uploaded_at"],
+                    "status": row["status"], "row_count": row.get("row_count"),
+                    "columns_json": row.get("columns_json"), "error": row.get("error"),
+                },
+            )
+        return dict(row)
+
+    def update_uploaded_file(self, upload_id: str, *, status: str, row_count: int | None = None,
+                              columns_json: str | None = None, error: str | None = None) -> None:
+        with self._cursor_ctx() as conn:
+            self._execute(
+                conn,
+                f"UPDATE {self._table('uploaded_files')} SET status = :status, row_count = :row_count, "
+                "columns_json = :columns_json, error = :error WHERE upload_id = :upload_id",
+                {
+                    "status": status, "row_count": row_count, "columns_json": columns_json,
+                    "error": error, "upload_id": upload_id,
+                },
+            )
+
+    def get_uploaded_file(self, upload_id: str) -> dict | None:
+        with self._cursor_ctx() as conn:
+            cur = self._execute(
+                conn,
+                f"SELECT * FROM {self._table('uploaded_files')} WHERE upload_id = :upload_id",
+                {"upload_id": upload_id},
+            )
+            rows = _fetchall_dicts(cur)
+        return rows[0] if rows else None
+
+    def list_uploaded_files(self, engagement_id: str | None = None) -> list[dict]:
+        with self._cursor_ctx() as conn:
+            if engagement_id:
+                cur = self._execute(
+                    conn,
+                    f"SELECT * FROM {self._table('uploaded_files')} WHERE engagement_id = :engagement_id "
+                    "ORDER BY uploaded_at DESC",
+                    {"engagement_id": engagement_id},
+                )
+            else:
+                cur = self._execute(
+                    conn, f"SELECT * FROM {self._table('uploaded_files')} ORDER BY uploaded_at DESC"
+                )
+            return _fetchall_dicts(cur)
+
     # ── leases (CLAUDE.md §9C P1A concurrency foundation, §2.3 rule 3) ──────
 
     def acquire_lease(self, run_id: str, worker_id: str, *, ttl_s: float, now: str) -> bool:
