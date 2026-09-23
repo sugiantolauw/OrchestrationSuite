@@ -469,3 +469,56 @@ def test_export_xlsx_raises_if_severity_provenance_was_never_persisted(local_per
 
     with pytest.raises(MissingSeverityProvenance):
         export(h.ctx, state)
+
+
+def test_export_xlsx_never_writes_a_fabricated_zero_for_missing_amounts(local_persistence, tmp_path):
+    """B4 (CLAUDE.md NN14, P2/P3 gate review): a non-monetary finding's
+    exposure_amount is None, and a source whose raw_<source> population
+    declares no amount_column has no reconciled amount at all -- neither may
+    be written into the workpaper as a literal 0, which would misrepresent
+    "not assessed in dollars"/"no amount column" as "assessed at zero"."""
+    import openpyxl
+
+    h = _make_harness(local_persistence, tmp_path)
+    state = _run_through_prioritise(h)
+    state = act(h.ctx, state)
+
+    findings = h.persistence.list_findings(state.run_id)
+    assert findings, "fixture must produce at least one finding to corrupt"
+    # The mini fixture's own findings (T1, T2) are both monetary -- simulate a
+    # non-monetary finding the way `prioritise` itself produces one, by
+    # rewriting one finding's exposure fields to that exact shape.
+    corrupted = [dict(f) for f in findings]
+    corrupted[0]["exposure_amount"] = None
+    corrupted[0]["exposure_basis"] = "non-monetary finding"
+    h.persistence.write_findings(
+        state.run_id, corrupted, engagement_id=state.engagement_id, skill_id=state.skill_id,
+        skill_version=state.skill_version, now=canonical_ts(9),
+    )
+
+    state = export(h.ctx, state)
+    path = Path(state.exports["xlsx"]["path"])
+    wb = openpyxl.load_workbook(path)
+
+    findings_ws = wb["Findings"]
+    header = [c.value for c in findings_ws[1]]
+    exposure_col = header.index("exposure_amount") + 1
+    exposure_cell = findings_ws.cell(row=2, column=exposure_col)
+    assert exposure_cell.value is None, "a non-monetary finding's exposure cell must be blank, never 0"
+
+    # The mini fixture's plan.yaml declares no raw_<source> population for
+    # either contract source, so both "claims" and "register" reconcile with
+    # no declared amount column (orchestrator.populations.build_population:
+    # amount is None when amount_column is not set) -- every row must read
+    # the explicit n/a text, never a written 0.0.
+    recon_ws = wb["Reconciliation"]
+    recon_header = [c.value for c in recon_ws[1]]
+    amount_col = recon_header.index("amount") + 1
+    independent_amount_col = recon_header.index("independent_amount") + 1
+    amount_variance_col = recon_header.index("amount_variance") + 1
+    assert state.reconciliation
+    data_rows = range(2, 2 + len(state.reconciliation))  # footer row follows, excluded
+    for row in data_rows:
+        for col in (amount_col, independent_amount_col, amount_variance_col):
+            cell = recon_ws.cell(row=row, column=col)
+            assert cell.value == "n/a — no amount column declared", (row, col, cell.value)
