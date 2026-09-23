@@ -316,17 +316,30 @@ populations:
     amount_column: Expense Amount (reimbursement currency)
     date_column: Transaction Date
 
-  # KNOWN LIMITATION (P2b-1): this population's own filter needs the derived
-  # `country` column, so pre_filter_derive runs before ANY filter -- its
-  # t61d_*_country_not_in_per_diem_table / t61d_unmapped_rows counters are
-  # therefore scoped to the whole raw expense_report source, not to the
-  # Meals/Incidentals ExCo-in-period population (unlike t61d_pop above). The
-  # exceedance TEST result is unaffected (the population filters still narrow
-  # correctly); only these two data-quality counters over-count. See the
-  # P2b-1 report.
+  # Two-phase build (filter -> derive -> post_filter, P2b-1 fix): `filters` runs
+  # first on raw columns (ExCo, in-period, Meals/Incidentals), THEN `derive`
+  # computes country/limit -- so t61d_*_country_not_in_per_diem_table and
+  # t61d_unmapped_rows are scoped to the true tested population, not the whole
+  # raw expense_report source -- and only then does `post_filter` split on the
+  # derived `country` column. Same exceedance TEST result as before; the
+  # data-quality counters are now correctly scoped (populations.py, engine.py).
   t61d_pop_dom:
     source: expense_report
-    pre_filter_derive:
+    filters:
+      - column: Employee ID
+        op: in
+        value: {ref: exco_employee_ids}
+      - column: Transaction Date
+        op: between
+        value: {ref: audit_period}
+      - column: Expense Type
+        op: in
+        value:
+          - "Meals - Domestic Travel"
+          - "Meals - International Travel"
+          - "Incidentals - Domestic Travel"
+          - "Incidentals - International Travel"
+    derive:
       - op: custom
         name: country_from_city_or_currency
         as: country
@@ -353,6 +366,15 @@ populations:
         left: {column: rate_per_day_sgd}
         right: {column: aud_per_sgd_factor}
         as: daily_limit_aud
+    post_filter:
+      - column: country
+        op: eq
+        value: Australia
+    amount_column: Expense Amount (reimbursement currency)
+    date_column: Transaction Date
+
+  t61d_pop_int:
+    source: expense_report
     filters:
       - column: Employee ID
         op: in
@@ -367,15 +389,7 @@ populations:
           - "Meals - International Travel"
           - "Incidentals - Domestic Travel"
           - "Incidentals - International Travel"
-      - column: country
-        op: eq
-        value: Australia
-    amount_column: Expense Amount (reimbursement currency)
-    date_column: Transaction Date
-
-  t61d_pop_int:
-    source: expense_report
-    pre_filter_derive:
+    derive:
       - op: custom
         name: country_from_city_or_currency
         as: country
@@ -402,20 +416,7 @@ populations:
         left: {column: rate_per_day_sgd}
         right: {column: aud_per_sgd_factor}
         as: daily_limit_aud
-    filters:
-      - column: Employee ID
-        op: in
-        value: {ref: exco_employee_ids}
-      - column: Transaction Date
-        op: between
-        value: {ref: audit_period}
-      - column: Expense Type
-        op: in
-        value:
-          - "Meals - Domestic Travel"
-          - "Meals - International Travel"
-          - "Incidentals - Domestic Travel"
-          - "Incidentals - International Travel"
+    post_filter:
       - all_of:
           - column: country
             op: not_null
@@ -850,6 +851,7 @@ tests:
       oop_values: ["out of pocket"]
       card_values: ["amex ibcp", "anz visa cbcp"]
       flag: RF_CS_Duplicate
+      flag_oop_card: RF_CS_Duplicate_OOP_AMEX
       metrics:
         duplicate_groups: {kind: groups}
         duplicate_lines: {kind: rows}

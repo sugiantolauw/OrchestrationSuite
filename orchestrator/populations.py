@@ -119,14 +119,14 @@ def _looks_like_date(series: pd.Series) -> bool:
     return pd.api.types.is_datetime64_any_dtype(series)
 
 
-def _describe_filter(flt: dict, index: int) -> str:
+def _describe_filter(flt: dict, index: int, *, stage: str = "filter") -> str:
     if "label" in flt:
         return flt["label"]
     if "any_of" in flt:
-        return f"filter[{index}]:any_of"
+        return f"{stage}[{index}]:any_of"
     if "all_of" in flt:
-        return f"filter[{index}]:all_of"
-    return f"filter[{index}]:{flt.get('column')}:{flt.get('op')}"
+        return f"{stage}[{index}]:all_of"
+    return f"{stage}[{index}]:{flt.get('column')}:{flt.get('op')}"
 
 
 def _operand_series(df: pd.DataFrame, spec: Any, ctx: PopulationContext) -> Any:
@@ -262,10 +262,15 @@ def build_population(name: str, pop_config: dict, ctx: PopulationContext) -> Pop
     df = src["df"].copy()
     version = src["version"]
 
-    # pre_filter_derive runs before any filter is applied -- needed whenever a filter
-    # must key on a cleaned-up value rather than the raw column (e.g. coercing a
-    # column that mixes numeric ids with a non-numeric sentinel before an `in`
-    # filter). Counters from this stage are merged with the post-filter stage's.
+    # Two-phase build: filter -> derive -> post_filter (P2b-1). `pre_filter_derive`
+    # still exists for the rare case a `filters` entry itself must key on a
+    # cleaned-up value (e.g. coercing a column that mixes numeric ids with a
+    # non-numeric sentinel before an `in` filter) -- it runs before ANY filter and
+    # therefore still sees the whole raw source. But a filter that instead depends
+    # on a value `derive` computes (e.g. a looked-up country) no longer has to pay
+    # that same price: it belongs in `post_filter`, which runs AFTER `derive`, so
+    # `derive`'s own unmapped/not-found counters are scoped to the population
+    # `filters` already narrowed -- not to the whole raw source.
     df, pre_counters = apply_derivations(df, pop_config.get("pre_filter_derive"), ctx)
 
     excluded_counts: dict[str, int] = {}
@@ -279,6 +284,14 @@ def build_population(name: str, pop_config: dict, ctx: PopulationContext) -> Pop
     df = df[mask].reset_index(drop=True)
     df, counters = apply_derivations(df, pop_config.get("derive"), ctx)
     counters = {**pre_counters, **counters}
+
+    post_mask = pd.Series(True, index=df.index)
+    for i, flt in enumerate(pop_config.get("post_filter", [])):
+        fmask = _apply_filter(df, flt, ctx)
+        newly_excluded = int((post_mask & ~fmask).sum())
+        excluded_counts[_describe_filter(flt, i, stage="post_filter")] = newly_excluded
+        post_mask = post_mask & fmask
+    df = df[post_mask].reset_index(drop=True)
 
     amount_col = pop_config.get("amount_column")
     date_col = pop_config.get("date_column")

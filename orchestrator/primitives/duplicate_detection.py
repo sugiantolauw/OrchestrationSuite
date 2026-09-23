@@ -22,6 +22,7 @@ PARAMS_SCHEMA: dict = {
         "oop_values": {"type": "array", "items": {"type": "string"}},
         "card_values": {"type": "array", "items": {"type": "string"}},
         "flag": {"type": "string"},
+        "flag_oop_card": {"type": "string"},
         "metrics": METRICS_PROPERTY_SCHEMA,
     },
     "required": ["population", "key_columns"],
@@ -39,8 +40,10 @@ def run(ctx: PrimitiveContext, params: dict) -> PrimitiveResult:
     oop_values = {v.lower() for v in params.get("oop_values", [])}
     card_values = {v.lower() for v in params.get("card_values", [])}
     flag = params.get("flag", "RF_DUPLICATE")
+    flag_oop_card = params.get("flag_oop_card")
 
     row_group_id = pd.Series([None] * len(df), index=df.index, dtype=object)
+    row_oop_card_group_id = pd.Series([None] * len(df), index=df.index, dtype=object)
     group_records: list[dict] = []
     oop_card_groups = 0
     extra_amount_total = 0.0
@@ -76,11 +79,27 @@ def run(ctx: PrimitiveContext, params: dict) -> PrimitiveResult:
             has_card = payments.isin(card_values).any() if card_values else False
             if has_oop and has_card:
                 oop_card_groups += 1
+                if flag_oop_card:
+                    row_oop_card_group_id.loc[group.index] = gid
 
     group_df = pd.DataFrame(group_records)
     row_mask = row_group_id.notna()
     row_df = df[row_mask].copy()
     flags = flags_from_rows(row_df, flag=flag, group_ids=row_group_id[row_mask])
+
+    if flag_oop_card:
+        # A second, row-level flag column (CLAUDE.md §4.2 -- `execute` writes the
+        # row-level RF_* flags the existing UI's BREACH_FLAG_GROUPS reads) marking
+        # just the rows belonging to a duplicate group that mixes an
+        # out-of-pocket line with a corporate-card line -- a strict subset of the
+        # main duplicate flag, not a separate scoring unit.
+        oop_row_mask = row_oop_card_group_id.notna()
+        oop_row_df = df[oop_row_mask].copy()
+        oop_flags = flags_from_rows(
+            oop_row_df, flag=flag_oop_card, group_ids=row_oop_card_group_id[oop_row_mask]
+        )
+        flags = pd.concat([flags, oop_flags], ignore_index=True)
+
     scored_units = group_df["group_id"].tolist() if len(group_df) else []
 
     metrics = build_metrics(

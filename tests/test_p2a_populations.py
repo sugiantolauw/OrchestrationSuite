@@ -156,6 +156,46 @@ def test_pre_filter_derive_lets_a_filter_key_on_a_cleaned_up_value():
     assert result.derivation_counters["approver_non_numeric_rows"] == 1
 
 
+def test_post_filter_runs_after_derive_and_scopes_unmapped_counter_to_filtered_population():
+    # Two-phase build (P2b-1 fix): `filters` narrows the population on raw columns
+    # FIRST, `derive` then only has to run over that narrowed set (so its unmapped
+    # counter is scoped correctly), and `post_filter` -- which needs the DERIVED
+    # column -- runs last. A row excluded by `filters` (Bob) must never count
+    # towards the unmapped-lookup counter, even though "Nowhereville" would also
+    # fail to map.
+    df = pd.DataFrame(
+        {
+            "Employee": ["Alice", "Alice", "Bob"],
+            "City/Location": ["Sydney", "Nowhereville", "Nowhereville"],
+        }
+    )
+    ref = pd.DataFrame({"city": ["Sydney"], "country": ["Australia"]})
+    ctx = _ctx({"src": _src(df)}, references={"city_country": ref})
+    pop_cfg = {
+        "source": "src",
+        "filters": [{"column": "Employee", "op": "eq", "value": "Alice"}],
+        "derive": [
+            {
+                "op": "lookup",
+                "table": "city_country",
+                "on": ["City/Location"],
+                "ref_on": ["city"],
+                "value_column": "country",
+                "as": "Country",
+                "unmapped_counter": "country_unmapped_rows",
+            }
+        ],
+        "post_filter": [{"column": "Country", "op": "eq", "value": "Australia"}],
+    }
+    result = build_population("pop", pop_cfg, ctx)
+    assert result.rows == 1  # only Alice's Sydney row survives post_filter
+    assert result.df["Employee"].tolist() == ["Alice"]
+    # Bob's row was excluded by `filters` before `derive` ever ran -- the
+    # unmapped counter is scoped to Alice's 2 rows (1 unmapped), not all 3.
+    assert result.derivation_counters["country_unmapped_rows"] == 1
+    assert result.excluded_counts["post_filter[0]:Country:eq"] == 1
+
+
 def test_amount_and_date_reconciliation_summary():
     df = pd.DataFrame({"Amount": [100.0, 200.0], "Transaction Date": pd.to_datetime(["2025-01-01", "2025-01-15"])})
     ctx = _ctx({"src": _src(df)})

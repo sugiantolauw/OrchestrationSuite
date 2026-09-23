@@ -195,10 +195,19 @@ def test_duplicate_detection_oop_vs_card_subtest():
         "payment_column": "Payment Method",
         "oop_values": ["out of pocket"],
         "card_values": ["amex corporate"],
+        "flag": "RF_CS_Duplicate",
+        "flag_oop_card": "RF_CS_Duplicate_OOP_AMEX",
         "metrics": {"oop_card_groups": {"kind": "value", "key": "oop_card_groups"}},
     }
     res = run_primitive("duplicate_detection", ctx, params)
     assert res.metrics["oop_card_groups"]["value"] == 1  # employee 1's group only
+
+    # flag_oop_card (spec T5.2 sub-test): a row-level flag column, set only on
+    # the rows of the OOP/card group, distinct from the main duplicate flag.
+    oop_flagged = res.flags[res.flags["flag"] == "RF_CS_Duplicate_OOP_AMEX"]
+    assert set(oop_flagged["__row_key"]) == {"k:1", "k:2"}  # employee 1's two lines only
+    main_flagged = res.flags[res.flags["flag"] == "RF_CS_Duplicate"]
+    assert set(main_flagged["__row_key"]) == {"k:1", "k:2", "k:3", "k:4"}  # both groups
 
 
 def test_duplicate_detection_params_schema_rejects_unknown_keys():
