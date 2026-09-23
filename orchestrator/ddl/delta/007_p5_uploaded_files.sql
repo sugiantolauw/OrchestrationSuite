@@ -1,5 +1,5 @@
 -- 007_p5_uploaded_files: business-provided files uploaded from the landing
--- page's "Upload audit files" panel (CLAUDE.md build brief P5). See
+-- page Upload audit files panel (CLAUDE.md build brief P5). See
 -- orchestrator/ddl/sqlite/007_p5_uploaded_files.sql for the full rationale --
 -- same columns, Delta dialect.
 

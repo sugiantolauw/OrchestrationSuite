@@ -873,8 +873,8 @@ _DEFAULT_MAX_UPLOAD_MB = 100
 def get_upload_base_path(ctx: AppContext) -> str:
     """The real configured destination for uploads -- DBX_VOLUME (via
     ctx.settings.volume) for the UC backend, the local export root for the
-    local backend. Never the hardcoded `/Volumes/sdpt_gia/ep_temp/...` path
-    CLAUDE.md §0.2 flags as a portability violation (NN16)."""
+    local backend. Never a hardcoded workspace-specific Volume path
+    (CLAUDE.md §0.2/NN16 -- the prototype's fixed _UPLOAD_BASE)."""
     if ctx.backend == "local":
         return str(ctx.export_storage.root_dir)
     if not ctx.settings.volume:

@@ -59,7 +59,10 @@ def test_landing_page_matches_prototype(monkeypatch, reference_fixtures):
         lambda q: assets if not q else [a for a in assets if q.lower() in a["name"].lower()],
     )
     monkeypatch.setattr(adapters, "is_demo_mode", lambda: True)
-    monkeypatch.setattr(adapters, "get_upload_base_path", lambda: "/Volumes/sdpt_gia/ep_temp/taxgovernance")
+    # Any string works here: the tree comparison is structural (tag/id/
+    # className) only, never text content, so this need not (and must not,
+    # tests/test_portability.py NN16) be the prototype's own hardcoded path.
+    monkeypatch.setattr(adapters, "get_upload_base_path", lambda: "/Volumes/placeholder/uploads")
 
     assert _app_tree(home_layout()) == _reference_tree("landing")
 

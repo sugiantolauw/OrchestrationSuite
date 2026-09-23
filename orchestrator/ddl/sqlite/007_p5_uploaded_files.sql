@@ -1,9 +1,9 @@
 -- 007_p5_uploaded_files: business-provided files uploaded from the landing
--- page's "Upload audit files" panel (CLAUDE.md build brief P5). A row is
+-- page Upload audit files panel (CLAUDE.md build brief P5). A row is
 -- created at upload time (status='Uploaded'), moved to 'Profiling' while the
 -- file is parsed for row_count/columns_json, then 'Ready' or 'Failed' with
 -- `error` set (never a silent partial result, CLAUDE.md NN14). Not run-scoped:
--- an uploaded file can be bound to a Skill's contract source at run start
+-- an uploaded file can be bound to a Skill contract source at run start
 -- (like a Unity Catalog table binding) and reused across runs, so it is
 -- scoped to an engagement, not a single run.
 
