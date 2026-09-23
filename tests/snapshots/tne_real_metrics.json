@@ -126,10 +126,10 @@
     "pref_int_airline": 20,
     "pref_int_car": 0,
     "split_amount": 0.0,
+    "split_groups": 0,
+    "split_lines": 0,
     "split_same_day_groups": 0,
-    "split_same_day_lines": 0,
     "split_window_groups": 0,
-    "split_window_lines": 0,
     "t31b_name_match_rate": 33.3,
     "t41_unmatched_register_rows": 844,
     "very_late_booking_count": 0
@@ -152,6 +152,10 @@
       "rows": 23
     },
     "p_exp_dup": {
+      "amount": 1049631.06,
+      "rows": 3589
+    },
+    "p_exp_hv": {
       "amount": 1049631.06,
       "rows": 3589
     },
@@ -244,12 +248,12 @@
       "rows": 4
     },
     "t61d_pop": {
-      "amount": 6202.099999999999,
-      "rows": 136
+      "amount": 6789.399999999999,
+      "rows": 133
     },
     "t61d_pop_dom": {
-      "amount": 2375.85,
-      "rows": 88
+      "amount": 2963.1499999999996,
+      "rows": 85
     },
     "t61d_pop_int": {
       "amount": 3826.25,

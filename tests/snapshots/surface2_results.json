@@ -18,12 +18,12 @@
     "false_positive_ids": [],
     "false_positives": 0,
     "n_negatives": 30,
-    "n_plants": 30,
+    "n_plants": 32,
     "precision": 1.0,
     "recall": 1.0,
     "scoring_unit": "booking",
     "test_id": "T3.1b",
-    "true_positives": 30
+    "true_positives": 32
   },
   "T3.2a_air_dom": {
     "false_negative_ids": [],
@@ -160,7 +160,7 @@
     "false_negatives": 0,
     "false_positive_ids": [],
     "false_positives": 0,
-    "n_negatives": 16,
+    "n_negatives": 18,
     "n_plants": 16,
     "precision": 1.0,
     "recall": 1.0,
@@ -173,13 +173,13 @@
     "false_negatives": 0,
     "false_positive_ids": [],
     "false_positives": 0,
-    "n_negatives": 15,
-    "n_plants": 16,
+    "n_negatives": 16,
+    "n_plants": 19,
     "precision": 1.0,
     "recall": 1.0,
     "scoring_unit": "claim_group",
     "test_id": "T5.1",
-    "true_positives": 16
+    "true_positives": 19
   },
   "T5.2": {
     "false_negative_ids": [],
@@ -200,12 +200,12 @@
     "false_positive_ids": [],
     "false_positives": 0,
     "n_negatives": 16,
-    "n_plants": 16,
+    "n_plants": 32,
     "precision": 1.0,
     "recall": 1.0,
     "scoring_unit": "approval_step",
     "test_id": "T6.1a",
-    "true_positives": 16
+    "true_positives": 32
   },
   "T6.1c": {
     "false_negative_ids": [],
@@ -226,12 +226,12 @@
     "false_positive_ids": [],
     "false_positives": 0,
     "n_negatives": 16,
-    "n_plants": 16,
+    "n_plants": 18,
     "precision": 1.0,
     "recall": 1.0,
     "scoring_unit": "employee_day_country",
     "test_id": "T6.1d_dom",
-    "true_positives": 16
+    "true_positives": 18
   },
   "T6.1d_int": {
     "false_negative_ids": [],
