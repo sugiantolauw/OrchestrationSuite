@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import datetime as _dt
 import hashlib
+import json
 import logging
 import threading
 import time
@@ -11,14 +13,19 @@ from orchestrator.config import Settings
 from orchestrator.errors import (
     AttemptAlreadyClosed,
     AttemptNotFound,
+    FindingNotFound,
     FingerprintConflict,
+    InvalidReviewStateTransition,
+    NonDraftFindingWouldBeDeleted,
+    RiskStatusRegression,
     RunAlreadyExists,
     RunNotFound,
+    SkillVersionConflict,
     StaleStateError,
 )
 from orchestrator.migrations import plan_migrations, split_statements
 from orchestrator.state import RunState, assert_json_safe, from_json, to_json, validate
-from orchestrator.timeutil import utc_now
+from orchestrator.timeutil import normalise_ts, utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +91,82 @@ _RUN_STATE_SUMMARY_COLUMNS = (
 
 _PROJECTION_RETRY_ATTEMPTS = 3
 
+_REVIEW_STATE_ORDER = ("draft", "prepared", "reviewed", "approved")
+
+_FINDING_COLUMNS = (
+    "finding_id", "run_id", "engagement_id", "rule_id", "skill_id", "skill_version",
+    "test_id", "control_id", "risk_id", "assertion", "title", "severity", "severity_rule",
+    "threshold_refs_json", "proposed_severity", "proposed_severity_reason",
+    "metrics_cited_json", "evidence_refs_json", "observation", "recommendation",
+    "management_questions_json", "exposure_amount", "exposure_basis", "theme_id",
+    "review_state", "prior_finding_id", "recurrence_count", "created_at", "updated_at",
+)
+
+# On a re-write of a finding_id that already exists (a node overwriting its own prior
+# output, CLAUDE.md §2.3 rule 1), finding_id is the merge key (never a SET target) and
+# the rest are left as previously stored rather than reset to the incoming value:
+# review_state/prior_finding_id/recurrence_count belong to the review lifecycle and
+# rollforward matching (P7/§4.8), not to the engine's finding dict, and created_at is
+# the finding's first-seen timestamp.
+_FINDING_STICKY_COLUMNS = ("finding_id", "review_state", "prior_finding_id", "recurrence_count", "created_at")
+_FINDING_UPDATE_COLUMNS = tuple(c for c in _FINDING_COLUMNS if c not in _FINDING_STICKY_COLUMNS)
+
+
+def _canonical_json(value) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
+def _finding_row_values(
+    run_id: str, finding: dict, *, engagement_id, skill_id, skill_version, now: str
+) -> dict:
+    return {
+        "finding_id": finding["finding_id"],
+        "run_id": run_id,
+        "engagement_id": engagement_id,
+        "rule_id": finding["rule_id"],
+        "skill_id": skill_id,
+        "skill_version": skill_version,
+        "test_id": finding.get("test_id"),
+        "control_id": finding.get("control_id"),
+        "risk_id": finding.get("risk_id"),
+        "assertion": finding.get("assertion"),
+        "title": finding["title"],
+        "severity": finding["severity"],
+        "severity_rule": finding.get("severity_rule"),
+        "threshold_refs_json": _canonical_json(finding.get("threshold_refs", [])),
+        "proposed_severity": finding.get("proposed_severity"),
+        "proposed_severity_reason": finding.get("proposed_severity_reason"),
+        "metrics_cited_json": _canonical_json(finding.get("metrics_cited", {})),
+        "evidence_refs_json": _canonical_json(finding.get("evidence_refs", [])),
+        "observation": finding.get("observation"),
+        "recommendation": finding.get("recommendation"),
+        "management_questions_json": _canonical_json(finding.get("management_questions", [])),
+        "exposure_amount": finding.get("exposure_amount"),
+        "exposure_basis": finding.get("exposure_basis"),
+        "theme_id": finding.get("theme_id"),
+        "review_state": finding.get("review_state", "draft"),
+        "prior_finding_id": finding.get("prior_finding_id"),
+        "recurrence_count": finding.get("recurrence_count", 0),
+        "created_at": now,
+        "updated_at": now,
+    }
+
+
+def _finding_dict_from_row(row: dict) -> dict:
+    d = dict(row)
+    d["threshold_refs"] = json.loads(d.pop("threshold_refs_json") or "[]")
+    d["metrics_cited"] = json.loads(d.pop("metrics_cited_json") or "{}")
+    d["evidence_refs"] = json.loads(d.pop("evidence_refs_json") or "[]")
+    d["management_questions"] = json.loads(d.pop("management_questions_json") or "[]")
+    return d
+
+
+def _skill_version_dict_from_row(row: dict) -> dict:
+    d = dict(row)
+    d["content"] = json.loads(d.pop("content_json"))
+    return d
+
+
 _SCHEMA_MIGRATIONS_BOOTSTRAP = (
     "CREATE TABLE IF NOT EXISTS {qualified} ("
     "version STRING NOT NULL,"
@@ -117,9 +200,24 @@ def _is_already_exists_error(exc: Exception) -> bool:
     return any(marker in text for marker in _ALREADY_EXISTS_MARKERS)
 
 
+def _normalise_value(value):
+    # The databricks-sql-connector hands back native datetime.datetime/datetime.date
+    # objects for TIMESTAMP/DATE columns (confirmed live), while LocalPersistence's
+    # sqlite backend returns plain strings for the same columns (TEXT storage
+    # round-trips exactly what was written). Normalise here so both backends hand
+    # callers the same canonical string shape rather than leaking a driver-specific
+    # type into the shared PersistenceAdapter contract. datetime is a subclass of
+    # date, so it must be checked first.
+    if isinstance(value, _dt.datetime):
+        return normalise_ts(value)
+    if isinstance(value, _dt.date):
+        return value.isoformat()
+    return value
+
+
 def _row_to_dict(cursor, row) -> dict:
     columns = [d[0] for d in cursor.description]
-    return dict(zip(columns, row))
+    return {col: _normalise_value(val) for col, val in zip(columns, row)}
 
 
 def _fetchall_dicts(cursor) -> list[dict]:
@@ -518,6 +616,295 @@ class DeltaPersistence:
         with self._cursor_ctx() as conn:
             cur = self._execute(conn, f"SELECT * FROM {self._table('engagements')} ORDER BY created_at")
             return _fetchall_dicts(cur)
+
+    # ── skill versions (P2) ──────────────────────────────────────────────────
+
+    def record_skill_version(
+        self,
+        *,
+        skill_id: str,
+        version: str,
+        content_hash: str,
+        content: dict,
+        created_by: str,
+        now: str,
+        status: str = "draft",
+    ) -> dict:
+        content_json = _canonical_json(content)
+        with self._cursor_ctx() as conn:
+            cur = self._execute(
+                conn,
+                f"SELECT * FROM {self._table('skill_versions')} WHERE skill_id = :skill_id "
+                "AND version = :version",
+                {"skill_id": skill_id, "version": version},
+            )
+            row = _fetchone_dict(cur)
+            if row is not None:
+                if row["content_hash"] != content_hash:
+                    raise SkillVersionConflict(skill_id, version, row["content_hash"], content_hash)
+                return _skill_version_dict_from_row(row)
+            self._execute(
+                conn,
+                f"INSERT INTO {self._table('skill_versions')} (skill_id, version, content_hash, "
+                "content_json, status, created_by, created_at) VALUES (:skill_id, :version, "
+                ":content_hash, :content_json, :status, :created_by, :created_at)",
+                {
+                    "skill_id": skill_id, "version": version, "content_hash": content_hash,
+                    "content_json": content_json, "status": status, "created_by": created_by,
+                    "created_at": now,
+                },
+            )
+        return {
+            "skill_id": skill_id, "version": version, "content_hash": content_hash,
+            "status": status, "created_by": created_by, "created_at": now,
+            "reviewed_by": None, "published_by": None, "published_at": None,
+            "superseded_by": None, "surface2_results_json": None, "content": content,
+        }
+
+    def get_skill_version(self, skill_id: str, version: str) -> dict | None:
+        with self._cursor_ctx() as conn:
+            cur = self._execute(
+                conn,
+                f"SELECT * FROM {self._table('skill_versions')} WHERE skill_id = :skill_id "
+                "AND version = :version",
+                {"skill_id": skill_id, "version": version},
+            )
+            row = _fetchone_dict(cur)
+        return _skill_version_dict_from_row(row) if row is not None else None
+
+    def list_skill_versions(self, skill_id: str) -> list[dict]:
+        with self._cursor_ctx() as conn:
+            cur = self._execute(
+                conn,
+                f"SELECT * FROM {self._table('skill_versions')} WHERE skill_id = :skill_id "
+                "ORDER BY version",
+                {"skill_id": skill_id},
+            )
+            rows = _fetchall_dicts(cur)
+        return [_skill_version_dict_from_row(r) for r in rows]
+
+    # ── risk / control register (P2) ─────────────────────────────────────────
+
+    def upsert_risks(self, risks: list[dict], *, now: str) -> None:
+        with self._cursor_ctx() as conn:
+            for risk in risks:
+                risk_id = risk["risk_id"]
+                cur = self._execute(
+                    conn,
+                    f"SELECT status FROM {self._table('risks')} WHERE risk_id = :risk_id",
+                    {"risk_id": risk_id},
+                )
+                existing = _fetchone_dict(cur)
+                if existing is not None:
+                    if existing["status"] in ("accepted", "rejected") and risk["status"] == "proposed":
+                        raise RiskStatusRegression(risk_id, existing["status"], risk["status"])
+                    self._execute(
+                        conn,
+                        f"UPDATE {self._table('risks')} SET engagement_id=:engagement_id, "
+                        "title=:title, description=:description, category=:category, "
+                        "owner=:owner, status=:status, source=:source, source_ref=:source_ref, "
+                        "as_of_date=:as_of_date, confidence=:confidence, "
+                        "prior_risk_id=:prior_risk_id WHERE risk_id = :risk_id",
+                        {
+                            "engagement_id": risk.get("engagement_id"), "title": risk["title"],
+                            "description": risk.get("description"), "category": risk.get("category"),
+                            "owner": risk.get("owner"), "status": risk["status"],
+                            "source": risk["source"], "source_ref": risk.get("source_ref"),
+                            "as_of_date": risk.get("as_of_date"), "confidence": risk.get("confidence"),
+                            "prior_risk_id": risk.get("prior_risk_id"), "risk_id": risk_id,
+                        },
+                    )
+                else:
+                    self._execute(
+                        conn,
+                        f"INSERT INTO {self._table('risks')} (risk_id, engagement_id, title, "
+                        "description, category, owner, status, source, source_ref, as_of_date, "
+                        "confidence, prior_risk_id, created_at) VALUES (:risk_id, :engagement_id, "
+                        ":title, :description, :category, :owner, :status, :source, :source_ref, "
+                        ":as_of_date, :confidence, :prior_risk_id, :created_at)",
+                        {
+                            "risk_id": risk_id, "engagement_id": risk.get("engagement_id"),
+                            "title": risk["title"], "description": risk.get("description"),
+                            "category": risk.get("category"), "owner": risk.get("owner"),
+                            "status": risk["status"], "source": risk["source"],
+                            "source_ref": risk.get("source_ref"), "as_of_date": risk.get("as_of_date"),
+                            "confidence": risk.get("confidence"),
+                            "prior_risk_id": risk.get("prior_risk_id"),
+                            "created_at": risk.get("created_at") or now,
+                        },
+                    )
+
+    def upsert_controls(self, controls: list[dict], *, now: str) -> None:
+        with self._cursor_ctx() as conn:
+            for control in controls:
+                control_id = control["control_id"]
+                cur = self._execute(
+                    conn,
+                    f"SELECT control_id FROM {self._table('controls')} WHERE control_id = :control_id",
+                    {"control_id": control_id},
+                )
+                existing = _fetchone_dict(cur)
+                if existing is not None:
+                    self._execute(
+                        conn,
+                        f"UPDATE {self._table('controls')} SET risk_id=:risk_id, "
+                        "engagement_id=:engagement_id, title=:title, description=:description, "
+                        "type=:type, frequency=:frequency, owner=:owner, "
+                        "design_conclusion=:design_conclusion, "
+                        "operating_conclusion=:operating_conclusion WHERE control_id = :control_id",
+                        {
+                            "risk_id": control.get("risk_id"), "engagement_id": control.get("engagement_id"),
+                            "title": control["title"], "description": control.get("description"),
+                            "type": control.get("type"), "frequency": control.get("frequency"),
+                            "owner": control.get("owner"),
+                            "design_conclusion": control.get("design_conclusion"),
+                            "operating_conclusion": control.get("operating_conclusion"),
+                            "control_id": control_id,
+                        },
+                    )
+                else:
+                    self._execute(
+                        conn,
+                        f"INSERT INTO {self._table('controls')} (control_id, risk_id, engagement_id, "
+                        "title, description, type, frequency, owner, design_conclusion, "
+                        "operating_conclusion, created_at) VALUES (:control_id, :risk_id, "
+                        ":engagement_id, :title, :description, :type, :frequency, :owner, "
+                        ":design_conclusion, :operating_conclusion, :created_at)",
+                        {
+                            "control_id": control_id, "risk_id": control.get("risk_id"),
+                            "engagement_id": control.get("engagement_id"), "title": control["title"],
+                            "description": control.get("description"), "type": control.get("type"),
+                            "frequency": control.get("frequency"), "owner": control.get("owner"),
+                            "design_conclusion": control.get("design_conclusion"),
+                            "operating_conclusion": control.get("operating_conclusion"),
+                            "created_at": control.get("created_at") or now,
+                        },
+                    )
+
+    def list_risks(self, engagement_id: str | None = None) -> list[dict]:
+        with self._cursor_ctx() as conn:
+            if engagement_id is None:
+                cur = self._execute(conn, f"SELECT * FROM {self._table('risks')} ORDER BY risk_id")
+            else:
+                cur = self._execute(
+                    conn,
+                    f"SELECT * FROM {self._table('risks')} WHERE engagement_id = :engagement_id "
+                    "ORDER BY risk_id",
+                    {"engagement_id": engagement_id},
+                )
+            return _fetchall_dicts(cur)
+
+    def list_controls(self, engagement_id: str | None = None) -> list[dict]:
+        with self._cursor_ctx() as conn:
+            if engagement_id is None:
+                cur = self._execute(conn, f"SELECT * FROM {self._table('controls')} ORDER BY control_id")
+            else:
+                cur = self._execute(
+                    conn,
+                    f"SELECT * FROM {self._table('controls')} WHERE engagement_id = :engagement_id "
+                    "ORDER BY control_id",
+                    {"engagement_id": engagement_id},
+                )
+            return _fetchall_dicts(cur)
+
+    # ── findings (P2) ────────────────────────────────────────────────────────
+
+    def write_findings(
+        self,
+        run_id: str,
+        findings: list[dict],
+        *,
+        engagement_id,
+        skill_id,
+        skill_version,
+        now: str,
+    ) -> list[dict]:
+        new_ids = {f["finding_id"] for f in findings}
+        with self._cursor_ctx() as conn:
+            cur = self._execute(
+                conn,
+                f"SELECT finding_id, review_state FROM {self._table('findings')} "
+                "WHERE run_id = :run_id",
+                {"run_id": run_id},
+            )
+            existing_rows = _fetchall_dicts(cur)
+            orphans = [r for r in existing_rows if r["finding_id"] not in new_ids]
+            # Checked BEFORE any write, since Delta statements here are not wrapped in
+            # a multi-statement transaction -- a rejected call must leave data
+            # untouched, which only a precondition check (not a rollback) can
+            # guarantee on this backend.
+            blocking = [o["finding_id"] for o in orphans if o["review_state"] != "draft"]
+            if blocking:
+                raise NonDraftFindingWouldBeDeleted(run_id, blocking)
+
+            update_set = ", ".join(f"{c} = :{c}" for c in _FINDING_UPDATE_COLUMNS)
+            insert_cols = ", ".join(_FINDING_COLUMNS)
+            insert_vals = ", ".join(f":{c}" for c in _FINDING_COLUMNS)
+            merge_sql = (
+                f"MERGE INTO {self._table('findings')} t "
+                "USING (SELECT :finding_id AS finding_id) s ON t.finding_id = s.finding_id "
+                f"WHEN MATCHED THEN UPDATE SET {update_set} "
+                f"WHEN NOT MATCHED THEN INSERT ({insert_cols}) VALUES ({insert_vals})"
+            )
+            for finding in findings:
+                values = _finding_row_values(
+                    run_id, finding, engagement_id=engagement_id, skill_id=skill_id,
+                    skill_version=skill_version, now=now,
+                )
+                self._execute(conn, merge_sql, values)
+
+            to_delete = [o["finding_id"] for o in orphans]
+            if to_delete:
+                placeholders = ", ".join(f":fid{i}" for i in range(len(to_delete)))
+                params = {f"fid{i}": fid for i, fid in enumerate(to_delete)}
+                params["run_id"] = run_id
+                self._execute(
+                    conn,
+                    f"DELETE FROM {self._table('findings')} WHERE run_id = :run_id "
+                    f"AND finding_id IN ({placeholders})",
+                    params,
+                )
+        return self.list_findings(run_id)
+
+    def list_findings(self, run_id: str) -> list[dict]:
+        with self._cursor_ctx() as conn:
+            cur = self._execute(
+                conn,
+                f"SELECT * FROM {self._table('findings')} WHERE run_id = :run_id ORDER BY "
+                "CASE severity WHEN 'High' THEN 0 WHEN 'Medium' THEN 1 WHEN 'Low' THEN 2 ELSE 3 END, "
+                "rule_id",
+                {"run_id": run_id},
+            )
+            rows = _fetchall_dicts(cur)
+        return [_finding_dict_from_row(r) for r in rows]
+
+    def set_finding_review_state(self, finding_id: str, *, to_state: str, actor: str, now: str) -> dict:
+        with self._cursor_ctx() as conn:
+            cur = self._execute(
+                conn,
+                f"SELECT * FROM {self._table('findings')} WHERE finding_id = :finding_id",
+                {"finding_id": finding_id},
+            )
+            row = _fetchone_dict(cur)
+            if row is None:
+                raise FindingNotFound(finding_id)
+            current = row["review_state"]
+            if (
+                current not in _REVIEW_STATE_ORDER
+                or to_state not in _REVIEW_STATE_ORDER
+                or _REVIEW_STATE_ORDER.index(to_state) != _REVIEW_STATE_ORDER.index(current) + 1
+            ):
+                raise InvalidReviewStateTransition(finding_id, current, to_state)
+            self._execute(
+                conn,
+                f"UPDATE {self._table('findings')} SET review_state = :review_state, "
+                "updated_at = :updated_at WHERE finding_id = :finding_id",
+                {"review_state": to_state, "updated_at": now, "finding_id": finding_id},
+            )
+            updated = dict(row)
+            updated["review_state"] = to_state
+            updated["updated_at"] = now
+        return _finding_dict_from_row(updated)
 
     # ── node attempts ────────────────────────────────────────────────────────
 

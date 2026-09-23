@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import dataclasses
+import itertools
 import os
+import uuid
 from pathlib import Path
 
 import pytest
@@ -29,6 +32,22 @@ def clock():
     return _clock
 
 
+_uid_counter = itertools.count(1)
+
+
+@pytest.fixture
+def uid():
+    """A monotonically increasing id generator, unique for the whole test session --
+    not just the current test. Needed because the live 'delta' backend (unlike
+    local_memory/local_file) is one shared throwaway schema for the entire session, so
+    two tests using a fixed literal id (e.g. 'RUN-1') would collide."""
+
+    def _uid(prefix: str = "ID") -> str:
+        return f"{prefix}-{next(_uid_counter):06d}"
+
+    return _uid
+
+
 def _local_memory_persistence():
     p = LocalPersistence(":memory:")
     p.migrate()
@@ -42,10 +61,49 @@ def _local_file_persistence(tmp_path):
     return p
 
 
-def _delta_persistence():
+def _databricks_sql_connect(settings):
+    from databricks import sql
+    from databricks.sdk.core import Config
+
+    cfg = Config(host=settings.host)
+    hostname = settings.host.replace("https://", "").replace("http://", "").rstrip("/")
+    return sql.connect(
+        server_hostname=hostname,
+        http_path=settings.warehouse_http_path,
+        credentials_provider=lambda: cfg.authenticate,
+    )
+
+
+@pytest.fixture(scope="session")
+def _delta_test_settings():
+    """Session-scoped throwaway schema for live Delta tests. Every session that opts in
+    via RUN_DELTA_TESTS=1 gets its own '{DBX_SCHEMA}_test_<random>' schema in the
+    configured catalog, created here and dropped at session end -- so a live test run
+    never migrates, writes to, or drops the real DBX_SCHEMA (CLAUDE.md §11: the real
+    schema is precious and out of bounds for tests)."""
+    if os.environ.get("RUN_DELTA_TESTS") != "1":
+        pytest.skip("RUN_DELTA_TESTS not set — live workspace is unavailable (CLAUDE.md §11)")
+    base = load_settings()
+    base.require("catalog", "schema", "warehouse_http_path", "host")
+    schema_name = f"{base.schema}_test_{uuid.uuid4().hex[:8]}"
+    throwaway = dataclasses.replace(base, schema=schema_name)
+
+    conn = _databricks_sql_connect(base)
+    try:
+        cur = conn.cursor()
+        cur.execute(f"CREATE SCHEMA IF NOT EXISTS {base.catalog}.{schema_name}")
+        cur.close()
+        yield throwaway
+    finally:
+        cur = conn.cursor()
+        cur.execute(f"DROP SCHEMA IF EXISTS {base.catalog}.{schema_name} CASCADE")
+        cur.close()
+        conn.close()
+
+
+def _delta_persistence(settings):
     from orchestrator.adapters.persistence_delta import DeltaPersistence
 
-    settings = load_settings()
     p = DeltaPersistence(settings)
     p.migrate()
     return p
@@ -61,7 +119,8 @@ def persistence(request, tmp_path):
     if kind == "delta":
         if os.environ.get("RUN_DELTA_TESTS") != "1":
             pytest.skip("RUN_DELTA_TESTS not set — live workspace is unavailable (CLAUDE.md §11)")
-        return _delta_persistence()
+        settings = request.getfixturevalue("_delta_test_settings")
+        return _delta_persistence(settings)
     raise ValueError(kind)
 
 

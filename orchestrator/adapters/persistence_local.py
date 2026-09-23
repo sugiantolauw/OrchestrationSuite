@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import sqlite3
 import threading
@@ -9,9 +10,14 @@ from pathlib import Path
 from orchestrator.errors import (
     AttemptAlreadyClosed,
     AttemptNotFound,
+    FindingNotFound,
     FingerprintConflict,
+    InvalidReviewStateTransition,
+    NonDraftFindingWouldBeDeleted,
+    RiskStatusRegression,
     RunAlreadyExists,
     RunNotFound,
+    SkillVersionConflict,
     StaleStateError,
 )
 from orchestrator.migrations import plan_migrations
@@ -53,9 +59,84 @@ _RUN_STATE_SUMMARY_COLUMNS = (
 
 _PROJECTION_RETRY_ATTEMPTS = 3
 
+_REVIEW_STATE_ORDER = ("draft", "prepared", "reviewed", "approved")
+
+_FINDING_COLUMNS = (
+    "finding_id", "run_id", "engagement_id", "rule_id", "skill_id", "skill_version",
+    "test_id", "control_id", "risk_id", "assertion", "title", "severity", "severity_rule",
+    "threshold_refs_json", "proposed_severity", "proposed_severity_reason",
+    "metrics_cited_json", "evidence_refs_json", "observation", "recommendation",
+    "management_questions_json", "exposure_amount", "exposure_basis", "theme_id",
+    "review_state", "prior_finding_id", "recurrence_count", "created_at", "updated_at",
+)
+
+# On a re-write of a finding_id that already exists (a node overwriting its own prior
+# output, CLAUDE.md §2.3 rule 1), finding_id is the merge key (never a SET target) and
+# the rest are left as previously stored rather than reset to the incoming value:
+# review_state/prior_finding_id/recurrence_count belong to the review lifecycle and
+# rollforward matching (P7/§4.8), not to the engine's finding dict, and created_at is
+# the finding's first-seen timestamp.
+_FINDING_STICKY_COLUMNS = ("finding_id", "review_state", "prior_finding_id", "recurrence_count", "created_at")
+_FINDING_UPDATE_COLUMNS = tuple(c for c in _FINDING_COLUMNS if c not in _FINDING_STICKY_COLUMNS)
+
 
 def _attempt_id(execution_key: str) -> str:
     return hashlib.sha256(execution_key.encode("utf-8")).hexdigest()[:32]
+
+
+def _canonical_json(value) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
+def _finding_row_values(
+    run_id: str, finding: dict, *, engagement_id, skill_id, skill_version, now: str
+) -> dict:
+    return {
+        "finding_id": finding["finding_id"],
+        "run_id": run_id,
+        "engagement_id": engagement_id,
+        "rule_id": finding["rule_id"],
+        "skill_id": skill_id,
+        "skill_version": skill_version,
+        "test_id": finding.get("test_id"),
+        "control_id": finding.get("control_id"),
+        "risk_id": finding.get("risk_id"),
+        "assertion": finding.get("assertion"),
+        "title": finding["title"],
+        "severity": finding["severity"],
+        "severity_rule": finding.get("severity_rule"),
+        "threshold_refs_json": _canonical_json(finding.get("threshold_refs", [])),
+        "proposed_severity": finding.get("proposed_severity"),
+        "proposed_severity_reason": finding.get("proposed_severity_reason"),
+        "metrics_cited_json": _canonical_json(finding.get("metrics_cited", {})),
+        "evidence_refs_json": _canonical_json(finding.get("evidence_refs", [])),
+        "observation": finding.get("observation"),
+        "recommendation": finding.get("recommendation"),
+        "management_questions_json": _canonical_json(finding.get("management_questions", [])),
+        "exposure_amount": finding.get("exposure_amount"),
+        "exposure_basis": finding.get("exposure_basis"),
+        "theme_id": finding.get("theme_id"),
+        "review_state": finding.get("review_state", "draft"),
+        "prior_finding_id": finding.get("prior_finding_id"),
+        "recurrence_count": finding.get("recurrence_count", 0),
+        "created_at": now,
+        "updated_at": now,
+    }
+
+
+def _finding_dict_from_row(row: dict) -> dict:
+    d = dict(row)
+    d["threshold_refs"] = json.loads(d.pop("threshold_refs_json") or "[]")
+    d["metrics_cited"] = json.loads(d.pop("metrics_cited_json") or "{}")
+    d["evidence_refs"] = json.loads(d.pop("evidence_refs_json") or "[]")
+    d["management_questions"] = json.loads(d.pop("management_questions_json") or "[]")
+    return d
+
+
+def _skill_version_dict_from_row(row: dict) -> dict:
+    d = dict(row)
+    d["content"] = json.loads(d.pop("content_json"))
+    return d
 
 
 class LocalPersistence:
@@ -324,6 +405,236 @@ class LocalPersistence:
         finally:
             self._release(conn)
         return [dict(r) for r in rows]
+
+    # ── skill versions (P2) ──────────────────────────────────────────────────
+
+    def record_skill_version(
+        self,
+        *,
+        skill_id: str,
+        version: str,
+        content_hash: str,
+        content: dict,
+        created_by: str,
+        now: str,
+        status: str = "draft",
+    ) -> dict:
+        content_json = _canonical_json(content)
+        with self._writer() as conn:
+            row = conn.execute(
+                "SELECT * FROM skill_versions WHERE skill_id = ? AND version = ?", (skill_id, version)
+            ).fetchone()
+            if row is not None:
+                if row["content_hash"] != content_hash:
+                    raise SkillVersionConflict(skill_id, version, row["content_hash"], content_hash)
+                return _skill_version_dict_from_row(dict(row))
+            conn.execute(
+                "INSERT INTO skill_versions (skill_id, version, content_hash, content_json, status, "
+                "created_by, created_at) VALUES (?,?,?,?,?,?,?)",
+                (skill_id, version, content_hash, content_json, status, created_by, now),
+            )
+        return {
+            "skill_id": skill_id, "version": version, "content_hash": content_hash,
+            "status": status, "created_by": created_by, "created_at": now,
+            "reviewed_by": None, "published_by": None, "published_at": None,
+            "superseded_by": None, "surface2_results_json": None, "content": content,
+        }
+
+    def get_skill_version(self, skill_id: str, version: str) -> dict | None:
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT * FROM skill_versions WHERE skill_id = ? AND version = ?", (skill_id, version)
+            ).fetchone()
+        finally:
+            self._release(conn)
+        return _skill_version_dict_from_row(dict(row)) if row is not None else None
+
+    def list_skill_versions(self, skill_id: str) -> list[dict]:
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM skill_versions WHERE skill_id = ? ORDER BY version", (skill_id,)
+            ).fetchall()
+        finally:
+            self._release(conn)
+        return [_skill_version_dict_from_row(dict(r)) for r in rows]
+
+    # ── risk / control register (P2) ─────────────────────────────────────────
+
+    def upsert_risks(self, risks: list[dict], *, now: str) -> None:
+        with self._writer() as conn:
+            for risk in risks:
+                risk_id = risk["risk_id"]
+                existing = conn.execute(
+                    "SELECT status FROM risks WHERE risk_id = ?", (risk_id,)
+                ).fetchone()
+                if existing is not None:
+                    if existing["status"] in ("accepted", "rejected") and risk["status"] == "proposed":
+                        raise RiskStatusRegression(risk_id, existing["status"], risk["status"])
+                    conn.execute(
+                        "UPDATE risks SET engagement_id=?, title=?, description=?, category=?, "
+                        "owner=?, status=?, source=?, source_ref=?, as_of_date=?, confidence=?, "
+                        "prior_risk_id=? WHERE risk_id = ?",
+                        (
+                            risk.get("engagement_id"), risk["title"], risk.get("description"),
+                            risk.get("category"), risk.get("owner"), risk["status"], risk["source"],
+                            risk.get("source_ref"), risk.get("as_of_date"), risk.get("confidence"),
+                            risk.get("prior_risk_id"), risk_id,
+                        ),
+                    )
+                else:
+                    conn.execute(
+                        "INSERT INTO risks (risk_id, engagement_id, title, description, category, "
+                        "owner, status, source, source_ref, as_of_date, confidence, prior_risk_id, "
+                        "created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (
+                            risk_id, risk.get("engagement_id"), risk["title"], risk.get("description"),
+                            risk.get("category"), risk.get("owner"), risk["status"], risk["source"],
+                            risk.get("source_ref"), risk.get("as_of_date"), risk.get("confidence"),
+                            risk.get("prior_risk_id"), risk.get("created_at") or now,
+                        ),
+                    )
+
+    def upsert_controls(self, controls: list[dict], *, now: str) -> None:
+        with self._writer() as conn:
+            for control in controls:
+                control_id = control["control_id"]
+                existing = conn.execute(
+                    "SELECT control_id FROM controls WHERE control_id = ?", (control_id,)
+                ).fetchone()
+                if existing is not None:
+                    conn.execute(
+                        "UPDATE controls SET risk_id=?, engagement_id=?, title=?, description=?, "
+                        "type=?, frequency=?, owner=?, design_conclusion=?, operating_conclusion=? "
+                        "WHERE control_id = ?",
+                        (
+                            control.get("risk_id"), control.get("engagement_id"), control["title"],
+                            control.get("description"), control.get("type"), control.get("frequency"),
+                            control.get("owner"), control.get("design_conclusion"),
+                            control.get("operating_conclusion"), control_id,
+                        ),
+                    )
+                else:
+                    conn.execute(
+                        "INSERT INTO controls (control_id, risk_id, engagement_id, title, "
+                        "description, type, frequency, owner, design_conclusion, "
+                        "operating_conclusion, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                        (
+                            control_id, control.get("risk_id"), control.get("engagement_id"),
+                            control["title"], control.get("description"), control.get("type"),
+                            control.get("frequency"), control.get("owner"),
+                            control.get("design_conclusion"), control.get("operating_conclusion"),
+                            control.get("created_at") or now,
+                        ),
+                    )
+
+    def list_risks(self, engagement_id: str | None = None) -> list[dict]:
+        conn = self._connect()
+        try:
+            if engagement_id is None:
+                rows = conn.execute("SELECT * FROM risks ORDER BY risk_id").fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM risks WHERE engagement_id = ? ORDER BY risk_id", (engagement_id,)
+                ).fetchall()
+        finally:
+            self._release(conn)
+        return [dict(r) for r in rows]
+
+    def list_controls(self, engagement_id: str | None = None) -> list[dict]:
+        conn = self._connect()
+        try:
+            if engagement_id is None:
+                rows = conn.execute("SELECT * FROM controls ORDER BY control_id").fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM controls WHERE engagement_id = ? ORDER BY control_id", (engagement_id,)
+                ).fetchall()
+        finally:
+            self._release(conn)
+        return [dict(r) for r in rows]
+
+    # ── findings (P2) ────────────────────────────────────────────────────────
+
+    def write_findings(
+        self,
+        run_id: str,
+        findings: list[dict],
+        *,
+        engagement_id,
+        skill_id,
+        skill_version,
+        now: str,
+    ) -> list[dict]:
+        new_ids = {f["finding_id"] for f in findings}
+        with self._writer() as conn:
+            existing_rows = conn.execute(
+                "SELECT finding_id, review_state FROM findings WHERE run_id = ?", (run_id,)
+            ).fetchall()
+            orphans = [dict(r) for r in existing_rows if r["finding_id"] not in new_ids]
+            # Checked BEFORE any write so a rejected call leaves data untouched, not
+            # merely rolled back -- this holds even against a backend with no real
+            # multi-statement transaction (DeltaPersistence.write_findings below).
+            blocking = [o["finding_id"] for o in orphans if o["review_state"] != "draft"]
+            if blocking:
+                raise NonDraftFindingWouldBeDeleted(run_id, blocking)
+
+            update_clause = ", ".join(f"{c} = excluded.{c}" for c in _FINDING_UPDATE_COLUMNS)
+            placeholders = ",".join("?" for _ in _FINDING_COLUMNS)
+            for finding in findings:
+                values = _finding_row_values(
+                    run_id, finding, engagement_id=engagement_id, skill_id=skill_id,
+                    skill_version=skill_version, now=now,
+                )
+                conn.execute(
+                    f"INSERT INTO findings ({','.join(_FINDING_COLUMNS)}) VALUES ({placeholders}) "
+                    f"ON CONFLICT(finding_id) DO UPDATE SET {update_clause}",
+                    tuple(values[c] for c in _FINDING_COLUMNS),
+                )
+
+            to_delete = [o["finding_id"] for o in orphans]
+            if to_delete:
+                del_placeholders = ",".join("?" for _ in to_delete)
+                conn.execute(
+                    f"DELETE FROM findings WHERE run_id = ? AND finding_id IN ({del_placeholders})",
+                    (run_id, *to_delete),
+                )
+        return self.list_findings(run_id)
+
+    def list_findings(self, run_id: str) -> list[dict]:
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM findings WHERE run_id = ? ORDER BY "
+                "CASE severity WHEN 'High' THEN 0 WHEN 'Medium' THEN 1 WHEN 'Low' THEN 2 ELSE 3 END, "
+                "rule_id",
+                (run_id,),
+            ).fetchall()
+        finally:
+            self._release(conn)
+        return [_finding_dict_from_row(dict(r)) for r in rows]
+
+    def set_finding_review_state(self, finding_id: str, *, to_state: str, actor: str, now: str) -> dict:
+        with self._writer() as conn:
+            row = conn.execute("SELECT * FROM findings WHERE finding_id = ?", (finding_id,)).fetchone()
+            if row is None:
+                raise FindingNotFound(finding_id)
+            current = row["review_state"]
+            if (
+                current not in _REVIEW_STATE_ORDER
+                or to_state not in _REVIEW_STATE_ORDER
+                or _REVIEW_STATE_ORDER.index(to_state) != _REVIEW_STATE_ORDER.index(current) + 1
+            ):
+                raise InvalidReviewStateTransition(finding_id, current, to_state)
+            conn.execute(
+                "UPDATE findings SET review_state = ?, updated_at = ? WHERE finding_id = ?",
+                (to_state, now, finding_id),
+            )
+            updated = dict(row)
+            updated["review_state"] = to_state
+            updated["updated_at"] = now
+        return _finding_dict_from_row(updated)
 
     # ── node attempts ────────────────────────────────────────────────────────
 
