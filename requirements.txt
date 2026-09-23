@@ -7,15 +7,12 @@ numpy>=1.26
 pyyaml>=6.0
 python-dotenv>=1.0
 
-# LangGraph + LangChain (thin dependency; confined to graph.py)
-langgraph>=0.2.0
-langchain-core>=0.3.0
-
 # LLM client (Databricks Model Serving OpenAI-compatible surface)
 openai>=1.40.0
 
 # Databricks
 databricks-sdk>=0.30.0
+databricks-sql-connector>=3.0
 
 # Observability + evaluation
 mlflow>=2.16.0
@@ -23,6 +20,7 @@ mlflow>=2.16.0
 # Exports
 python-pptx>=1.0.2
 xlsxwriter>=3.2.9
+openpyxl>=3.1
 pillow>=12.2.0
 lxml>=6.1.1
 
