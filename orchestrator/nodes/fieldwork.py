@@ -35,6 +35,7 @@ from orchestrator.engine import execute_skill
 from orchestrator.findings import build_findings
 from orchestrator.frames import build_row_snapshots, frame_parquet_bytes, sha256_bytes
 from orchestrator.nodes.context import NodeContext
+from orchestrator.signoff_policy import SELF_APPROVED_LABEL
 from orchestrator.skills import plan_test_flags
 from orchestrator.state import RunState
 
@@ -647,6 +648,12 @@ def _write_xlsx_workpaper(state: RunState, findings: list[dict], metrics: dict[s
         ("objective", state.objective),
         ("run_owner", state.run_owner),
     ]
+    signoff = state.signoff or {}
+    if signoff:
+        cover_fields.append(("signed_off_by", signoff.get("approver")))
+        cover_fields.append(("signed_off_at", signoff.get("timestamp")))
+        if signoff.get("self_approved"):
+            cover_fields.append(("signoff_note", SELF_APPROVED_LABEL))
     for r, (label, value) in enumerate(cover_fields, start=1):
         _write_str(cover, r, 0, label, bold)
         _write_str(cover, r, 1, value)

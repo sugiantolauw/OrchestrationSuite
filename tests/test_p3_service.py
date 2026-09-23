@@ -93,12 +93,24 @@ def test_full_local_run_to_signoff_and_export(tmp_path):
         assert status == "completed", run.get("status_reason")
         assert run["signoff"]["approver"] == "approver"
 
+        # run_owner="tester" above, sign-off actor="approver" -- a genuine
+        # non-self sign-off (CLAUDE.md §11 self sign-off decision:
+        # self_approved/sod_enforced are recorded on every sign-off, not
+        # only the self-approved ones).
+        assert run["signoff"]["self_approved"] is False
+        assert run["signoff"]["sod_enforced"] is False
+
         # CLAUDE.md §4.8's runs.approved_by projection column, P2/P3 gate
         # review item 9: sign_off sets RunState.signoff but nothing wrote it
         # into the runs table's own approved_by column, so it stayed NULL on
         # every completed run.
         row = next(r for r in ctx.persistence.list_runs() if r["run_id"] == run_id)
         assert row["approved_by"] == "approver"
+
+        runs_list_row = next(r for r in service.list_runs(ctx) if r["run_id"] == run_id)
+        assert runs_list_row["approved_by"] == "approver"
+        assert runs_list_row["self_approved"] is False
+        assert runs_list_row["sod_enforced"] is False
 
         filename, content = service.get_export(ctx, run_id, "xlsx")
         assert filename == "workpaper.xlsx"
@@ -108,7 +120,52 @@ def test_full_local_run_to_signoff_and_export(tmp_path):
         assert len(actions) == 2
 
         events = service.list_trace_events(ctx, run_id)
-        assert any(e["event_type"] == "signed_off" for e in events)
+        signed_off_events = [e for e in events if e["event_type"] == "signed_off"]
+        assert signed_off_events
+        # non-self sign-off: no "self-approved" suffix on the trace message.
+        assert "self-approved" not in signed_off_events[0]["message"]
+    finally:
+        ctx.executor.stop()
+
+
+def test_self_signoff_is_labelled_self_approved_and_sod_not_enforced(tmp_path):
+    """CLAUDE.md §11 "accept all defaults, allow self sign-off for now": when
+    the sign-off actor equals run_owner, sign_off must not block it (self
+    sign-off stays allowed until P7) but must record self_approved=True and
+    sod_enforced=False everywhere the sign-off is later read, and the trace
+    event message must carry the "segregation of duties not enforced"
+    suffix."""
+    ctx = _build_ctx(tmp_path)
+    ctx.executor.start()
+    try:
+        bindings = service.suggest_bindings(ctx, "SKILL-MINI")
+        run_id = service.start_audit_run(
+            ctx, skill_id="SKILL-MINI", bindings=bindings,
+            audit_period=("2026-01-01", "2026-02-28"), objective="self signoff test",
+            run_owner="same-person",
+        )
+        status = _wait_for_status(ctx, run_id, {"awaiting_signoff", "failed"})
+        run = service.get_run(ctx, run_id)
+        assert status == "awaiting_signoff", run.get("status_reason")
+
+        service.sign_off(ctx, run_id, "same-person")
+        status = _wait_for_status(ctx, run_id, {"completed", "failed"})
+        run = service.get_run(ctx, run_id)
+        assert status == "completed", run.get("status_reason")
+
+        assert run["signoff"]["approver"] == "same-person"
+        assert run["signoff"]["self_approved"] is True
+        assert run["signoff"]["sod_enforced"] is False
+
+        runs_list_row = next(r for r in service.list_runs(ctx) if r["run_id"] == run_id)
+        assert runs_list_row["self_approved"] is True
+        assert runs_list_row["sod_enforced"] is False
+        assert runs_list_row["approved_by"] == "same-person"
+
+        events = service.list_trace_events(ctx, run_id)
+        signed_off_events = [e for e in events if e["event_type"] == "signed_off"]
+        assert signed_off_events
+        assert "self-approved (segregation of duties not enforced)" in signed_off_events[0]["message"]
     finally:
         ctx.executor.stop()
 

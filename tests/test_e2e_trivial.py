@@ -75,7 +75,15 @@ def test_trivial_fieldwork_playbook_run_end_to_end(persistence, clock, tmp_path)
     state = runs.sign_off(persistence, state.run_id, actor="alice", now=clock())
     assert state.status == "queued"
     assert state.phase == "export"
-    assert state.signoff == {"approver": "alice", "timestamp": state.signoff["timestamp"]}
+    # run_owner="alice" above, sign-off actor="alice" -- self sign-off is
+    # allowed (CLAUDE.md §11 "accept all defaults, allow self sign-off for
+    # now"), and orchestrator.signoff_policy records it as such.
+    assert state.signoff == {
+        "approver": "alice",
+        "timestamp": state.signoff["timestamp"],
+        "self_approved": True,
+        "sod_enforced": False,
+    }
 
     state = run_phase(persistence, state.run_id, nodes_for=NODES_FOR, clock=clock, current_fingerprint=fingerprint)
     assert state.status == "completed"

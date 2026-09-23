@@ -388,6 +388,60 @@ def test_export_xlsx_never_writes_a_live_formula_cell(local_persistence, tmp_pat
     assert objective_cell.data_type == "s"  # shared string, never "f" (formula)
 
 
+def test_export_xlsx_cover_sheet_labels_a_self_approved_signoff(local_persistence, tmp_path):
+    """CLAUDE.md §11 self sign-off decision: when signoff.approver equals
+    run_owner, the exported workpaper's Cover sheet must carry the same
+    "segregation of duties not enforced" statement shown in the UI -- an
+    exported PPTX/XLSX that leaves this out is not a defensible workpaper."""
+    import openpyxl
+
+    from orchestrator.signoff_policy import SELF_APPROVED_LABEL
+
+    h = _make_harness(local_persistence, tmp_path, run_owner="alice")
+    state = _run_through_prioritise(h)
+    state = act(h.ctx, state)
+    state = dataclasses.replace(
+        state,
+        signoff={"approver": "alice", "timestamp": canonical_ts(9), "self_approved": True, "sod_enforced": False},
+    )
+    state = export(h.ctx, state)
+
+    path = Path(state.exports["xlsx"]["path"])
+    wb = openpyxl.load_workbook(path)
+    cover = wb["Cover"]
+    labels = [cover.cell(row=r, column=1).value for r in range(1, cover.max_row + 1)]
+    values = [cover.cell(row=r, column=2).value for r in range(1, cover.max_row + 1)]
+    assert "signed_off_by" in labels
+    assert values[labels.index("signed_off_by")] == "alice"
+    assert "signoff_note" in labels
+    assert values[labels.index("signoff_note")] == SELF_APPROVED_LABEL
+
+
+def test_export_xlsx_cover_sheet_omits_the_label_for_a_non_self_signoff(local_persistence, tmp_path):
+    import openpyxl
+
+    from orchestrator.signoff_policy import SELF_APPROVED_LABEL
+
+    h = _make_harness(local_persistence, tmp_path, run_owner="alice")
+    state = _run_through_prioritise(h)
+    state = act(h.ctx, state)
+    state = dataclasses.replace(
+        state,
+        signoff={"approver": "bob", "timestamp": canonical_ts(9), "self_approved": False, "sod_enforced": False},
+    )
+    state = export(h.ctx, state)
+
+    path = Path(state.exports["xlsx"]["path"])
+    wb = openpyxl.load_workbook(path)
+    cover = wb["Cover"]
+    labels = [cover.cell(row=r, column=1).value for r in range(1, cover.max_row + 1)]
+    values = [cover.cell(row=r, column=2).value for r in range(1, cover.max_row + 1)]
+    assert "signed_off_by" in labels
+    assert values[labels.index("signed_off_by")] == "bob"
+    assert "signoff_note" not in labels
+    assert SELF_APPROVED_LABEL not in (v for v in values if v)
+
+
 def test_export_xlsx_raises_if_severity_provenance_was_never_persisted(local_persistence, tmp_path):
     """CLAUDE.md §0.4/G8, item 3: never defaults analyst_set_severity to
     False -- a finding missing its persisted provenance must fail the export

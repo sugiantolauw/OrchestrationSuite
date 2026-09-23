@@ -84,7 +84,7 @@ class RunState:
     findings: list[dict] = field(default_factory=list)
     management_actions: list[dict] = field(default_factory=list)
     exports: dict = field(default_factory=dict)
-    signoff: dict | None = None
+    signoff: dict | None = None  # approver, timestamp, self_approved, sod_enforced (orchestrator/signoff_policy.py)
     status_reason: str | None = None
 
     # LLM narration — never contains raw numbers the model invented

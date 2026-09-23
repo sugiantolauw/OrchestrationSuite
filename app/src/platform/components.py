@@ -9,6 +9,8 @@ from __future__ import annotations
 from dash import dcc, html
 import dash_bootstrap_components as dbc
 
+from orchestrator.signoff_policy import SELF_APPROVED_LABEL
+
 
 # ── KPI card ─────────────────────────────────────────────────────────────────
 
@@ -146,6 +148,7 @@ def run_card(run: dict) -> html.Div:
             html.Span(run.get("run_timestamp", "")[:16].replace("T", " "),
                       style={"fontSize": 10.5, "color": "#6b7283"}),
         ], style={"display": "flex", "justifyContent": "space-between", "marginTop": 8}),
+        demo_indicator(SELF_APPROVED_LABEL) if run.get("self_approved") else None,
         html.Div([
             html.Button("View", id={"type": "run-view-btn", "index": run["run_id"]},
                         style={"fontSize": 12, "padding": "4px 12px"}),

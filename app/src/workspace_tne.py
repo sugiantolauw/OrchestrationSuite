@@ -45,9 +45,10 @@ import yaml as _yaml
 from dash import ALL, Input, Output, State, ctx, dash_table, dcc, html
 from dash.exceptions import PreventUpdate
 
+from orchestrator.signoff_policy import SELF_APPROVED_LABEL
 from src import charts
 from src.platform import adapters
-from src.platform.components import kpi_card
+from src.platform.components import demo_indicator, kpi_card
 
 # ── Per-run cache — CLAUDE.md §2.1: "a small per-run cache keyed by
 # (run_id, state_version) is fine". Holds at most one run's bundle: a
@@ -387,6 +388,10 @@ def _build_header(run: dict, payload: dict | None = None) -> html.Div:
     if months_covered is not None:
         scope_chips.append(html.Span(f"{_fmt_count(months_covered)} months covered", className="chip"))
 
+    self_approved_banner = (
+        demo_indicator(SELF_APPROVED_LABEL) if (run.get("signoff") or {}).get("self_approved") else None
+    )
+
     return html.Div(
         html.Header([
             html.Div([
@@ -417,6 +422,7 @@ def _build_header(run: dict, payload: dict | None = None) -> html.Div:
                 html.Span(f"Status: {run.get('status_label') or run.get('status', '—')}", className="chip"),
                 *scope_chips,
             ], className="chip-row", style={"marginTop": 8}),
+            *([self_approved_banner] if self_approved_banner is not None else []),
         ], className="page-header", style={"marginBottom": 16}),
         className="shell",
     )
@@ -553,6 +559,7 @@ def _executive_tab(run: dict, findings: list[dict], payload: dict | None, action
                  if run.get("signoff") else "Not yet signed off."),
                 className="sub",
             ),
+            demo_indicator(SELF_APPROVED_LABEL) if (run.get("signoff") or {}).get("self_approved") else None,
         ], className="panel", style={"marginTop": 16}),
     ])
 

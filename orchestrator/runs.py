@@ -6,6 +6,7 @@ import uuid
 
 from orchestrator.errors import EngagementNotFound, FingerprintMismatch
 from orchestrator.fingerprint import verify_fingerprint
+from orchestrator.signoff_policy import evaluate_signoff
 from orchestrator.state import ENGAGEMENT_SCOPED_KINDS, RunState, validate
 from orchestrator.status import transition
 
@@ -119,12 +120,24 @@ def confirm_plan(persistence, run_id: str, *, actor: str, now: str) -> RunState:
 
 def sign_off(persistence, run_id: str, *, actor: str, now: str) -> RunState:
     state = persistence.load_state(run_id)
+    policy = evaluate_signoff(actor=actor, run_owner=state.run_owner)
     # signoff is set BEFORE transition() so the execute->export gate (status.py) can
     # see it on the state it is validating (CLAUDE.md §2.4, B3).
-    state = dataclasses.replace(state, signoff={"approver": actor, "timestamp": now})
+    state = dataclasses.replace(
+        state,
+        signoff={
+            "approver": actor,
+            "timestamp": now,
+            "self_approved": policy["self_approved"],
+            "sod_enforced": policy["sod_enforced"],
+        },
+    )
     new_state = transition(state, "queued", now=now, phase="export")
     saved = persistence.save_state(new_state)
-    _emit(persistence, saved, event_type="signed_off", actor=actor, message=f"Findings signed off by {actor}", now=now)
+    message = f"Findings signed off by {actor}"
+    if policy["self_approved"]:
+        message += " — self-approved (segregation of duties not enforced)"
+    _emit(persistence, saved, event_type="signed_off", actor=actor, message=message, now=now)
     return saved
 
 

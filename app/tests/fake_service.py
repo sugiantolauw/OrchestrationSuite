@@ -248,6 +248,7 @@ def list_runs(ctx, filters=None) -> list:
     runs = list(ctx.runs.values())
     out = []
     for r in runs:
+        signoff = r.get("signoff") or {}
         out.append({
             "run_id": r["run_id"],
             "skill_id": r["skill_id"],
@@ -261,6 +262,9 @@ def list_runs(ctx, filters=None) -> list:
             "open_actions": 0,
             "potential_exposure": 0,
             "data_mode": "demo",
+            "approved_by": signoff.get("approver"),
+            "self_approved": bool(signoff.get("self_approved")),
+            "sod_enforced": bool(signoff.get("sod_enforced")),
         })
     if filters:
         skill_id = filters.get("skill_id")
@@ -312,10 +316,18 @@ def confirm_plan(ctx, run_id, actor) -> None:
 
 
 def sign_off(ctx, run_id, actor) -> None:
+    from orchestrator.signoff_policy import evaluate_signoff
+
     run = ctx.runs[run_id]
+    policy = evaluate_signoff(actor=actor, run_owner=run["run_owner"])
     run["status"] = "completed"
     run["status_label"] = "Completed"
-    run["signoff"] = {"approver": actor, "timestamp": "2026-09-23T00:00:00"}
+    run["signoff"] = {
+        "approver": actor,
+        "timestamp": "2026-09-23T00:00:00",
+        "self_approved": policy["self_approved"],
+        "sod_enforced": policy["sod_enforced"],
+    }
     run["state_version"] += 1
 
 

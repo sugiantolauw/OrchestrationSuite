@@ -97,6 +97,55 @@ def test_workspace_tne_renders_a_completed_run():
     assert layout is not None
 
 
+def test_workspace_tne_shows_self_approved_badge_when_approver_is_run_owner():
+    # CLAUDE.md §11 "allow self sign-off for now": when the sign-off actor is
+    # the same identity as run_owner (as above, and in this fixture's normal
+    # single-actor flow), the workspace must visibly label it, not just
+    # silently accept it.
+    from orchestrator.signoff_policy import SELF_APPROVED_LABEL
+
+    run_id = adapters.start_audit_run(
+        skill_id="SKILL-001",
+        bindings={"expense_report": "test_catalog.tne_source.expense_report"},
+        audit_period=("2025-01-01", "2026-04-30"),
+        objective="Assess T&E spend.",
+        run_owner="tester@example.com",
+    )
+    adapters.sign_off(run_id, "tester@example.com")
+    layout = workspace_tne.tne_workspace_layout(run_id)
+    assert SELF_APPROVED_LABEL in str(layout)
+
+
+def test_workspace_tne_omits_self_approved_badge_when_approver_differs_from_owner():
+    from orchestrator.signoff_policy import SELF_APPROVED_LABEL
+
+    run_id = adapters.start_audit_run(
+        skill_id="SKILL-001",
+        bindings={"expense_report": "test_catalog.tne_source.expense_report"},
+        audit_period=("2025-01-01", "2026-04-30"),
+        objective="Assess T&E spend.",
+        run_owner="owner@example.com",
+    )
+    adapters.sign_off(run_id, "reviewer@example.com")
+    layout = workspace_tne.tne_workspace_layout(run_id)
+    assert SELF_APPROVED_LABEL not in str(layout)
+
+
+def test_runs_list_page_shows_self_approved_badge_for_a_self_signed_run():
+    from orchestrator.signoff_policy import SELF_APPROVED_LABEL
+
+    run_id = adapters.start_audit_run(
+        skill_id="SKILL-001",
+        bindings={"expense_report": "test_catalog.tne_source.expense_report"},
+        audit_period=("2025-01-01", "2026-04-30"),
+        objective="Assess T&E spend.",
+        run_owner="tester@example.com",
+    )
+    adapters.sign_off(run_id, "tester@example.com")
+    page = audit_runs_page()
+    assert SELF_APPROVED_LABEL in str(page)
+
+
 def test_route_page_dispatches_every_known_path():
     app_module = load_app_entry()
     for pathname, search in [

@@ -63,6 +63,7 @@ from orchestrator.frames import not_testable_flags, read_frame_parquet
 from orchestrator.nodes.context import NodeContext
 from orchestrator.nodes.fieldwork import NODES_FOR
 from orchestrator.pipeline import NODE_STAGE_LABELS
+from orchestrator.signoff_policy import SOD_ENFORCED, evaluate_signoff
 from orchestrator.skill_registry import register_skill
 from orchestrator.skills import load_skill, plan_test_flags
 from orchestrator.state import RunState, to_json
@@ -567,6 +568,17 @@ def list_runs(ctx: AppContext, filters: dict | None = None) -> list[dict]:
         exposure_metric = ctx.persistence.get_run_metrics(run_id).get("run_exposure_headline")
         skill_entry = skills_by_id.get(r.get("skill_id"))
 
+        # approved_by (runs.approved_by, populated by orchestrator.runs.sign_off
+        # via persistence) is the same `actor` string evaluate_signoff compared
+        # against run_owner at sign-off time -- re-deriving self_approved from
+        # these two already-projected columns is exactly that same equality,
+        # not a second policy decision (CLAUDE.md §11 self sign-off decision;
+        # orchestrator/signoff_policy.py is the single source of the rule).
+        approved_by = r.get("approved_by")
+        self_approved = bool(approved_by) and evaluate_signoff(
+            actor=approved_by, run_owner=r["run_owner"]
+        )["self_approved"]
+
         out.append(
             {
                 "run_id": run_id,
@@ -583,6 +595,9 @@ def list_runs(ctx: AppContext, filters: dict | None = None) -> list[dict]:
                 "open_actions": len(open_actions),
                 "last_updated": r["last_state_change_at"],
                 "has_workspace": bool(skill_entry and skill_entry.get("has_workspace")),
+                "approved_by": approved_by,
+                "self_approved": self_approved,
+                "sod_enforced": SOD_ENFORCED,
             }
         )
     return out
