@@ -1,0 +1,6 @@
+id: SKILL-MINI
+name: Mini Test Skill
+domain: test
+version: "0.1.0"
+owner: test
+status: draft

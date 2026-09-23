@@ -1,0 +1,14 @@
+{
+  "type": "object",
+  "properties": {
+    "id": {"type": "string"},
+    "name": {"type": "string"},
+    "domain": {"type": "string"},
+    "version": {"type": "string"},
+    "owner": {"type": "string"},
+    "status": {"type": "string", "enum": ["draft", "published"]},
+    "description": {"type": "string"}
+  },
+  "required": ["id", "name", "domain", "version", "owner", "status"],
+  "additionalProperties": false
+}

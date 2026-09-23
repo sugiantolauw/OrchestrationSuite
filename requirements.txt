@@ -6,6 +6,7 @@ pandas>=2.1
 numpy>=1.26
 pyyaml>=6.0
 python-dotenv>=1.0
+jsonschema>=4.0
 
 # LLM client (Databricks Model Serving OpenAI-compatible surface)
 openai>=1.40.0

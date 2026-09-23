@@ -1,0 +1,50 @@
+{
+  "type": "object",
+  "properties": {
+    "populations": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "source": {"type": "string"},
+          "filters": {"type": "array", "items": {"type": "object"}},
+          "derive": {"type": "array", "items": {"type": "object"}},
+          "amount_column": {"type": "string"},
+          "date_column": {"type": "string"}
+        },
+        "required": ["source"],
+        "additionalProperties": false
+      }
+    },
+    "tests": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "test_id": {"type": "string"},
+          "control_id": {"type": "string"},
+          "risk_id": {"type": "string"},
+          "assertion": {"type": "string", "enum": ["design", "operating"]},
+          "control_objective": {"type": "string"},
+          "flag": {"type": "string"},
+          "primitive": {"type": "string"},
+          "params": {"type": "object"},
+          "not_testable": {
+            "type": "object",
+            "properties": {"reason": {"type": "string"}},
+            "required": ["reason"],
+            "additionalProperties": false
+          }
+        },
+        "required": ["test_id", "control_id", "risk_id", "assertion"],
+        "oneOf": [
+          {"required": ["primitive", "params", "flag"]},
+          {"required": ["not_testable"]}
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["populations", "tests"],
+  "additionalProperties": false
+}

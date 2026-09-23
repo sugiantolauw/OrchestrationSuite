@@ -1,0 +1,289 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any, Callable
+
+import pandas as pd
+
+
+class PopulationError(Exception):
+    pass
+
+
+@dataclass
+class PopulationResult:
+    name: str
+    source: str
+    source_version: str
+    df: pd.DataFrame
+    rows: int
+    amount: float | None
+    min_date: str | None
+    max_date: str | None
+    amount_column: str | None = None
+    date_column: str | None = None
+    excluded_counts: dict[str, int] = field(default_factory=dict)
+    derivation_counters: dict[str, int] = field(default_factory=dict)
+
+    def reconciliation_summary(self) -> dict:
+        return {
+            "population": self.name,
+            "rows": self.rows,
+            "amount": self.amount,
+            "min_date": self.min_date,
+            "max_date": self.max_date,
+            "excluded_counts": dict(self.excluded_counts),
+            "derivation_counters": dict(self.derivation_counters),
+        }
+
+
+@dataclass
+class PopulationContext:
+    sources: dict[str, dict]  # name -> {"df": DataFrame, "version": str}
+    references: dict[str, Any]  # reference-id -> list | dict | DataFrame
+    audit_period: tuple[str, str]
+    thresholds: dict[str, dict]
+    custom_derivations: dict[str, Callable] = field(default_factory=dict)
+
+
+def _resolve_value(value: Any, ctx: PopulationContext) -> Any:
+    if isinstance(value, dict) and "ref" in value:
+        ref = value["ref"]
+        if ref == "audit_period":
+            return list(ctx.audit_period)
+        if ref not in ctx.references:
+            raise PopulationError(f"unknown reference: {ref!r}")
+        return ctx.references[ref]
+    return value
+
+
+def _apply_filter(df: pd.DataFrame, flt: dict, ctx: PopulationContext) -> pd.Series:
+    if "any_of" in flt:
+        masks = [_apply_filter(df, f, ctx) for f in flt["any_of"]]
+        mask = masks[0]
+        for m in masks[1:]:
+            mask = mask | m
+        return mask
+    if "all_of" in flt:
+        masks = [_apply_filter(df, f, ctx) for f in flt["all_of"]]
+        mask = masks[0]
+        for m in masks[1:]:
+            mask = mask & m
+        return mask
+
+    col = flt["column"]
+    op = flt["op"]
+    if col not in df.columns:
+        raise PopulationError(f"filter references unknown column: {col!r}")
+    series = df[col]
+
+    if op == "is_null":
+        return series.isna()
+    if op == "not_null":
+        return series.notna()
+
+    value = _resolve_value(flt.get("value"), ctx)
+    if op == "eq":
+        return series == value
+    if op == "ne":
+        return series != value
+    if op == "in":
+        return series.isin(value)
+    if op == "not_in":
+        return ~series.isin(value)
+    if op == "between":
+        lo, hi = value
+        if _looks_like_date(series):
+            lo, hi = pd.Timestamp(lo), pd.Timestamp(hi)
+        return (series >= lo) & (series <= hi)
+    if op == "gt":
+        return series > value
+    if op == "gte":
+        return series >= value
+    if op == "lt":
+        return series < value
+    if op == "lte":
+        return series <= value
+    raise PopulationError(f"unknown filter op: {op!r}")
+
+
+def _looks_like_date(series: pd.Series) -> bool:
+    return pd.api.types.is_datetime64_any_dtype(series)
+
+
+def _describe_filter(flt: dict, index: int) -> str:
+    if "label" in flt:
+        return flt["label"]
+    if "any_of" in flt:
+        return f"filter[{index}]:any_of"
+    if "all_of" in flt:
+        return f"filter[{index}]:all_of"
+    return f"filter[{index}]:{flt.get('column')}:{flt.get('op')}"
+
+
+def _operand_series(df: pd.DataFrame, spec: Any, ctx: PopulationContext) -> Any:
+    if isinstance(spec, dict):
+        if "column" in spec:
+            return df[spec["column"]]
+        if "threshold" in spec:
+            tid = spec["threshold"]
+            if tid not in ctx.thresholds:
+                raise PopulationError(f"unknown threshold id: {tid!r}")
+            return ctx.thresholds[tid]["value"]
+        raise PopulationError(f"operand must have 'column' or 'threshold': {spec!r}")
+    return spec
+
+
+def _as_ref_frame(table: Any) -> pd.DataFrame:
+    return table if isinstance(table, pd.DataFrame) else pd.DataFrame(table)
+
+
+def apply_derivations(
+    df: pd.DataFrame,
+    derive_list: list[dict] | None,
+    ctx: PopulationContext,
+) -> tuple[pd.DataFrame, dict[str, int]]:
+    """Applies each declared derivation in order. Every derivation is an explicit,
+    named op -- never silently defaults an unmapped value; instead it is left null
+    and counted (CLAUDE.md §4 populations, NN14)."""
+    df = df.copy()
+    counters: dict[str, int] = {}
+
+    for d in derive_list or []:
+        op = d["op"]
+        out_col = d["as"]
+
+        if op == "map":
+            src_col = d["column"]
+            mapping = _resolve_value(d["mapping"], ctx)
+            mapped = df[src_col].map(mapping)
+            unmapped = mapped.isna() & df[src_col].notna()
+            counters[d.get("unmapped_counter", f"{out_col}_unmapped_rows")] = int(unmapped.sum())
+            df[out_col] = mapped
+
+        elif op == "lookup":
+            ref_df = _as_ref_frame(ctx.references[d["table"]])
+            left_keys = d["on"] if isinstance(d["on"], list) else [d["on"]]
+            right_keys = d.get("ref_on", left_keys)
+            right_keys = right_keys if isinstance(right_keys, list) else [right_keys]
+            value_col = d["value_column"]
+            ref_cols = list(dict.fromkeys(right_keys + [value_col]))
+            merged = df.merge(
+                ref_df[ref_cols],
+                how="left",
+                left_on=left_keys,
+                right_on=right_keys,
+                suffixes=("", "__ref"),
+            )
+            unmapped = merged[value_col].isna()
+            counters[d.get("unmapped_counter", f"{out_col}_unmapped_rows")] = int(unmapped.sum())
+            df[out_col] = merged[value_col].to_numpy()
+
+        elif op == "coalesce":
+            cols = d["columns"]
+            df[out_col] = df[cols].bfill(axis=1).iloc[:, 0]
+
+        elif op == "month":
+            src_col = d["column"]
+            df[out_col] = pd.to_datetime(df[src_col]).dt.strftime("%Y-%m")
+
+        elif op == "fx_rate":
+            ref_df = _as_ref_frame(ctx.references[d["table"]])
+            month_col = d["month_column"]
+            key_col = d.get("key_column", "month")
+            value_col = d.get("value_column", "rate")
+            merged = df.merge(
+                ref_df[[key_col, value_col]],
+                how="left",
+                left_on=month_col,
+                right_on=key_col,
+            )
+            unmapped = merged[value_col].isna()
+            counters[d.get("unmapped_counter", f"{out_col}_unmapped_rows")] = int(unmapped.sum())
+            df[out_col] = merged[value_col].to_numpy()
+
+        elif op == "multiply":
+            left = _operand_series(df, d["left"], ctx)
+            right = _operand_series(df, d["right"], ctx)
+            df[out_col] = left * right
+
+        elif op == "divide":
+            left = _operand_series(df, d["left"], ctx)
+            right = _operand_series(df, d["right"], ctx)
+            df[out_col] = left / right
+
+        elif op == "membership_role":
+            prepared = df[d["prepared_column"]].astype(bool)
+            approved = df[d["approved_column"]].astype(bool)
+            df[out_col] = [
+                "both" if p and a else "prepared" if p else "approved" if a else None
+                for p, a in zip(prepared, approved)
+            ]
+
+        elif op == "custom":
+            fn = ctx.custom_derivations.get(d["name"])
+            if fn is None:
+                raise PopulationError(f"unknown custom derivation: {d['name']!r}")
+            values, extra_counters = fn(df, d.get("params", {}), ctx)
+            df[out_col] = values
+            counters.update(extra_counters or {})
+
+        else:
+            raise PopulationError(f"unknown derivation op: {op!r}")
+
+    return df, counters
+
+
+def build_population(name: str, pop_config: dict, ctx: PopulationContext) -> PopulationResult:
+    source = pop_config["source"]
+    if source not in ctx.sources:
+        raise PopulationError(f"population {name!r} references unknown source: {source!r}")
+    src = ctx.sources[source]
+    df = src["df"].copy()
+    version = src["version"]
+
+    excluded_counts: dict[str, int] = {}
+    mask = pd.Series(True, index=df.index)
+    for i, flt in enumerate(pop_config.get("filters", [])):
+        fmask = _apply_filter(df, flt, ctx)
+        newly_excluded = int((mask & ~fmask).sum())
+        excluded_counts[_describe_filter(flt, i)] = newly_excluded
+        mask = mask & fmask
+
+    df = df[mask].reset_index(drop=True)
+    df, counters = apply_derivations(df, pop_config.get("derive"), ctx)
+
+    amount_col = pop_config.get("amount_column")
+    date_col = pop_config.get("date_column")
+
+    amount = None
+    if amount_col:
+        amount = float(df[amount_col].sum()) if len(df) and amount_col in df.columns else 0.0
+
+    min_date = max_date = None
+    if date_col and date_col in df.columns and len(df):
+        dates = pd.to_datetime(df[date_col])
+        if dates.notna().any():
+            min_date = dates.min().date().isoformat()
+            max_date = dates.max().date().isoformat()
+
+    return PopulationResult(
+        name=name,
+        source=source,
+        source_version=version,
+        df=df,
+        rows=len(df),
+        amount=amount,
+        min_date=min_date,
+        max_date=max_date,
+        amount_column=amount_col,
+        date_column=date_col,
+        excluded_counts=excluded_counts,
+        derivation_counters=counters,
+    )
+
+
+def build_populations(
+    populations_config: dict[str, dict], ctx: PopulationContext
+) -> dict[str, PopulationResult]:
+    return {name: build_population(name, cfg, ctx) for name, cfg in populations_config.items()}

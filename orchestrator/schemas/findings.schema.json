@@ -1,0 +1,47 @@
+{
+  "type": "object",
+  "properties": {
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "string"},
+          "test_id": {"type": "string"},
+          "title": {"type": "string"},
+          "trigger": {"type": "string"},
+          "severity": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "properties": {
+                "when": {"type": "string"},
+                "then": {"type": "string"},
+                "else": {"type": "string"}
+              },
+              "additionalProperties": false
+            }
+          },
+          "metrics_cited": {"type": "array", "items": {"type": "string"}},
+          "observation": {"type": "string"},
+          "recommendation": {"type": "string"},
+          "management_questions": {"type": "array", "items": {"type": "string"}}
+        },
+        "required": [
+          "id",
+          "test_id",
+          "title",
+          "trigger",
+          "severity",
+          "metrics_cited",
+          "observation",
+          "recommendation"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["findings"],
+  "additionalProperties": false
+}
