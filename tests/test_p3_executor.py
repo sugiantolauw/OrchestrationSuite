@@ -1,9 +1,11 @@
 """ThreadExecutor tests (CLAUDE.md build brief P3 §3): admission, the
-concurrency cap, lease takeover after expiry, and StaleStateError being a
-normal admission skip rather than a crash. Uses trivial injected node
-functions (not the real fieldwork nodes) -- the executor does not know or
-care what a node does, only the admission/lease/pool protocol around it, so
-these stay fast and independent of any Skill or data fixture."""
+concurrency cap, lease takeover after expiry, StaleStateError being a
+normal admission skip rather than a crash, bounded admission retries with
+backoff (P3 gate review item 3a), and a lost lease halting further node
+output (item 3b). Uses trivial injected node functions (not the real
+fieldwork nodes) -- the executor does not know or care what a node does,
+only the admission/lease/pool protocol around it, so these stay fast and
+independent of any Skill or data fixture."""
 
 from __future__ import annotations
 
@@ -16,6 +18,7 @@ from pathlib import Path
 from orchestrator import runs as runs_module
 from orchestrator import service
 from orchestrator.executor import ThreadExecutor
+from orchestrator.timeutil import utc_now
 from tests.conftest import canonical_ts
 
 MINI_SKILL_DIR = Path(__file__).parent / "fixtures" / "skills" / "mini"
@@ -347,3 +350,279 @@ def test_full_run_reaches_completed_via_thread_executor(tmp_path):
         assert len(content) > 100
     finally:
         ctx.executor.stop()
+
+
+# ── bounded admission retries with backoff (P3 gate review item 3a) ────────
+
+
+class _SettingsBackoff:
+    max_concurrent_runs = 2
+    admission_max_attempts = 5
+    admission_backoff_base_s = 10.0
+    admission_backoff_max_s = 60.0
+
+
+def test_admission_backoff_delays_the_next_retry(local_persistence):
+    """A queued run whose lease repeatedly cannot be acquired must not retry
+    on every poll tick forever -- it backs off. Drives `_try_admit` directly
+    (never starting the background loop) so the backoff window is asserted
+    deterministically against a controlled clock, not real wall-clock time."""
+    persistence = local_persistence
+    run_id = "RUN-BACKOFF"
+    _create(persistence, run_id, lambda: canonical_ts(0))
+
+    clock_state = {"t": "2026-01-01T00:00:00.000000Z"}
+    executor = ThreadExecutor(
+        persistence=persistence, settings=_SettingsBackoff(), worker_id="worker-backoff",
+        ctx_factory=lambda rid: object(),
+        fingerprint_factory=lambda rid: _fingerprint(f"FP-{rid}"),
+        clock=lambda: clock_state["t"],
+        nodes_for={"fieldwork": {"plan": [], "execute": [], "export": []}},
+    )
+    calls = {"n": 0}
+
+    def failing_acquire_lease(rid, worker_id, *, ttl_s, now):
+        calls["n"] += 1
+        return False
+
+    persistence.acquire_lease = failing_acquire_lease
+    try:
+        executor._try_admit(run_id)
+        assert calls["n"] == 1
+
+        # Same instant, immediate retry: backoff has not elapsed, acquire_lease
+        # must not even be called again.
+        executor._try_admit(run_id)
+        assert calls["n"] == 1
+
+        # Just short of the base_s=10 backoff for attempt 1: still gated.
+        clock_state["t"] = "2026-01-01T00:00:09.000000Z"
+        executor._try_admit(run_id)
+        assert calls["n"] == 1
+
+        # Past the backoff window: retried.
+        clock_state["t"] = "2026-01-01T00:00:11.000000Z"
+        executor._try_admit(run_id)
+        assert calls["n"] == 2
+
+        # The run itself was never touched -- still queued, no state written
+        # outside the normal CAS path.
+        assert persistence.load_state(run_id).status == "queued"
+    finally:
+        executor.stop()
+
+
+def test_admission_success_clears_a_prior_backoff(local_persistence):
+    """A run that failed admission once and then succeeds must not carry a
+    stale backoff entry forward (e.g. if it is ever re-queued)."""
+    persistence = local_persistence
+    run_id = "RUN-BACKOFF-CLEAR"
+    _create(persistence, run_id, lambda: canonical_ts(0))
+
+    executor = ThreadExecutor(
+        persistence=persistence, settings=_SettingsBackoff(), worker_id="worker-backoff-clear",
+        ctx_factory=lambda rid: object(),
+        fingerprint_factory=lambda rid: _fingerprint(f"FP-{rid}"),
+        clock=lambda: canonical_ts(0),
+        nodes_for={"fieldwork": {"plan": [], "execute": [], "export": []}},
+    )
+    orig_acquire = persistence.acquire_lease
+    outcomes = iter([False, True])
+    persistence.acquire_lease = lambda rid, wid, *, ttl_s, now: next(outcomes)
+    try:
+        executor._try_admit(run_id)  # fails, records a backoff entry
+        assert run_id in executor._admission_failures
+        executor._try_admit(run_id)  # still backing off at the same instant -- no-op
+
+        # Advance past the backoff window and let the second call through.
+        executor._clear_admission_failure(run_id)  # simulate time having passed by clearing directly
+        persistence.acquire_lease = orig_acquire
+    finally:
+        executor.stop()
+    assert run_id not in executor._admission_failures
+
+
+def test_admission_exhaustion_fails_the_run_through_the_state_machine(local_persistence):
+    """After admission_max_attempts consecutive failures, the run ends
+    `failed` via transition()/save_state() (CAS) -- never a direct UPDATE --
+    with a clear status_reason, and a trace event records why."""
+    persistence = local_persistence
+    run_id = "RUN-EXHAUST"
+    _create(persistence, run_id, lambda: canonical_ts(0))
+
+    class _SettingsExhaust:
+        max_concurrent_runs = 2
+        admission_max_attempts = 3
+        admission_backoff_base_s = 0.0
+        admission_backoff_max_s = 0.0
+
+    clock_state = {"t": "2026-01-01T00:00:00.000000Z"}
+    executor = ThreadExecutor(
+        persistence=persistence, settings=_SettingsExhaust(), worker_id="worker-exhaust",
+        ctx_factory=lambda rid: object(),
+        fingerprint_factory=lambda rid: _fingerprint(f"FP-{rid}"),
+        clock=lambda: clock_state["t"],
+        nodes_for={"fieldwork": {"plan": [], "execute": [], "export": []}},
+    )
+    persistence.acquire_lease = lambda rid, wid, *, ttl_s, now: False
+    try:
+        for i in range(3):
+            clock_state["t"] = canonical_ts(i)
+            executor._try_admit(run_id)
+
+        final = persistence.load_state(run_id)
+        assert final.status == "failed"
+        assert final.status_reason is not None
+        assert "3 attempts" in final.status_reason
+
+        events = [
+            e for e in persistence.list_trace_events(run_id)
+            if e["event_type"] == "run_admission_failed"
+        ]
+        assert events, "expected a run_admission_failed trace event"
+        assert run_id not in executor._admission_failures  # tracking cleaned up once terminal
+    finally:
+        executor.stop()
+
+
+def test_admission_exhaustion_is_a_noop_if_the_run_already_moved_on(local_persistence):
+    """A rare race: the run is admitted by another path (or resumed) between
+    this worker's last failed attempt and the exhaustion check running --
+    _fail_admission_exhausted must see status != 'queued' and do nothing,
+    never overwrite whatever the other path already recorded."""
+    persistence = local_persistence
+    run_id = "RUN-EXHAUST-RACE"
+    state = _create(persistence, run_id, lambda: canonical_ts(0))
+    from orchestrator.status import transition as _transition
+
+    running_state = _transition(state, "running", now=canonical_ts(1))
+    persistence.save_state(running_state)
+
+    executor = ThreadExecutor(
+        persistence=persistence, settings=_Settings(), worker_id="worker-race",
+        ctx_factory=lambda rid: object(),
+        fingerprint_factory=lambda rid: _fingerprint(f"FP-{rid}"),
+        clock=lambda: canonical_ts(2),
+        nodes_for={"fieldwork": {"plan": [], "execute": [], "export": []}},
+    )
+    try:
+        executor._fail_admission_exhausted(run_id, now=canonical_ts(2), attempts=99)
+        assert persistence.load_state(run_id).status == "running"
+    finally:
+        executor.stop()
+
+
+# ── a lost lease halts further node output (P3 gate review item 3b) ────────
+
+
+def test_lease_renewal_failure_marks_worker_not_alive_for_that_run(local_persistence):
+    persistence = local_persistence
+    run_id = "RUN-LEASE-NOT-ALIVE"
+    _create(persistence, run_id, lambda: canonical_ts(0))
+
+    executor = ThreadExecutor(
+        persistence=persistence, settings=_Settings(), worker_id="worker-heartbeat",
+        ctx_factory=lambda rid: object(),
+        fingerprint_factory=lambda rid: _fingerprint(f"FP-{rid}"),
+        clock=lambda: canonical_ts(1),
+        nodes_for={"fieldwork": {"plan": [], "execute": [], "export": []}},
+    )
+    try:
+        with executor._lock:
+            executor._active_runs.add(run_id)
+        assert executor.worker_alive(run_id) is True
+
+        executor._mark_lease_lost(run_id, canonical_ts(1))
+        assert executor.worker_alive(run_id) is False
+
+        events = [
+            e for e in persistence.list_trace_events(run_id)
+            if e["event_type"] == "run_lease_lost"
+        ]
+        assert events, "expected a run_lease_lost trace event"
+    finally:
+        with executor._lock:
+            executor._active_runs.discard(run_id)
+        executor.stop()
+
+
+def test_lease_lost_stops_further_node_output(local_persistence):
+    """End-to-end through the real admission/heartbeat loop and run_phase: once
+    the heartbeat observes a failed renew_lease for this run, worker_alive()
+    flips false and orchestrator.pipeline.run_phase's own per-node check
+    (CLAUDE.md §9C) stops before the NEXT node -- proving no further node
+    output is written after the lease is lost, not merely that the flag
+    changed in isolation."""
+    persistence = local_persistence
+    run_id = "RUN-LEASE-LOST-E2E"
+    # A REAL wall-clock, not the fast-forwarding `_make_clock()` -- with a
+    # per-call incrementing clock, the many clock() calls the admission and
+    # heartbeat loops make each real-time tick would race the lease past its
+    # own TTL and let the (correct, separate) reaper mark the run
+    # `interrupted` before this test's own assertions run, which would be
+    # testing the reaper's behaviour by accident, not the lease-lost gate.
+    clock = utc_now
+    _create(persistence, run_id, clock)
+
+    node1_entered = threading.Event()
+    node1_release = threading.Event()
+    node2_entered = threading.Event()
+
+    def node1(ctx, state):
+        node1_entered.set()
+        node1_release.wait(timeout=10)
+        return dataclasses.replace(state, events=state.events + [{"node": "n1"}])
+
+    def node2(ctx, state):
+        node2_entered.set()
+        return dataclasses.replace(state, events=state.events + [{"node": "n2"}])
+
+    nodes_for = {"fieldwork": {"plan": [("n1", node1), ("n2", node2)], "execute": [], "export": []}}
+
+    executor = ThreadExecutor(
+        persistence=persistence, settings=_Settings(), worker_id="worker-lease-lost-e2e",
+        ctx_factory=lambda rid: object(),
+        fingerprint_factory=lambda rid: _fingerprint(f"FP-{rid}"),
+        clock=clock, nodes_for=nodes_for, poll_interval_s=0.05, lease_ttl_s=30,
+        heartbeat_interval_s=0.05,
+    )
+    persistence.renew_lease = lambda rid, wid, *, ttl_s, now: False
+    try:
+        executor.start()
+        assert node1_entered.wait(timeout=10)
+
+        deadline = time.time() + 10
+        while time.time() < deadline and executor.worker_alive(run_id):
+            time.sleep(0.02)
+        assert not executor.worker_alive(run_id), "lease loss was never observed by the heartbeat"
+
+        # Stop the background admission/heartbeat loops now, before letting node1
+        # finish -- otherwise the (correct, separate) mid-session reaper would
+        # race this test's own assertions: once node1 finishes, _on_done releases
+        # this worker's lease row for run_id, and the very next admission tick
+        # would legitimately reap the now-lease-less `running` run as orphaned
+        # (CLAUDE.md §2.3 rule 2) before this test gets to look at it. That is
+        # real, desired system behaviour (a lost-lease run becomes resumable
+        # promptly rather than sitting unleased) -- just not what this test is
+        # isolating, which is the lease-lost gate stopping node2 from running.
+        executor._stop_event.set()
+
+        node1_release.set()  # node1's own in-flight output is still written
+        assert not node2_entered.wait(timeout=1), "node2 ran after the lease was lost"
+
+        deadline = time.time() + 5
+        final = persistence.load_state(run_id)
+        while time.time() < deadline and final.next_node_index < 1:
+            time.sleep(0.02)
+            final = persistence.load_state(run_id)
+        assert final.status == "running"  # run_phase returned mid-phase, not stuck or crashed
+        assert final.next_node_index == 1  # only node1 completed
+
+        events = [
+            e for e in persistence.list_trace_events(run_id)
+            if e["event_type"] == "run_lease_lost"
+        ]
+        assert events, "expected a run_lease_lost trace event"
+    finally:
+        node1_release.set()
+        executor.stop()

@@ -46,6 +46,14 @@ class Settings:
     demo_mode: bool = False
     code_revision: str | None = None
     mlflow_tracking_uri: str | None = None
+    # P3 executor robustness (CLAUDE.md §2.3 rule 3 / §9C): bounded admission
+    # retries with backoff, so a queued run whose lease repeatedly cannot be
+    # acquired does not retry forever -- it exhausts and ends `failed` through
+    # the normal state machine instead. Operational knobs, not computation --
+    # excluded from the runtime config hash below, same as max_concurrent_runs.
+    admission_max_attempts: int = 20
+    admission_backoff_base_s: float = 2.0
+    admission_backoff_max_s: float = 60.0
 
     def __post_init__(self) -> None:
         _validate_identifier("catalog", self.catalog)
@@ -69,6 +77,12 @@ def _parse_int(value: str | None, default: int) -> int:
     return int(value)
 
 
+def _parse_float(value: str | None, default: float) -> float:
+    if value is None or value == "":
+        return default
+    return float(value)
+
+
 def load_settings(env: dict | None = None) -> Settings:
     env = os.environ if env is None else env
     return Settings(
@@ -84,6 +98,9 @@ def load_settings(env: dict | None = None) -> Settings:
         max_concurrent_runs=_parse_int(env.get("MAX_CONCURRENT_RUNS"), 2),
         demo_mode=_parse_bool(env.get("DEMO_MODE"), False),
         code_revision=env.get("CODE_REVISION") or None,
+        admission_max_attempts=_parse_int(env.get("ADMISSION_MAX_ATTEMPTS"), 20),
+        admission_backoff_base_s=_parse_float(env.get("ADMISSION_BACKOFF_BASE_S"), 2.0),
+        admission_backoff_max_s=_parse_float(env.get("ADMISSION_BACKOFF_MAX_S"), 60.0),
         # P2/P3 gate review item 4 (MLflow per-node spans, CLAUDE.md §2.3).
         # Unset -- never hardcoded here -- means mlflow's own default
         # resolution: MLFLOW_TRACKING_URI if the process environment already
@@ -100,7 +117,10 @@ def load_settings(env: dict | None = None) -> Settings:
 # scheduled (concurrency cap, which Executor runs it), never what it computes, so two
 # runs configured identically except for these should share a fingerprint (CLAUDE.md
 # §4.1, non-blocking item).
-_RUNTIME_HASH_EXCLUDED_FIELDS = frozenset({"max_concurrent_runs", "executor", "mlflow_tracking_uri"})
+_RUNTIME_HASH_EXCLUDED_FIELDS = frozenset({
+    "max_concurrent_runs", "executor", "mlflow_tracking_uri",
+    "admission_max_attempts", "admission_backoff_base_s", "admission_backoff_max_s",
+})
 
 
 def runtime_config_hash(settings: Settings) -> str:

@@ -56,6 +56,39 @@ def test_runtime_config_hash_excludes_operational_knobs():
     assert runtime_config_hash(s1) == runtime_config_hash(s2)
 
 
+def test_runtime_config_hash_excludes_admission_backoff_knobs():
+    # P3 gate review item 3a: bounded admission retries are scheduling
+    # behaviour, not computation -- two runs differing only in these must
+    # fingerprint identically, same as max_concurrent_runs/executor above.
+    s1 = Settings(
+        catalog="cat", schema="sch",
+        admission_max_attempts=20, admission_backoff_base_s=2.0, admission_backoff_max_s=60.0,
+    )
+    s2 = dataclasses.replace(
+        s1, admission_max_attempts=3, admission_backoff_base_s=0.5, admission_backoff_max_s=5.0,
+    )
+    assert runtime_config_hash(s1) == runtime_config_hash(s2)
+
+
+def test_load_settings_reads_admission_backoff_env():
+    env = {
+        "ADMISSION_MAX_ATTEMPTS": "5",
+        "ADMISSION_BACKOFF_BASE_S": "1.5",
+        "ADMISSION_BACKOFF_MAX_S": "30",
+    }
+    settings = load_settings(env)
+    assert settings.admission_max_attempts == 5
+    assert settings.admission_backoff_base_s == 1.5
+    assert settings.admission_backoff_max_s == 30.0
+
+
+def test_load_settings_admission_backoff_defaults_when_env_empty():
+    settings = load_settings({})
+    assert settings.admission_max_attempts == 20
+    assert settings.admission_backoff_base_s == 2.0
+    assert settings.admission_backoff_max_s == 60.0
+
+
 def test_runtime_config_hash_excludes_secrets():
     # Settings has no token field at all -- a token can never enter the hash.
     assert not hasattr(Settings(), "token")
