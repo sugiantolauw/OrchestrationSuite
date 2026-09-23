@@ -87,3 +87,53 @@ class EngagementNotFound(Exception):
     def __init__(self, engagement_id: str):
         self.engagement_id = engagement_id
         super().__init__(f"engagement not found: {engagement_id!r}")
+
+
+class SkillVersionConflict(Exception):
+    def __init__(self, skill_id: str, version: str, existing_hash: str, new_hash: str):
+        self.skill_id = skill_id
+        self.version = version
+        self.existing_hash = existing_hash
+        self.new_hash = new_hash
+        super().__init__(
+            f"skill_version ({skill_id!r}, {version!r}) already recorded with content_hash "
+            f"{existing_hash!r}, cannot record different content_hash {new_hash!r}"
+        )
+
+
+class RiskStatusRegression(Exception):
+    def __init__(self, risk_id: str, from_status: str, to_status: str):
+        self.risk_id = risk_id
+        self.from_status = from_status
+        self.to_status = to_status
+        super().__init__(
+            f"risk {risk_id!r}: status cannot move backwards from {from_status!r} to {to_status!r}"
+        )
+
+
+class FindingNotFound(Exception):
+    def __init__(self, finding_id: str):
+        self.finding_id = finding_id
+        super().__init__(f"finding not found: {finding_id!r}")
+
+
+class InvalidReviewStateTransition(Exception):
+    def __init__(self, finding_id: str, from_state: str, to_state: str):
+        self.finding_id = finding_id
+        self.from_state = from_state
+        self.to_state = to_state
+        super().__init__(
+            f"finding {finding_id!r}: review_state cannot move from {from_state!r} to "
+            f"{to_state!r} (only forward, one step at a time, along "
+            f"draft -> prepared -> reviewed -> approved)"
+        )
+
+
+class NonDraftFindingWouldBeDeleted(Exception):
+    def __init__(self, run_id: str, finding_ids: list[str]):
+        self.run_id = run_id
+        self.finding_ids = list(finding_ids)
+        super().__init__(
+            f"write_findings(run_id={run_id!r}): {sorted(finding_ids)} are no longer in the "
+            f"new finding set but have review_state past 'draft' -- refusing to delete them"
+        )

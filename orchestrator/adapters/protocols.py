@@ -131,6 +131,55 @@ class PersistenceAdapter(Protocol):
     def list_engagements(self) -> list[dict]:
         ...
 
+    def record_skill_version(
+        self,
+        *,
+        skill_id: str,
+        version: str,
+        content_hash: str,
+        content: dict,
+        created_by: str,
+        now: str,
+        status: str = "draft",
+    ) -> dict:
+        ...
+
+    def get_skill_version(self, skill_id: str, version: str) -> dict | None:
+        ...
+
+    def list_skill_versions(self, skill_id: str) -> list[dict]:
+        ...
+
+    def upsert_risks(self, risks: list[dict], *, now: str) -> None:
+        ...
+
+    def upsert_controls(self, controls: list[dict], *, now: str) -> None:
+        ...
+
+    def list_risks(self, engagement_id: str | None = None) -> list[dict]:
+        ...
+
+    def list_controls(self, engagement_id: str | None = None) -> list[dict]:
+        ...
+
+    def write_findings(
+        self,
+        run_id: str,
+        findings: list[dict],
+        *,
+        engagement_id: str | None,
+        skill_id: str | None,
+        skill_version: str | None,
+        now: str,
+    ) -> list[dict]:
+        ...
+
+    def list_findings(self, run_id: str) -> list[dict]:
+        ...
+
+    def set_finding_review_state(self, finding_id: str, *, to_state: str, actor: str, now: str) -> dict:
+        ...
+
 
 class PromptRepository(Protocol):
     def get_prompt(self, task: str, *, skill_id: str | None = None) -> str:
