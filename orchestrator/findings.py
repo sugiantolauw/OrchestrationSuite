@@ -26,13 +26,20 @@ def _format_template(template: str, metrics_cited: dict[str, dict]) -> str:
 def _select_severity(
     severity_rules: list[dict], metric_values: dict[str, Any], threshold_values: dict[str, Any]
 ) -> tuple[str, str, set[str]]:
+    """Walks the severity ladder, returning the rule that fires plus every
+    threshold CONSULTED getting there (B4): every `when` evaluated -- including
+    the ones that came back false before the rule that matched -- not just the
+    threshold(s) named by the winning rule. A bare `else` with nothing tested
+    before it consults none, which is exactly what marks it 'fixed' severity."""
+    consulted: set[str] = set()
     for rule in severity_rules:
         if "when" in rule:
             compiled = compile_expr(rule["when"])
+            consulted |= set(compiled.threshold_ids)
             if evaluate(compiled, metric_values, threshold_values):
-                return rule["then"], rule["when"], set(compiled.threshold_ids)
+                return rule["then"], rule["when"], consulted
         elif "else" in rule:
-            return rule["else"], "else", set()
+            return rule["else"], "else", consulted
     raise ValueError("no severity rule matched, and no 'else' entry was present")
 
 
@@ -78,10 +85,20 @@ def build_findings(
                     "pending_policy_confirmation": bool(provenance.get("pending_policy_confirmation", False)),
                 }
             )
-        analyst_set_severity = any(
-            r["id"] in severity_threshold_ids and r["provenance_type"] == "analyst-set"
-            for r in threshold_refs
-        )
+        # B4: severity_basis records whether the ladder consulted any threshold
+        # at all to reach its answer -- a bare `else` (or a `when` chain that
+        # never referenced `thresholds.*`) is 'fixed': the severity did not
+        # come from a number, so it is analyst-set BY DEFINITION, not by
+        # provenance lookup. Where thresholds WERE consulted, analyst_set is
+        # true unless every one of them carries provenance 'policy' -- one
+        # analyst-set threshold anywhere in the path that was walked is enough
+        # to mark the whole severity call analyst-set.
+        severity_basis = "threshold" if severity_threshold_ids else "fixed"
+        if severity_basis == "fixed":
+            analyst_set_severity = True
+        else:
+            consulted_refs = [r for r in threshold_refs if r["id"] in severity_threshold_ids]
+            analyst_set_severity = not all(r["provenance_type"] == "policy" for r in consulted_refs)
 
         test = test_lookup.get(rule["test_id"], {})
 
@@ -93,6 +110,7 @@ def build_findings(
                 "title": rule["title"],
                 "severity": severity,
                 "severity_rule": severity_rule_text,
+                "severity_basis": severity_basis,
                 "threshold_refs": threshold_refs,
                 "analyst_set_severity": analyst_set_severity,
                 "metrics_cited": metrics_cited,

@@ -102,25 +102,37 @@ def test_severity_selects_high_and_reports_threshold_refs():
 
 
 def test_severity_selects_medium_with_policy_threshold_not_analyst_set():
+    # B4: threshold_refs/severity consultation includes the High `when` that
+    # was evaluated and came back FALSE on the way to Medium -- high_threshold
+    # is analyst-set, so even though the Medium rule's own threshold
+    # (policy_threshold) is policy-provenance, the ladder as a whole touched
+    # an analyst-set number reaching this answer, so it is analyst-set.
     skill = _skill()
     metrics = {"hv_count": _metric(7, "count"), "hv_amount": _metric(500.0, "AUD")}
     findings = build_findings(skill, run_id="run-1", metrics=metrics)
     f = findings[0]
     assert f["severity"] == "Medium"
+    assert f["severity_basis"] == "threshold"
     threshold_ids = {r["id"] for r in f["threshold_refs"]}
-    assert threshold_ids == {"policy_threshold"}
-    assert f["analyst_set_severity"] is False
+    assert threshold_ids == {"high_threshold", "policy_threshold"}
+    assert f["analyst_set_severity"] is True
 
 
 def test_severity_falls_to_else_low():
+    # B4: the else was reached only after BOTH `when`s evaluated false, so
+    # both thresholds were consulted (severity_basis == 'threshold', not
+    # 'fixed' -- a bare else with nothing evaluated before it is the 'fixed'
+    # case, covered separately in test_g8_thresholds.py).
     skill = _skill()
     metrics = {"hv_count": _metric(1, "count"), "hv_amount": _metric(50.0, "AUD")}
     findings = build_findings(skill, run_id="run-1", metrics=metrics)
     f = findings[0]
     assert f["severity"] == "Low"
     assert f["severity_rule"] == "else"
-    assert f["threshold_refs"] == []
-    assert f["analyst_set_severity"] is False
+    assert f["severity_basis"] == "threshold"
+    threshold_ids = {r["id"] for r in f["threshold_refs"]}
+    assert threshold_ids == {"high_threshold", "policy_threshold"}
+    assert f["analyst_set_severity"] is True
 
 
 def test_template_formatting_by_unit():

@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import string
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
 
 from orchestrator.expr import compile_expr
+from orchestrator.findings import build_findings
 from orchestrator.skills import load_skill
 
 SKILL_DIR = Path(__file__).parent.parent / "skills" / "tne_exco"
@@ -113,5 +115,121 @@ def test_findings_with_analyst_set_matched_severity_are_labelled(tne_skill):
     for f in findings:
         for ref in f["threshold_refs"]:
             assert thresholds[ref["id"]]["provenance"]["type"] == ref["provenance_type"]
-        if f["analyst_set_severity"]:
-            assert any(r["provenance_type"] == "analyst-set" for r in f["threshold_refs"])
+        assert f["severity_basis"] in ("fixed", "threshold")
+        # B4: analyst_set_severity holds either because the severity ladder
+        # consulted no threshold at all (severity_basis == 'fixed' -- a bare
+        # else/fixed severity is analyst-set by definition, exercised directly
+        # against a minimal fixture below) or because a threshold consulted
+        # matches the not-all-policy rule (also exercised directly below).
+        # threshold_refs here mixes the trigger's own thresholds in, so it is
+        # not itself sufficient evidence either way against real Skill data.
+        if f["severity_basis"] == "fixed":
+            assert f["analyst_set_severity"] is True
+
+
+def _fake_skill(findings: list[dict]) -> SimpleNamespace:
+    thresholds = {
+        "policy_thr": {"value": 10, "unit": "count", "provenance": {"type": "policy", "reference": "Policy X §1"}},
+        "analyst_thr": {
+            "value": 5,
+            "unit": "count",
+            "provenance": {"type": "analyst-set", "pending_policy_confirmation": True},
+        },
+    }
+    return SimpleNamespace(
+        skill_id="SKILL-TEST",
+        thresholds=thresholds,
+        plan={"tests": []},
+        findings={"findings": findings},
+    )
+
+
+def test_severity_basis_fixed_for_a_bare_else_with_no_when_evaluated(tne_skill):
+    # B4: a severity ladder with no `when` at all never consults a threshold,
+    # so it is 'fixed' -- analyst-set by definition -- REGARDLESS of a policy
+    # threshold the finding's trigger happens to reference. Trigger thresholds
+    # must never leak into the severity_basis/analyst_set_severity decision.
+    skill = _fake_skill(
+        [
+            {
+                "id": "F_BARE_ELSE",
+                "test_id": "T_TEST",
+                "title": "Bare else",
+                "trigger": "m2 > thresholds.policy_thr",
+                "severity": [{"else": "Medium"}],
+                "metrics_cited": ["m2"],
+                "observation": "{m2}",
+            }
+        ]
+    )
+    metrics = {"m2": {"value": 20, "unit": "count", "source_ref": {}}}
+    findings = build_findings(skill, run_id="r1", metrics=metrics)
+    assert len(findings) == 1
+    f = findings[0]
+    assert f["severity"] == "Medium"
+    assert f["severity_basis"] == "fixed"
+    # analyst-set by definition, even though the trigger DID consult a
+    # policy-provenance threshold -- that consultation is the trigger's, not
+    # the severity ladder's, and threshold_refs (trigger ∪ severity) still
+    # carries it for display.
+    assert f["analyst_set_severity"] is True
+    assert [r["id"] for r in f["threshold_refs"]] == ["policy_thr"]
+
+
+def test_severity_basis_threshold_via_else_reached_after_a_false_when(tne_skill):
+    # B4: an `else` reached only after a `when` evaluated false still counted
+    # that `when`'s threshold as consulted -- severity_basis is 'threshold',
+    # and since the sole consulted threshold is policy-provenance,
+    # analyst_set_severity is False.
+    skill = _fake_skill(
+        [
+            {
+                "id": "F_ELSE_CONSULTED",
+                "test_id": "T_TEST",
+                "title": "Else after a false when",
+                "trigger": "m1 > 0",
+                "severity": [
+                    {"when": "m1 > thresholds.policy_thr", "then": "High"},
+                    {"else": "Low"},
+                ],
+                "metrics_cited": ["m1"],
+                "observation": "{m1}",
+            }
+        ]
+    )
+    metrics = {"m1": {"value": 1, "unit": "count", "source_ref": {}}}  # below policy_thr (10) -> else
+    findings = build_findings(skill, run_id="r1", metrics=metrics)
+    f = findings[0]
+    assert f["severity"] == "Low"
+    assert f["severity_basis"] == "threshold"
+    assert [r["id"] for r in f["threshold_refs"]] == ["policy_thr"]
+    assert f["analyst_set_severity"] is False
+
+
+def test_severity_basis_threshold_analyst_set_when_matched(tne_skill):
+    # An analyst-set threshold consulted by the rule that actually matched
+    # marks the severity analyst-set, same as the matched-rule case already
+    # covered by test_findings_with_analyst_set_matched_severity_are_labelled,
+    # but pinned here against the fake skill for a minimal repro.
+    skill = _fake_skill(
+        [
+            {
+                "id": "F_ANALYST_MATCHED",
+                "test_id": "T_TEST",
+                "title": "Analyst-set matched",
+                "trigger": "m3 > 0",
+                "severity": [
+                    {"when": "m3 > thresholds.analyst_thr", "then": "High"},
+                    {"else": "Low"},
+                ],
+                "metrics_cited": ["m3"],
+                "observation": "{m3}",
+            }
+        ]
+    )
+    metrics = {"m3": {"value": 99, "unit": "count", "source_ref": {}}}  # above analyst_thr (5) -> High
+    findings = build_findings(skill, run_id="r1", metrics=metrics)
+    f = findings[0]
+    assert f["severity"] == "High"
+    assert f["severity_basis"] == "threshold"
+    assert f["analyst_set_severity"] is True
