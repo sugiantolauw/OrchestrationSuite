@@ -1,0 +1,29 @@
+findings:
+  - id: T1
+    test_id: T1
+    title: High Value Claims
+    trigger: "hv_count > 0"
+    severity:
+      - when: "hv_count > thresholds.hv_high"
+        then: High
+      - else: Medium
+    metrics_cited: [hv_count, hv_amount]
+    observation: >
+      {hv_count} claims exceed the high-value threshold, totalling {hv_amount}.
+    recommendation: >
+      Review high-value claims for legitimacy.
+    management_questions:
+      - Why were these claims not flagged earlier?
+
+  - id: T2
+    test_id: T2
+    title: Claims Missing Register Match
+    trigger: "missing_count > 0"
+    severity:
+      - else: Low
+    metrics_cited: [missing_count, missing_pct]
+    observation: >
+      {missing_count} claims ({missing_pct}) have no matching register entry.
+    recommendation: >
+      Investigate unmatched claims.
+    management_questions: []

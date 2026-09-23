@@ -59,12 +59,25 @@ def _skill_content_hash(skill_dir: Path | None) -> str | None:
         p = skill_dir / name
         if p.is_file():
             entries.append((name, p.read_bytes()))
-    prompts_dir = skill_dir / "prompts"
-    if prompts_dir.is_dir():
-        for p in prompts_dir.rglob("*"):
-            if p.is_file():
-                entries.append((str(p.relative_to(skill_dir)), p.read_bytes()))
+    custom_py = skill_dir / "custom.py"
+    if custom_py.is_file():
+        entries.append(("custom.py", custom_py.read_bytes()))
+    # prompts/ and reference/ (Skill-authored prompt overrides and reference lookup
+    # tables, orchestrator/skills.py) are both part of a Skill's content: a change to
+    # either must change the run fingerprint just as a plan.yaml edit would.
+    for dirname in ("prompts", "reference"):
+        d = skill_dir / dirname
+        if d.is_dir():
+            for p in d.rglob("*"):
+                if p.is_file():
+                    entries.append((str(p.relative_to(skill_dir)), p.read_bytes()))
     return _hash_entries(entries)
+
+
+def skill_content_hash(skill_dir: Path | None) -> str | None:
+    """Public entry point for orchestrator.skills -- reuses the same hashing the run
+    fingerprint uses (CLAUDE.md P2a) rather than duplicating it."""
+    return _skill_content_hash(skill_dir)
 
 
 def _reference_data_hashes(reference_files: list[Path] | None) -> dict[str, str]:

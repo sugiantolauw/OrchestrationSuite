@@ -1,0 +1,25 @@
+{
+  "type": "object",
+  "additionalProperties": {
+    "type": "object",
+    "properties": {
+      "value": {},
+      "unit": {"type": "string"},
+      "description": {"type": "string"},
+      "used_by": {"type": "array", "items": {"type": "string"}},
+      "effective_date": {"type": "string"},
+      "provenance": {
+        "type": "object",
+        "properties": {
+          "type": {"type": "string", "enum": ["policy", "analyst-set"]},
+          "reference": {"type": "string"},
+          "pending_policy_confirmation": {"type": "boolean"}
+        },
+        "required": ["type", "pending_policy_confirmation"],
+        "additionalProperties": false
+      }
+    },
+    "required": ["value", "unit", "description", "used_by", "effective_date", "provenance"],
+    "additionalProperties": false
+  }
+}
