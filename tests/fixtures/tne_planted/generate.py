@@ -21,6 +21,7 @@ under `data/`.
 
 from __future__ import annotations
 
+import hashlib
 import random
 import sys
 from datetime import date, datetime, timedelta
@@ -67,6 +68,14 @@ FILLER_CITIES = ["Sydney", "Melbourne", "Brisbane", "Adelaide"]
 
 def _rng(seed: int) -> random.Random:
     return random.Random(seed)
+
+
+def _stable_seed_offset(source: str) -> int:
+    """N2 (CLAUDE.md build brief): `hash(source)` is salted per-process
+    (PYTHONHASHSEED) for str -- two runs of this generator, even with the
+    same `seed`, produced different background rows. sha256 has no such
+    salt, so this is stable across processes and Python versions."""
+    return int(hashlib.sha256(source.encode("utf-8")).hexdigest()[:8], 16) % 10_000
 
 
 def _rand_date(rng: random.Random, start: date = AUDIT_START, end: date = AUDIT_END) -> date:
@@ -249,7 +258,7 @@ def generate(plants_path: str | Path, out_dir: str | Path) -> dict[str, int]:
     row_counts: dict[str, int] = {}
 
     for source, builder in _BACKGROUND_BUILDERS.items():
-        rng = _rng(seed + hash(source) % 10_000)
+        rng = _rng(seed + _stable_seed_offset(source))
         columns = _contract_columns(source)
         n_bg = background_counts.get(source, 0)
 
