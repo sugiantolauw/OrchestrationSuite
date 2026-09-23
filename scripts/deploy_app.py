@@ -239,6 +239,14 @@ def main() -> None:
         "DBX_CATALOG": settings.catalog,
         "DBX_SCHEMA": settings.schema,
         "CODE_REVISION": code_revision,
+        # Part of the run fingerprint's runtime_config_hash (orchestrator/
+        # config.py) -- omitting it here made the deployed App's own
+        # runtime_config_hash differ from any caller's local one (app_name
+        # unset there, set here), so every fingerprint verify_fingerprint()
+        # does at admission failed with a spurious mismatch. Found live,
+        # driving a run against the deployed App's executor from a separate
+        # process (CLAUDE.md integration pass item 10).
+        "DBX_APP_NAME": app_name,
     }
     if settings.volume:
         env_vars["DBX_VOLUME"] = settings.volume
