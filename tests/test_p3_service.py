@@ -28,6 +28,13 @@ def _build_ctx(tmp_path: Path, *, worker_id: str = "worker-a") -> service.AppCon
         "ORCH_LOCAL_EXPORT_ROOT": str(tmp_path / "exports"),
         "ORCH_WORKER_ID": worker_id,
         "SKILLS_DIR": str(MINI_SKILL_DIR.parent),
+        # Pinned rather than derived from `git rev-parse HEAD` (the fallback
+        # in orchestrator.fingerprint._resolve_code_revision): several agents
+        # commit to this checkout concurrently, so HEAD can legitimately move
+        # between a run's creation and this test's later resume_run() call --
+        # a real drift the fingerprint SHOULD catch in production, but not one
+        # this test is exercising, so it is held fixed here.
+        "CODE_REVISION": "test-fixed-revision",
     }
     data_dir = tmp_path / "data"
     data_dir.mkdir(exist_ok=True)
