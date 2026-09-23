@@ -201,7 +201,10 @@ def build_app_context(env: dict | None = None) -> AppContext:
     # blocked by a tracing backend problem).
     from orchestrator.adapters.tracing_mlflow import MLflowTracingAdapter
 
-    tracing = MLflowTracingAdapter(tracking_uri=settings.mlflow_tracking_uri)
+    tracing_kwargs = {}
+    if settings.mlflow_experiment_path:
+        tracing_kwargs["experiment_name"] = settings.mlflow_experiment_path
+    tracing = MLflowTracingAdapter(tracking_uri=settings.mlflow_tracking_uri, **tracing_kwargs)
 
     if backend == "local":
         db_path = env.get("ORCH_LOCAL_DB") or str(REPO_ROOT / ".local" / "orchestrator.db")

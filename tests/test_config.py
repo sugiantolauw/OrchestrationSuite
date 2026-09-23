@@ -95,6 +95,25 @@ def test_runtime_config_hash_excludes_secrets():
     assert not hasattr(Settings(), "databricks_token")
 
 
+def test_runtime_config_hash_excludes_mlflow_settings():
+    # MLflow on the platform item (CLAUDE.md P2/P3 gate review): tracking
+    # URI/experiment path are operational -- where spans land, never what a
+    # run computes -- so two identically-configured runs differing only in
+    # these must fingerprint identically, same as executor/max_concurrent_runs.
+    s1 = Settings(catalog="cat", schema="sch", mlflow_tracking_uri="databricks", mlflow_experiment_path="/Shared/a")
+    s2 = dataclasses.replace(s1, mlflow_tracking_uri="sqlite:///x.db", mlflow_experiment_path="/Shared/b")
+    assert runtime_config_hash(s1) == runtime_config_hash(s2)
+
+
+def test_load_settings_reads_mlflow_experiment_path_env():
+    settings = load_settings({"MLFLOW_EXPERIMENT_PATH": "/Shared/ai-audit-analyst-audit-runs"})
+    assert settings.mlflow_experiment_path == "/Shared/ai-audit-analyst-audit-runs"
+
+
+def test_load_settings_mlflow_experiment_path_defaults_to_none_when_env_empty():
+    assert load_settings({}).mlflow_experiment_path is None
+
+
 def test_load_settings_reads_env_and_defaults():
     env = {
         "DBX_CATALOG": "cat1",

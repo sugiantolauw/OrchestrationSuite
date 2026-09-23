@@ -297,3 +297,60 @@ def test_mlflow_adapter_unavailable_is_a_documented_no_op(monkeypatch):
     assert adapter.start_run("RUN-1") == ""
     assert adapter.start_span(run_id="RUN-1", node_name="x") == ""
     adapter.end_span("", outcome="succeeded")  # no-op, must not raise
+
+
+def test_build_app_context_passes_mlflow_experiment_path_through(monkeypatch, tmp_path):
+    """MLflow-on-the-platform item (CLAUDE.md P2/P3 gate review): the
+    experiment name orchestrator.service.build_app_context constructs
+    MLflowTracingAdapter with must come from MLFLOW_EXPERIMENT_PATH when
+    set -- never left at the adapter's own generic, non-absolute-path
+    default, which Databricks-managed tracking rejects."""
+    import orchestrator.adapters.tracing_mlflow as tracing_mod
+    from orchestrator import service
+
+    captured = {}
+    real_init = tracing_mod.MLflowTracingAdapter.__init__
+
+    def _spy_init(self, *, tracking_uri=None, experiment_name=tracing_mod._DEFAULT_EXPERIMENT_NAME):
+        captured["experiment_name"] = experiment_name
+        captured["tracking_uri"] = tracking_uri
+        return real_init(self, tracking_uri=tracking_uri, experiment_name=experiment_name)
+
+    monkeypatch.setattr(tracing_mod.MLflowTracingAdapter, "__init__", _spy_init)
+
+    env = {
+        "ORCH_BACKEND": "local",
+        "ORCH_LOCAL_DB": str(tmp_path / "orch.db"),
+        "ORCH_LOCAL_DATA_ROOT": str(tmp_path),
+        "ORCH_LOCAL_EXPORT_ROOT": str(tmp_path / "exports"),
+        "MLFLOW_TRACKING_URI": None,  # unset -> unavailable, but the ctor is still called with our kwargs
+        "MLFLOW_EXPERIMENT_PATH": "/Shared/ai-audit-analyst-audit-runs",
+    }
+    env = {k: v for k, v in env.items() if v is not None}
+    service.build_app_context(env)
+
+    assert captured["experiment_name"] == "/Shared/ai-audit-analyst-audit-runs"
+
+
+def test_build_app_context_uses_adapter_default_when_experiment_path_unset(monkeypatch, tmp_path):
+    import orchestrator.adapters.tracing_mlflow as tracing_mod
+    from orchestrator import service
+
+    captured = {}
+    real_init = tracing_mod.MLflowTracingAdapter.__init__
+
+    def _spy_init(self, *, tracking_uri=None, experiment_name=tracing_mod._DEFAULT_EXPERIMENT_NAME):
+        captured["experiment_name"] = experiment_name
+        return real_init(self, tracking_uri=tracking_uri, experiment_name=experiment_name)
+
+    monkeypatch.setattr(tracing_mod.MLflowTracingAdapter, "__init__", _spy_init)
+
+    env = {
+        "ORCH_BACKEND": "local",
+        "ORCH_LOCAL_DB": str(tmp_path / "orch.db"),
+        "ORCH_LOCAL_DATA_ROOT": str(tmp_path),
+        "ORCH_LOCAL_EXPORT_ROOT": str(tmp_path / "exports"),
+    }
+    service.build_app_context(env)
+
+    assert captured["experiment_name"] == tracing_mod._DEFAULT_EXPERIMENT_NAME

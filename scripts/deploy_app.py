@@ -18,7 +18,9 @@ What it does, in order (safe to re-run):
      USE SCHEMA + SELECT on <catalog>.tne_source; USE SCHEMA + SELECT +
      MODIFY + CREATE TABLE on <catalog>.<DBX_SCHEMA>; READ VOLUME +
      WRITE VOLUME on the exports Volume (creating <catalog>.<DBX_SCHEMA>.files
-     first if DBX_VOLUME points at it and it does not exist yet).
+     first if DBX_VOLUME points at it and it does not exist yet); CAN_MANAGE
+     on its MLflow experiment (MLFLOW_EXPERIMENT_PATH, created first if it
+     does not exist yet).
   6. Deploys the uploaded source and waits for the deployment to succeed.
   7. Prints the App URL and deployment id.
 
@@ -247,6 +249,42 @@ def _grant_all(w, *, catalog: str, schema: str, principal: str, dbx_volume: str 
                   "skipping the volume grant; grant it manually.")
 
 
+def _ensure_mlflow_experiment_permissions(w, experiment_path: str, principal: str) -> None:
+    """Grants the App's service principal CAN_MANAGE on its own MLflow
+    experiment (CLAUDE.md P2/P3 gate review, MLflow-on-the-platform item) --
+    the App logs a run + nested spans per pipeline run (orchestrator/adapters/
+    tracing_mlflow.py) and needs write access to the experiment
+    MLFLOW_EXPERIMENT_PATH now points it at. Creates the experiment first if
+    it does not exist yet (a fresh MLFLOW_EXPERIMENT_PATH the App has never
+    logged to), since permissions can only be granted on a real experiment_id.
+    Uses update_permissions (a merge/PATCH over the ACL), never
+    set_permissions (which REPLACES the whole ACL and could silently drop
+    the deploying user's own access) -- the same additive-grant shape
+    _grant_all already uses for Unity Catalog via w.grants.update."""
+    from databricks.sdk.errors import NotFound, ResourceAlreadyExists
+    from databricks.sdk.service.ml import ExperimentAccessControlRequest, ExperimentPermissionLevel
+
+    try:
+        experiment = w.experiments.get_by_name(experiment_path)
+        experiment_id = experiment.experiment.experiment_id
+    except NotFound:
+        try:
+            experiment_id = w.experiments.create_experiment(name=experiment_path).experiment_id
+            print(f"Created MLflow experiment {experiment_path!r}.")
+        except ResourceAlreadyExists:
+            experiment_id = w.experiments.get_by_name(experiment_path).experiment.experiment_id
+
+    w.experiments.update_permissions(
+        experiment_id,
+        access_control_list=[
+            ExperimentAccessControlRequest(
+                service_principal_name=principal, permission_level=ExperimentPermissionLevel.CAN_MANAGE,
+            )
+        ],
+    )
+    print(f"Granted CAN_MANAGE on MLflow experiment {experiment_path!r} ({experiment_id}) to {principal}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--app-name", default=None, help="Overrides DBX_APP_NAME.")
@@ -281,6 +319,14 @@ def main() -> None:
         # DATABRICKS_CLIENT_ID/SECRET, never a value from this file.
         "DBX_APP_NAME": app_name,
         "DATABRICKS_HOST": settings.host,
+        # MLflow on the platform (CLAUDE.md P2/P3 gate review): the deployed
+        # App always uses Databricks-managed tracking, with an experiment
+        # path derived from app_name (never a literal workspace name, CLAUDE.md
+        # §3 non-negotiable 16) -- Databricks-managed tracking REQUIRES an
+        # absolute workspace path, which the adapter's own generic fallback
+        # name is not.
+        "MLFLOW_TRACKING_URI": "databricks",
+        "MLFLOW_EXPERIMENT_PATH": f"/Shared/{app_name}-audit-runs",
     }
     if settings.volume:
         env_vars["DBX_VOLUME"] = settings.volume
@@ -321,6 +367,8 @@ def main() -> None:
             print(f"  USE SCHEMA, SELECT, MODIFY, CREATE TABLE on {settings.catalog}.{settings.schema}")
             if settings.volume:
                 print(f"  READ VOLUME, WRITE VOLUME on the volume named by {settings.volume}")
+            print(f"  CAN_MANAGE on MLflow experiment {env_vars['MLFLOW_EXPERIMENT_PATH']!r} "
+                  f"(created first if it does not exist)")
             return
 
         me = w.current_user.me().user_name
@@ -340,6 +388,7 @@ def main() -> None:
             raise SystemExit(f"App {app_name!r} has no service principal yet — try again once it is provisioned.")
 
         _grant_all(w, catalog=settings.catalog, schema=settings.schema, principal=principal, dbx_volume=settings.volume)
+        _ensure_mlflow_experiment_permissions(w, env_vars["MLFLOW_EXPERIMENT_PATH"], principal)
 
         from databricks.sdk.service.apps import AppDeployment
 

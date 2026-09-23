@@ -46,6 +46,7 @@ class Settings:
     demo_mode: bool = False
     code_revision: str | None = None
     mlflow_tracking_uri: str | None = None
+    mlflow_experiment_path: str | None = None
     # P3 executor robustness (CLAUDE.md §2.3 rule 3 / §9C): bounded admission
     # retries with backoff, so a queued run whose lease repeatedly cannot be
     # acquired does not retry forever -- it exhausts and ends `failed` through
@@ -110,6 +111,17 @@ def load_settings(env: dict | None = None) -> Settings:
         # through the environment like every other workspace-specific value
         # (CLAUDE.md §7/non-negotiable 16).
         mlflow_tracking_uri=env.get("MLFLOW_TRACKING_URI") or None,
+        # MLflow experiment (CLAUDE.md P2/P3 gate review, MLflow-on-the-
+        # platform item): Databricks-managed tracking (MLFLOW_TRACKING_URI=
+        # databricks) requires the experiment name to be an ABSOLUTE
+        # workspace path (e.g. "/Shared/<app>-audit-runs") -- the adapter's
+        # own hardcoded default ("orchestrator-audit-runs") is not one. Unset
+        # here means the adapter falls back to that generic default, which
+        # is fine for a non-Databricks tracking URI (a local sqlite store in
+        # tests) where path-ness does not matter; a real deployment always
+        # sets this explicitly (scripts/deploy_app.py derives it from
+        # DBX_APP_NAME, never hardcoded here -- CLAUDE.md §7/NN16).
+        mlflow_experiment_path=env.get("MLFLOW_EXPERIMENT_PATH") or None,
     )
 
 
@@ -118,7 +130,7 @@ def load_settings(env: dict | None = None) -> Settings:
 # runs configured identically except for these should share a fingerprint (CLAUDE.md
 # §4.1, non-blocking item).
 _RUNTIME_HASH_EXCLUDED_FIELDS = frozenset({
-    "max_concurrent_runs", "executor", "mlflow_tracking_uri",
+    "max_concurrent_runs", "executor", "mlflow_tracking_uri", "mlflow_experiment_path",
     "admission_max_attempts", "admission_backoff_base_s", "admission_backoff_max_s",
 })
 
