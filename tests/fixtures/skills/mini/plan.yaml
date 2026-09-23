@@ -43,6 +43,7 @@ tests:
       metrics:
         missing_count: {kind: count}
         missing_pct: {kind: pct_of_population, unit: "%"}
+        missing_amount: {kind: sum, column: Amount, unit: AUD}
 
   - test_id: T3
     control_id: CTL-3

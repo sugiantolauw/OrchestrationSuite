@@ -68,6 +68,41 @@ def test_full_run_against_real_synthetic_data(tmp_path):
         for source, rec in payload["reconciliation"].items():
             assert rec["variance"] == 0, f"{source}: {rec}"  # G6, real data
 
+        # CLAUDE.md P2/P3 gate review item 1: every monetary finding's
+        # exposure_amount must be consistent with the amount metric(s) it
+        # cites -- the regression this guards against (RUN-AE7BB758A9B9,
+        # T5.2 duplicate claims) is that a SEPARATE row/group re-derivation
+        # of exposure disagreed with the finding's own observation text.
+        # "Consistent" means: for a finding with a declared amount metric,
+        # exposure_amount equals the sum of that finding's own cited
+        # additive-AUD metric(s), to the cent.
+        from orchestrator.skills import load_skill, plan_test_amount_metrics
+
+        tne_skill = load_skill(REPO_ROOT / "skills" / "tne_exco")
+        amount_metrics_by_test_id = plan_test_amount_metrics(tne_skill.plan["tests"])
+        monetary_findings_checked = 0
+        for f in payload["findings"]:
+            test_id = f.get("test_id") or ""
+            declared = set()
+            for tid, names in amount_metrics_by_test_id.items():
+                if tid == test_id or tid.startswith(f"{test_id}_"):
+                    declared |= names
+            cited_amount_names = declared & set(f.get("metrics_cited") or {})
+            if not cited_amount_names:
+                assert f["exposure_amount"] is None, f"{f['finding_id']}: non-monetary but exposure_amount set"
+                continue
+            monetary_findings_checked += 1
+            expected = round(
+                sum(f["metrics_cited"][n]["value"] for n in cited_amount_names
+                    if f["metrics_cited"][n].get("value") is not None),
+                2,
+            )
+            assert f["exposure_amount"] == expected, (
+                f"{f['finding_id']} ({test_id}): exposure_amount {f['exposure_amount']} != "
+                f"sum of its own cited amount metric(s) {sorted(cited_amount_names)} = {expected}"
+            )
+        assert monetary_findings_checked > 0, "no monetary SKILL-001 finding fired on this data -- test is not exercising anything"
+
         # CLAUDE.md build brief P4 perf fix: get_run_frames on a snapshot-
         # backed run reads a few small Parquet files instead of re-reading
         # every full bound source (~64s locally for this real 92,798-row

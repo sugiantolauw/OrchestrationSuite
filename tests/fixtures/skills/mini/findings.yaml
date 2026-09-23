@@ -21,9 +21,9 @@ findings:
     trigger: "missing_count > 0"
     severity:
       - else: Low
-    metrics_cited: [missing_count, missing_pct]
+    metrics_cited: [missing_count, missing_pct, missing_amount]
     observation: >
-      {missing_count} claims ({missing_pct}) have no matching register entry.
+      {missing_count} claims ({missing_pct}) have no matching register entry, totalling {missing_amount}.
     recommendation: >
       Investigate unmatched claims.
     management_questions: []

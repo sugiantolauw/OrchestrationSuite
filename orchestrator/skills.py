@@ -217,6 +217,49 @@ def plan_test_flags(plan_tests: list[dict]) -> list[dict]:
     return entries
 
 
+# Metric `kind`s whose value is an additive dollar figure (a running total the
+# primitive built up), as opposed to a ceiling/count/rate. Only these, paired
+# with `unit: AUD`, name a genuine "amount at risk" -- e.g. `daily_over_max_*`
+# is `kind: max` with `unit: AUD` too (T6.1d's worst single day), and summing
+# it into exposure alongside `daily_over_amount_*` would double-count.
+_ADDITIVE_AMOUNT_METRIC_KINDS = {"sum", "value", "excess", "sum_where"}
+
+
+def plan_test_amount_metrics(plan_tests: list[dict]) -> dict[str, set[str]]:
+    """Flattens plan.yaml's `tests` into {test_id: {amount metric names}} --
+    every metric a test's primitive declares with an additive dollar `kind`
+    (CLAUDE.md P2/P3 gate review item 1: a finding's `exposure_amount` must be
+    the sum of its OWN cited amount metric(s), the same number its observation
+    text renders -- never a value re-derived from raw rows by a SEPARATE piece
+    of exposure-de-duplication logic that can (and did, for T5.2) disagree
+    with what the primitive itself computed. duplicate_detection's
+    `duplicate_amount` is "sum of extra lines beyond the first in each
+    group" (spec T5.2) -- a shape no generic row/group summation can
+    reconstruct without reproducing that exact rule, whereas reading the
+    metric the primitive already computed is correct by construction for
+    every primitive, present or future, with no per-primitive special case
+    here.
+
+    Shared by orchestrator.nodes.fieldwork.prioritise, so a finding's
+    exposure is always drawn from the identical metric set its findings.yaml
+    rule cites via `metrics_cited` (validate_skill enforces every
+    metrics_cited name is one of these test's own declared metrics, so this
+    is a subset of -- and only ever narrower than -- what the finding
+    actually renders in prose)."""
+    out: dict[str, set[str]] = {}
+    for t in plan_tests:
+        test_id = t["test_id"]
+        metrics_spec = (t.get("params") or {}).get("metrics") or {}
+        names = {
+            name
+            for name, spec in metrics_spec.items()
+            if spec.get("unit") == "AUD" and spec.get("kind") in _ADDITIVE_AMOUNT_METRIC_KINDS
+        }
+        if names:
+            out[test_id] = names
+    return out
+
+
 def _walk_collect(obj: Any, key: str, out: set[str]) -> None:
     if isinstance(obj, dict):
         for k, v in obj.items():

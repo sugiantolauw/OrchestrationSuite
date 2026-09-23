@@ -131,7 +131,11 @@ def test_to_ui_payload_shape_matches_app_py_metric_keys(tmp_path: Path, mini_ski
     payload = to_ui_payload(result, audit_period_label="01 Jan 2025 - 31 Jan 2025")
 
     assert payload["audit_period"] == "01 Jan 2025 - 31 Jan 2025"
-    assert set(payload["metrics"]) == {"hv_count", "hv_amount", "missing_count", "missing_pct"}
+    # missing_amount (CLAUDE.md P2/P3 gate review item 1): added to the mini
+    # fixture's T2 so it remains a monetary finding under
+    # orchestrator.nodes.fieldwork.prioritise's metric-driven exposure rule --
+    # see tests/test_exposure_dedup.py's module docstring.
+    assert set(payload["metrics"]) == {"hv_count", "hv_amount", "missing_count", "missing_pct", "missing_amount"}
     # app.py's compute_evidence_payload metrics are {value, unit, source_file}
     # dicts (source_ref is this engine's addition, carrying NN10 provenance).
     for name, metric in payload["metrics"].items():

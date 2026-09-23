@@ -36,7 +36,7 @@ from orchestrator.findings import build_findings
 from orchestrator.frames import build_row_snapshots, frame_parquet_bytes, sha256_bytes
 from orchestrator.nodes.context import NodeContext
 from orchestrator.signoff_policy import SELF_APPROVED_LABEL
-from orchestrator.skills import plan_test_flags
+from orchestrator.skills import plan_test_amount_metrics, plan_test_flags
 from orchestrator.state import RunState
 
 _SEVERITY_ORDER = {"High": 0, "Medium": 1, "Low": 2}
@@ -359,46 +359,85 @@ def _flags_for_test_id(flags_by_test_id: dict[str, set[str]], test_id: str) -> s
     return flags
 
 
+def _amount_metrics_for_test_id(amount_metrics_by_test_id: dict[str, set[str]], test_id: str) -> set[str]:
+    # Same test_id-prefix union as _flags_for_test_id above, over
+    # orchestrator.skills.plan_test_amount_metrics instead of flags.
+    names: set[str] = set()
+    for tid, nset in amount_metrics_by_test_id.items():
+        if tid == test_id or tid.startswith(f"{test_id}_"):
+            names |= nset
+    return names
+
+
+# Primitives whose group_id groups a set of rows that are genuinely ONE
+# monetary entry sharing a single amount, not several distinct entries
+# (CLAUDE.md P2/P3 gate review item 1). This is a property of the PRIMITIVE's
+# own scoring unit, declared once here rather than inferred per run from
+# whether a group's members happen to carry equal amounts -- duplicate_detection's
+# grouping key deliberately INCLUDES the amount column (T5.2: "(Employee ID,
+# Transaction Date, Vendor, amount) exact"), so every duplicate group's members
+# always agree on amount by construction, and the old equality-inference
+# collapsed every one of them to a single entry, discarding every line but one
+# from the run's headline exposure. Only ratio_per_group's group_id is the
+# attendee-grain shape (CLAUDE.md build brief T3.3b: one Entry Amount repeated
+# once per attendee row) where collapsing to one entry is correct.
+_GROUP_COLLAPSE_PRIMITIVES = {"ratio_per_group"}
+
+
 def prioritise(ctx: NodeContext, state: RunState) -> RunState:
     """Deterministic ordering: severity, then de-duplicated exposure (CLAUDE.md
     §0.3 -- fixes app.py's double count, where the same row could be summed
-    into more than one finding's `max(amount over cited metrics)`). Per-finding
-    exposure is the sum of amount over the DISTINCT MONETARY ENTRIES of that
-    finding's test(s); the run's headline exposure is the sum over the union
-    of distinct entries across every finding, never the sum of per-finding
-    totals. A finding whose test(s) draw from no population with a declared
-    `amount_column` at all gets `exposure_amount: None` /
-    `exposure_basis: "non-monetary finding"` -- never a fabricated 0.0
-    (CLAUDE.md NN14, P2/P3 gate review item 5).
+    into more than one finding's `max(amount over cited metrics)`).
 
-    "Distinct monetary entries", not "distinct rows": some primitives write
-    more than one flagged_rows entry for the SAME dollar amount --
+    A finding's `exposure_amount` is always the sum of its OWN cited amount
+    metric(s) -- exactly the number(s) `metrics_cited` already rendered into
+    its `observation` text (CLAUDE.md P2/P3 gate review item 1). It is never
+    re-derived from raw rows: `duplicate_amount` (T5.2) is "sum of extra lines
+    beyond the first in each group" and `daily_over_amount_*` (T6.1d) is an
+    excess-over-limit, not a sum of full amounts -- shapes a generic row/group
+    summation cannot reconstruct without reproducing each primitive's own
+    rule. Reading the metric the primitive already computed
+    (`orchestrator.skills.plan_test_amount_metrics`) is correct by
+    construction for every primitive, and guarantees the observation prose
+    and `exposure_amount` can never disagree. A test with no declared amount
+    metric gets `exposure_amount: None` / `exposure_basis: "non-monetary
+    finding"` -- never a fabricated 0.0 (CLAUDE.md NN14).
+
+    The run's headline exposure is a separate figure: the sum, over every
+    monetary finding's flagged rows, of each DISTINCT MONETARY ENTRY's full
+    transaction amount, de-duplicated across findings so a row shared by two
+    findings is never counted twice in the headline (never the sum of
+    per-finding totals). "Distinct monetary entries", not "distinct rows":
     ratio_per_group's (T3.3b) attendee-grain output repeats one Entry Amount
     once per attendee row, all sharing one group_id, so summing per row_key
-    would count that amount once per attendee. Others (split_detection's
-    group_id) cluster several DIFFERENT amounts into one detected group, where
-    each member genuinely is its own distinct entry and must still be summed.
-    The two are told apart empirically (never hardcoded per primitive) by
-    whether every row sharing a group_id maps to the same amount: a
-    (source, group_id) whose members all agree collapses to one entry; one
-    whose members disagree is left at (source, row_key) grain, so every
-    member's own amount is still counted once each.
+    would count that amount once per attendee -- collapsed to one entry.
+    Every other primitive's group_id (duplicate_detection, split_detection,
+    threshold_exceedance's `group_by`) clusters DISTINCT entries and must
+    never collapse, even where every member happens to share one amount by
+    construction (duplicate_detection's grouping key deliberately includes
+    the amount column). Which primitives collapse is a declared property of
+    the primitive's own scoring unit (`_GROUP_COLLAPSE_PRIMITIVES` above),
+    never inferred per run from whether a group's members happen to agree on
+    amount -- that inference is exactly what under-counted T5.2's headline
+    contribution before this fix.
 
     This is the one node besides `execute` that reads bound source data: no
     primitive or population exposes a row_key -> amount map (flagged_rows
     deliberately carries no amount column, CLAUDE.md build brief P3 §1), so
-    de-duplicating exposure at entry grain requires one lookup pass over each
-    source that a population declares an `amount_column` for, at the same
-    pinned versions execute() used. A value that fails to parse as a number,
-    or is null, is a contract violation the contract's own type/nullability
-    declaration should already have caught -- raised here, never silently
-    coerced to 0.0 (CLAUDE.md NN14)."""
+    the headline's entry-grain de-duplication requires one lookup pass over
+    each source that a population declares an `amount_column` for, at the
+    same pinned versions execute() used. A value that fails to parse as a
+    number, or is null, is a contract violation the contract's own
+    type/nullability declaration should already have caught -- raised here,
+    never silently coerced to 0.0 (CLAUDE.md NN14)."""
     persisted = ctx.persistence.list_findings(state.run_id)
     now = ctx.clock()
 
     if not persisted:
         message = "no findings to prioritise"
         return dataclasses.replace(state, findings=[], events=state.events + [_event("prioritise", message, now)])
+
+    existing_metrics = ctx.persistence.get_run_metrics(state.run_id)
 
     bindings = {b["source"]: b["version"] for b in state.data_assets}
     amount_col_by_source: dict[str, str] = {}
@@ -432,30 +471,26 @@ def prioritise(ctx: NodeContext, state: RunState) -> RunState:
                 ) from exc
             row_amount[(source, row_key)] = value
 
+    plan_tests = ctx.skill.plan.get("tests", [])
     flags_by_test_id: dict[str, set[str]] = {}
-    for e in plan_test_flags(ctx.skill.plan.get("tests", [])):
+    primitive_by_flag: dict[str, str | None] = {}
+    for e in plan_test_flags(plan_tests):
         flags_by_test_id.setdefault(e["test_id"], set()).add(e["flag"])
+        primitive_by_flag[e["flag"]] = e.get("primitive")
+    amount_metrics_by_test_id = plan_test_amount_metrics(plan_tests)
 
     rows_by_flag: dict[str, list[dict]] = {}
     for r in ctx.persistence.list_flagged_rows(state.run_id):
         rows_by_flag.setdefault(r["flag"], []).append(r)
-    all_flagged_rows = [r for rows in rows_by_flag.values() for r in rows]
 
-    # Which (source, group_id) groups share one amount across every member
-    # (the ratio_per_group attendee-grain shape) vs several different
-    # amounts (the split_detection detected-cluster shape) -- see the
-    # docstring above.
-    group_amounts: dict[tuple[str, str], set[float]] = {}
-    for r in all_flagged_rows:
-        gid = r.get("group_id")
-        if gid is None:
-            continue
-        amt = row_amount.get((r["source"], r["row_key"]))
-        if amt is None:
-            continue
-        group_amounts.setdefault((r["source"], gid), set()).add(round(amt, 6))
-    shared_amount_groups = {k for k, amounts in group_amounts.items() if len(amounts) == 1}
-
+    # Headline-only entry-grain de-duplication (see docstring above): a
+    # (source, group_id) collapses to one entry only when the flag's OWNING
+    # PRIMITIVE is declared to group one monetary entry per group_id
+    # (_GROUP_COLLAPSE_PRIMITIVES) -- never inferred from the group's members
+    # happening to agree on amount. Where a collapsing primitive's group
+    # members disagree on amount, that primitive's own declared shape has
+    # been violated by this run's data -- fail loudly rather than guess which
+    # member's amount is "the" entry amount.
     entry_amount: dict[tuple, float] = {}
 
     def _entry_id(r: dict) -> tuple | None:
@@ -463,36 +498,59 @@ def prioritise(ctx: NodeContext, state: RunState) -> RunState:
         amt = row_amount.get((source, row_key))
         if amt is None:
             return None
-        entry_id = ("group", source, gid) if gid is not None and (source, gid) in shared_amount_groups else ("row", source, row_key)
+        collapse = gid is not None and primitive_by_flag.get(r["flag"]) in _GROUP_COLLAPSE_PRIMITIVES
+        entry_id = ("group", source, gid) if collapse else ("row", source, row_key)
+        if collapse:
+            existing = entry_amount.get(entry_id)
+            if existing is not None and round(existing, 6) != round(amt, 6):
+                raise ContractViolation(
+                    [f"{source} group {gid!r}: members disagree on amount ({existing} vs {amt}) -- "
+                     f"this group's primitive is declared to share one amount per group_id "
+                     f"(_GROUP_COLLAPSE_PRIMITIVES), which this run's data violates"]
+                )
         entry_amount[entry_id] = amt
         return entry_id
 
     all_entry_ids: set[tuple] = set()
     updated_findings: list[dict] = []
     for f in persisted:
-        flags = _flags_for_test_id(flags_by_test_id, f.get("test_id") or "")
+        test_id = f.get("test_id") or ""
+        flags = _flags_for_test_id(flags_by_test_id, test_id)
         rows = [r for flag in flags for r in rows_by_flag.get(flag, [])]
-        is_monetary = any(r["source"] in amount_col_by_source for r in rows)
-        if not is_monetary:
+        declared_amount_names = _amount_metrics_for_test_id(amount_metrics_by_test_id, test_id)
+        # Restricted to what this finding's OWN metrics_cited actually names
+        # (CLAUDE.md P2/P3 gate review item 1: "exposure_amount must be
+        # consistent with the at-risk metric it CITES") -- a plan-declared
+        # amount metric the finding's findings.yaml rule does not cite (e.g.
+        # a worst-single-day `max` figure a different rule cites for its own
+        # purposes) never silently enters this finding's exposure.
+        cited_metrics = f.get("metrics_cited") or {}
+        amount_metric_names = declared_amount_names & set(cited_metrics)
+
+        if not amount_metric_names:
             updated_findings.append(
                 {**f, "exposure_amount": None, "exposure_basis": "non-monetary finding"}
             )
             continue
 
+        exposure = round(
+            sum(
+                cited_metrics[name]["value"]
+                for name in amount_metric_names
+                if cited_metrics[name].get("value") is not None
+            ),
+            2,
+        )
         entry_ids = {eid for r in rows if (eid := _entry_id(r)) is not None}
-        exposure = round(sum(entry_amount[eid] for eid in entry_ids), 2)
         all_entry_ids |= entry_ids
         updated_findings.append(
             {
                 **f,
                 "exposure_amount": exposure,
                 "exposure_basis": (
-                    f"Sum of amount over {len(entry_ids)} distinct monetary entry(ies) for test "
-                    f"{f.get('test_id')} (flags: {sorted(flags)}), de-duplicated at the entry "
-                    f"grain (attendee-grain rows sharing one amount collapse to a single entry; "
-                    f"a detected group spanning several different amounts does not) so an entry "
-                    f"shared with another finding is never summed twice within THIS finding "
-                    f"(CLAUDE.md §0.3)."
+                    f"Sum of this finding's own cited amount metric(s) {sorted(amount_metric_names)} "
+                    f"for test {test_id} -- the same figure(s) rendered into its observation text, "
+                    f"never re-derived from raw rows (CLAUDE.md P2/P3 gate review item 1)."
                 ),
             }
         )
@@ -511,7 +569,6 @@ def prioritise(ctx: NodeContext, state: RunState) -> RunState:
     )
 
     headline_exposure = round(sum(entry_amount[eid] for eid in all_entry_ids), 2)
-    existing_metrics = ctx.persistence.get_run_metrics(state.run_id)
     metrics_map = {
         name: {
             "metric_name": name,
