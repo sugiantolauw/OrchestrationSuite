@@ -173,6 +173,50 @@ def load_skill(skill_dir: str | Path) -> Skill:
     )
 
 
+def plan_test_flags(plan_tests: list[dict]) -> list[dict]:
+    """Flattens plan.yaml's `tests` into {test_id, flag, primitive} rows --
+    one row per RF_* flag a plan test can actually write to flagged_rows.
+
+    A plan test's top-level `flag` is not always the complete set: some
+    primitives write MORE than one flag from params keyed `flag_*`
+    (split_detection's `flag_same_day`/`flag_window`, duplicate_detection's
+    `flag`/`flag_oop_card`) -- e.g. T5.1 also writes RF_CS_SplitClaims_Window,
+    which a caller that only read the top-level `flag` field would silently
+    miss (CLAUDE.md P2/P3 gate review item 5: this is what under-counted
+    T5.1's exposure and the flag_to_test drill-down alike). Collect every
+    `params` key equal to "flag" or starting with "flag_", not just the one
+    at the top level, so this is correct for any current or future primitive
+    without per-primitive special-casing here. A not_testable test's flags
+    are its own declared (plural) list, with primitive=None since none ran.
+
+    Shared by orchestrator.service.get_skill (plan_tests/flag_to_test, for
+    the UI drill-down) and orchestrator.nodes.fieldwork.prioritise (exposure
+    de-duplication) so both draw on exactly the same flag set."""
+    entries: list[dict] = []
+    for t in plan_tests:
+        test_id = t["test_id"]
+        if "not_testable" in t:
+            for flag in t["not_testable"].get("flags", []):
+                entries.append({"test_id": test_id, "flag": flag, "primitive": None})
+            continue
+        flags: list[str] = []
+        seen: set[str] = set()
+        top_level = t.get("flag")
+        if top_level:
+            flags.append(top_level)
+            seen.add(top_level)
+        for key, value in (t.get("params") or {}).items():
+            if not isinstance(value, str) or not value:
+                continue
+            if key == "flag" or key.startswith("flag_"):
+                if value not in seen:
+                    flags.append(value)
+                    seen.add(value)
+        for flag in flags:
+            entries.append({"test_id": test_id, "flag": flag, "primitive": t.get("primitive")})
+    return entries
+
+
 def _walk_collect(obj: Any, key: str, out: set[str]) -> None:
     if isinstance(obj, dict):
         for k, v in obj.items():

@@ -26,6 +26,7 @@ import hashlib
 import io
 import json
 
+import pandas as pd
 import xlsxwriter
 
 from orchestrator.contract import ContractViolation
@@ -34,6 +35,7 @@ from orchestrator.engine import execute_skill
 from orchestrator.findings import build_findings
 from orchestrator.frames import build_row_snapshots, frame_parquet_bytes, sha256_bytes
 from orchestrator.nodes.context import NodeContext
+from orchestrator.skills import plan_test_flags
 from orchestrator.state import RunState
 
 _SEVERITY_ORDER = {"High": 0, "Medium": 1, "Low": 2}
@@ -332,7 +334,7 @@ def find(ctx: NodeContext, state: RunState) -> RunState:
             "test_id": f.get("test_id"),
             "severity": f["severity"],
             "title": f["title"],
-            "analyst_set_severity": f.get("analyst_set_severity", False),
+            "analyst_set_severity": f.get("analyst_set_severity"),
         }
         for f in persisted
     ]
@@ -340,34 +342,56 @@ def find(ctx: NodeContext, state: RunState) -> RunState:
     return dataclasses.replace(state, findings=compact, events=state.events + [_event("find", message, now)])
 
 
-def _flags_for_test_id(test_flag: dict[str, str], test_id: str) -> set[str]:
+def _flags_for_test_id(flags_by_test_id: dict[str, set[str]], test_id: str) -> set[str]:
     # A finding cites one plan.yaml test_id, but the T&E Skill splits several
     # catalogue tests into several plan.yaml sub-tests sharing that prefix
     # (e.g. finding T3_2a cites test_id "T3.2a", while plan.yaml has
     # "T3.2a_air_dom", "T3.2a_air_int", ... each with its own flag) -- so a
     # finding's flags are every plan.yaml test whose id equals or is prefixed
-    # by "<test_id>_".
-    return {
-        flag for tid, flag in test_flag.items()
-        if tid == test_id or tid.startswith(f"{test_id}_")
-    }
+    # by "<test_id>_", union of ALL flags each of those tests declares
+    # (orchestrator.skills.plan_test_flags -- not just the one top-level
+    # `flag` field, CLAUDE.md P2/P3 gate review item 5).
+    flags: set[str] = set()
+    for tid, fset in flags_by_test_id.items():
+        if tid == test_id or tid.startswith(f"{test_id}_"):
+            flags |= fset
+    return flags
 
 
 def prioritise(ctx: NodeContext, state: RunState) -> RunState:
     """Deterministic ordering: severity, then de-duplicated exposure (CLAUDE.md
     §0.3 -- fixes app.py's double count, where the same row could be summed
     into more than one finding's `max(amount over cited metrics)`). Per-finding
-    exposure is the sum of amount over the DISTINCT flagged rows of that
+    exposure is the sum of amount over the DISTINCT MONETARY ENTRIES of that
     finding's test(s); the run's headline exposure is the sum over the union
-    of distinct (source, row_key) pairs across every finding, never the sum of
-    per-finding totals.
+    of distinct entries across every finding, never the sum of per-finding
+    totals. A finding whose test(s) draw from no population with a declared
+    `amount_column` at all gets `exposure_amount: None` /
+    `exposure_basis: "non-monetary finding"` -- never a fabricated 0.0
+    (CLAUDE.md NN14, P2/P3 gate review item 5).
+
+    "Distinct monetary entries", not "distinct rows": some primitives write
+    more than one flagged_rows entry for the SAME dollar amount --
+    ratio_per_group's (T3.3b) attendee-grain output repeats one Entry Amount
+    once per attendee row, all sharing one group_id, so summing per row_key
+    would count that amount once per attendee. Others (split_detection's
+    group_id) cluster several DIFFERENT amounts into one detected group, where
+    each member genuinely is its own distinct entry and must still be summed.
+    The two are told apart empirically (never hardcoded per primitive) by
+    whether every row sharing a group_id maps to the same amount: a
+    (source, group_id) whose members all agree collapses to one entry; one
+    whose members disagree is left at (source, row_key) grain, so every
+    member's own amount is still counted once each.
 
     This is the one node besides `execute` that reads bound source data: no
     primitive or population exposes a row_key -> amount map (flagged_rows
     deliberately carries no amount column, CLAUDE.md build brief P3 §1), so
-    de-duplicating exposure at row grain requires one lookup pass over each
+    de-duplicating exposure at entry grain requires one lookup pass over each
     source that a population declares an `amount_column` for, at the same
-    pinned versions execute() used."""
+    pinned versions execute() used. A value that fails to parse as a number,
+    or is null, is a contract violation the contract's own type/nullability
+    declaration should already have caught -- raised here, never silently
+    coerced to 0.0 (CLAUDE.md NN14)."""
     persisted = ctx.persistence.list_findings(state.run_id)
     now = ctx.clock()
 
@@ -392,42 +416,89 @@ def prioritise(ctx: NodeContext, state: RunState) -> RunState:
         if col not in df.columns:
             continue
         for row_key, amount in zip(df["__row_key"], df[col]):
+            if pd.isna(amount):
+                raise ContractViolation(
+                    [f"{source}.{col} row {row_key!r}: amount is null -- the contract's "
+                     f"nullability declaration for this column should have caught this "
+                     f"before execute() ran"]
+                )
             try:
                 value = float(amount)
-            except (TypeError, ValueError):
-                value = 0.0
-            row_amount[(source, row_key)] = 0.0 if value != value else value  # NaN guard
+            except (TypeError, ValueError) as exc:
+                raise ContractViolation(
+                    [f"{source}.{col} row {row_key!r}: amount {amount!r} is not numeric ({exc}) "
+                     f"-- the contract's type declaration for this column should have caught this"]
+                ) from exc
+            row_amount[(source, row_key)] = value
 
-    test_flag = {
-        t["test_id"]: t["flag"] for t in ctx.skill.plan.get("tests", []) if t.get("flag")
-    }
-    rows_by_flag: dict[str, list[tuple[str, str]]] = {}
+    flags_by_test_id: dict[str, set[str]] = {}
+    for e in plan_test_flags(ctx.skill.plan.get("tests", [])):
+        flags_by_test_id.setdefault(e["test_id"], set()).add(e["flag"])
+
+    rows_by_flag: dict[str, list[dict]] = {}
     for r in ctx.persistence.list_flagged_rows(state.run_id):
-        rows_by_flag.setdefault(r["flag"], []).append((r["source"], r["row_key"]))
+        rows_by_flag.setdefault(r["flag"], []).append(r)
+    all_flagged_rows = [r for rows in rows_by_flag.values() for r in rows]
 
-    all_flagged_keys: set[tuple[str, str]] = set()
+    # Which (source, group_id) groups share one amount across every member
+    # (the ratio_per_group attendee-grain shape) vs several different
+    # amounts (the split_detection detected-cluster shape) -- see the
+    # docstring above.
+    group_amounts: dict[tuple[str, str], set[float]] = {}
+    for r in all_flagged_rows:
+        gid = r.get("group_id")
+        if gid is None:
+            continue
+        amt = row_amount.get((r["source"], r["row_key"]))
+        if amt is None:
+            continue
+        group_amounts.setdefault((r["source"], gid), set()).add(round(amt, 6))
+    shared_amount_groups = {k for k, amounts in group_amounts.items() if len(amounts) == 1}
+
+    entry_amount: dict[tuple, float] = {}
+
+    def _entry_id(r: dict) -> tuple | None:
+        source, row_key, gid = r["source"], r["row_key"], r.get("group_id")
+        amt = row_amount.get((source, row_key))
+        if amt is None:
+            return None
+        entry_id = ("group", source, gid) if gid is not None and (source, gid) in shared_amount_groups else ("row", source, row_key)
+        entry_amount[entry_id] = amt
+        return entry_id
+
+    all_entry_ids: set[tuple] = set()
     updated_findings: list[dict] = []
     for f in persisted:
-        flags = _flags_for_test_id(test_flag, f.get("test_id") or "")
-        keys: set[tuple[str, str]] = set()
-        for flag in flags:
-            keys.update(rows_by_flag.get(flag, []))
-        exposure = round(sum(row_amount.get(k, 0.0) for k in keys), 2)
-        all_flagged_keys |= keys
+        flags = _flags_for_test_id(flags_by_test_id, f.get("test_id") or "")
+        rows = [r for flag in flags for r in rows_by_flag.get(flag, [])]
+        is_monetary = any(r["source"] in amount_col_by_source for r in rows)
+        if not is_monetary:
+            updated_findings.append(
+                {**f, "exposure_amount": None, "exposure_basis": "non-monetary finding"}
+            )
+            continue
+
+        entry_ids = {eid for r in rows if (eid := _entry_id(r)) is not None}
+        exposure = round(sum(entry_amount[eid] for eid in entry_ids), 2)
+        all_entry_ids |= entry_ids
         updated_findings.append(
             {
                 **f,
                 "exposure_amount": exposure,
                 "exposure_basis": (
-                    f"Sum of amount over {len(keys)} distinct flagged row(s) for test "
-                    f"{f.get('test_id')} (flags: {sorted(flags)}), de-duplicated so a row "
+                    f"Sum of amount over {len(entry_ids)} distinct monetary entry(ies) for test "
+                    f"{f.get('test_id')} (flags: {sorted(flags)}), de-duplicated at the entry "
+                    f"grain (attendee-grain rows sharing one amount collapse to a single entry; "
+                    f"a detected group spanning several different amounts does not) so an entry "
                     f"shared with another finding is never summed twice within THIS finding "
                     f"(CLAUDE.md §0.3)."
                 ),
             }
         )
 
-    updated_findings.sort(key=lambda f: (_SEVERITY_ORDER.get(f["severity"], 3), -f["exposure_amount"]))
+    updated_findings.sort(
+        key=lambda f: (_SEVERITY_ORDER.get(f["severity"], 3), -(f["exposure_amount"] or 0.0))
+    )
 
     ctx.persistence.write_findings(
         state.run_id,
@@ -438,7 +509,7 @@ def prioritise(ctx: NodeContext, state: RunState) -> RunState:
         now=now,
     )
 
-    headline_exposure = round(sum(row_amount.get(k, 0.0) for k in all_flagged_keys), 2)
+    headline_exposure = round(sum(entry_amount[eid] for eid in all_entry_ids), 2)
     existing_metrics = ctx.persistence.get_run_metrics(state.run_id)
     metrics_map = {
         name: {
@@ -455,8 +526,10 @@ def prioritise(ctx: NodeContext, state: RunState) -> RunState:
         "value": headline_exposure,
         "unit": "AUD",
         "source_ref": {
-            "basis": "sum of amount over the union of distinct (source,row_key) flagged "
-            "across every finding -- never the sum of per-finding totals (CLAUDE.md §0.3)",
+            "basis": "sum of amount over the union of distinct monetary entries flagged "
+            "across every finding (attendee-grain duplicates of one entry collapsed to "
+            "one; non-monetary findings excluded) -- never the sum of per-finding totals "
+            "(CLAUDE.md §0.3)",
         },
         "test_id": None,
     }
@@ -469,7 +542,7 @@ def prioritise(ctx: NodeContext, state: RunState) -> RunState:
             "test_id": f.get("test_id"),
             "severity": f["severity"],
             "title": f["title"],
-            "analyst_set_severity": f.get("analyst_set_severity", False),
+            "analyst_set_severity": f.get("analyst_set_severity"),
             "exposure_amount": f["exposure_amount"],
         }
         for f in updated_findings

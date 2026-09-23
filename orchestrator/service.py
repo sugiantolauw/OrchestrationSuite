@@ -64,7 +64,7 @@ from orchestrator.nodes.context import NodeContext
 from orchestrator.nodes.fieldwork import NODES_FOR
 from orchestrator.pipeline import NODE_STAGE_LABELS
 from orchestrator.skill_registry import register_skill
-from orchestrator.skills import load_skill
+from orchestrator.skills import load_skill, plan_test_flags
 from orchestrator.state import RunState, to_json
 from orchestrator.timeutil import utc_now
 
@@ -291,20 +291,12 @@ def list_skills(ctx: AppContext) -> list[dict]:
     return out
 
 
-def _plan_test_entries(plan_tests: list[dict]) -> list[dict]:
-    """Flattens plan.yaml's `tests` into {test_id, flag, primitive} rows the
-    UI can join against flagged_rows.flag -- one row per RF_* flag a plan
-    test declares, including a not_testable test's (plural) declared flags,
-    each with primitive=None since none ran."""
-    entries: list[dict] = []
-    for t in plan_tests:
-        test_id = t["test_id"]
-        if "not_testable" in t:
-            for flag in t["not_testable"].get("flags", []):
-                entries.append({"test_id": test_id, "flag": flag, "primitive": None})
-        elif t.get("flag"):
-            entries.append({"test_id": test_id, "flag": t["flag"], "primitive": t.get("primitive")})
-    return entries
+# _plan_test_entries used to read only each plan test's top-level `flag`
+# field, missing a primitive's other flag_* params (split_detection's
+# flag_window, duplicate_detection's flag_oop_card) -- fixed once, shared
+# with orchestrator.nodes.fieldwork.prioritise's exposure de-duplication,
+# in orchestrator.skills.plan_test_flags (CLAUDE.md P2/P3 gate review item 5).
+_plan_test_entries = plan_test_flags
 
 
 def _catalogue_id_for_plan_test(plan_test_id: str, catalogue_ids: set[str]) -> str:
