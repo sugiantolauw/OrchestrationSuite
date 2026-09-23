@@ -249,6 +249,21 @@ def _fetchall_dicts(cursor) -> list[dict]:
     return [_row_to_dict(cursor, r) for r in rows]
 
 
+# Rows per batched MERGE statement for write_flagged_rows/write_run_metrics
+# (CLAUDE.md build brief P3 §1): a per-row MERGE -- one round trip per row,
+# each 2-8s against a live SQL warehouse (CLAUDE.md §11 recorded latency) --
+# made a several-hundred-row execute() write take 20+ minutes live against
+# the deployed App. One MERGE per batch, its USING clause a literal VALUES
+# list, cuts that to one round trip per _MERGE_BATCH_SIZE rows while keeping
+# the same MERGE + prune upsert shape (never DELETE-then-INSERT).
+_MERGE_BATCH_SIZE = 250
+
+
+def _batched(items: list, size: int):
+    for i in range(0, len(items), size):
+        yield items[i:i + size]
+
+
 def _fetchone_dict(cursor) -> dict | None:
     row = cursor.fetchone()
     if row is None:
@@ -1145,7 +1160,9 @@ class DeltaPersistence:
         # build brief P3 §1) -- never DELETE-then-INSERT, which leaves a window
         # where this run's flagged_rows are entirely absent to any concurrent
         # reader (a drill-down query, a re-admitted G6 pass) between the DELETE
-        # committing and the first INSERT landing.
+        # committing and the first INSERT landing. Batched (_MERGE_BATCH_SIZE
+        # rows' USING clause per MERGE) rather than one MERGE per row -- see
+        # that constant's docstring for why.
         new_keys = {(r["source"], r["row_key"], r["flag"]) for r in rows}
         with self._cursor_ctx() as conn:
             cur = self._execute(
@@ -1155,23 +1172,30 @@ class DeltaPersistence:
             )
             existing_keys = {(r["source"], r["row_key"], r["flag"]) for r in _fetchall_dicts(cur)}
 
-            merge_sql = (
-                f"MERGE INTO {self._table('flagged_rows')} t "
-                "USING (SELECT :run_id AS run_id, :source AS source, :row_key AS row_key, :flag AS flag) s "
-                "ON t.run_id = s.run_id AND t.source = s.source AND t.row_key = s.row_key AND t.flag = s.flag "
-                "WHEN MATCHED THEN UPDATE SET group_id = :group_id "
-                "WHEN NOT MATCHED THEN INSERT (run_id, source, row_key, flag, group_id) "
-                "VALUES (:run_id, :source, :row_key, :flag, :group_id)"
-            )
-            for r in rows:
-                self._execute(
-                    conn,
-                    merge_sql,
-                    {
-                        "run_id": run_id, "source": r["source"], "row_key": r["row_key"],
-                        "flag": r["flag"], "group_id": r.get("group_id"),
-                    },
+            for batch in _batched(rows, _MERGE_BATCH_SIZE):
+                values_sql = ", ".join(
+                    f"(:run_id, :s{i}, :rk{i}, :f{i}, :g{i})" for i in range(len(batch))
                 )
+                params: dict = {"run_id": run_id}
+                for i, r in enumerate(batch):
+                    params[f"s{i}"] = r["source"]
+                    params[f"rk{i}"] = r["row_key"]
+                    params[f"f{i}"] = r["flag"]
+                    params[f"g{i}"] = r.get("group_id")
+                # Spark SQL rejects a direct "USING (...) AS s(col, ...)" column
+                # alias list on MERGE ([COLUMN_ALIASES_NOT_ALLOWED]) -- name the
+                # VALUES columns (Spark's own default col1, col2, ...) via an
+                # inner SELECT instead, and alias only the SELECT itself as `s`.
+                merge_sql = (
+                    f"MERGE INTO {self._table('flagged_rows')} t "
+                    "USING (SELECT col1 AS run_id, col2 AS source, col3 AS row_key, "
+                    f"col4 AS flag, col5 AS group_id FROM (VALUES {values_sql})) s "
+                    "ON t.run_id = s.run_id AND t.source = s.source AND t.row_key = s.row_key AND t.flag = s.flag "
+                    "WHEN MATCHED THEN UPDATE SET group_id = s.group_id "
+                    "WHEN NOT MATCHED THEN INSERT (run_id, source, row_key, flag, group_id) "
+                    "VALUES (s.run_id, s.source, s.row_key, s.flag, s.group_id)"
+                )
+                self._execute(conn, merge_sql, params)
 
             orphans = existing_keys - new_keys
             if orphans:
@@ -1209,7 +1233,8 @@ class DeltaPersistence:
     def write_run_metrics(self, run_id: str, metrics: list[dict]) -> None:
         # MERGE + prune (see write_flagged_rows above) -- a re-executed execute/
         # prioritise node's metrics are never absent, even momentarily, to a
-        # concurrent get_run_payload/get_run_frames read.
+        # concurrent get_run_payload/get_run_frames read. Batched, same reason
+        # as write_flagged_rows.
         new_names = {m["metric_name"] for m in metrics}
         with self._cursor_ctx() as conn:
             cur = self._execute(
@@ -1219,31 +1244,35 @@ class DeltaPersistence:
             )
             existing_names = {r["metric_name"] for r in _fetchall_dicts(cur)}
 
-            merge_sql = (
-                f"MERGE INTO {self._table('run_metrics')} t "
-                "USING (SELECT :run_id AS run_id, :metric_name AS metric_name) s "
-                "ON t.run_id = s.run_id AND t.metric_name = s.metric_name "
-                "WHEN MATCHED THEN UPDATE SET value = :value, value_text = :value_text, unit = :unit, "
-                "source_ref_json = :source_ref_json, test_id = :test_id "
-                "WHEN NOT MATCHED THEN INSERT (run_id, metric_name, value, value_text, unit, "
-                "source_ref_json, test_id) VALUES (:run_id, :metric_name, :value, :value_text, :unit, "
-                ":source_ref_json, :test_id)"
-            )
-            for m in metrics:
-                value, value_text = _metric_value_columns(m.get("value"))
-                self._execute(
-                    conn,
-                    merge_sql,
-                    {
-                        "run_id": run_id,
-                        "metric_name": m["metric_name"],
-                        "value": value,
-                        "value_text": value_text,
-                        "unit": m.get("unit"),
-                        "source_ref_json": _canonical_json(m.get("source_ref", {})),
-                        "test_id": m.get("test_id"),
-                    },
+            for batch in _batched(metrics, _MERGE_BATCH_SIZE):
+                values_sql = ", ".join(
+                    f"(:run_id, :n{i}, :v{i}, :vt{i}, :u{i}, :sr{i}, :t{i})" for i in range(len(batch))
                 )
+                params: dict = {"run_id": run_id}
+                for i, m in enumerate(batch):
+                    value, value_text = _metric_value_columns(m.get("value"))
+                    params[f"n{i}"] = m["metric_name"]
+                    params[f"v{i}"] = value
+                    params[f"vt{i}"] = value_text
+                    params[f"u{i}"] = m.get("unit")
+                    params[f"sr{i}"] = _canonical_json(m.get("source_ref", {}))
+                    params[f"t{i}"] = m.get("test_id")
+                # See write_flagged_rows above for why the VALUES columns are
+                # named via an inner SELECT rather than a column-alias list
+                # directly on MERGE's USING clause.
+                merge_sql = (
+                    f"MERGE INTO {self._table('run_metrics')} t "
+                    "USING (SELECT col1 AS run_id, col2 AS metric_name, col3 AS value, "
+                    "col4 AS value_text, col5 AS unit, col6 AS source_ref_json, col7 AS test_id "
+                    f"FROM (VALUES {values_sql})) s "
+                    "ON t.run_id = s.run_id AND t.metric_name = s.metric_name "
+                    "WHEN MATCHED THEN UPDATE SET value = s.value, value_text = s.value_text, "
+                    "unit = s.unit, source_ref_json = s.source_ref_json, test_id = s.test_id "
+                    "WHEN NOT MATCHED THEN INSERT (run_id, metric_name, value, value_text, unit, "
+                    "source_ref_json, test_id) VALUES (s.run_id, s.metric_name, s.value, "
+                    "s.value_text, s.unit, s.source_ref_json, s.test_id)"
+                )
+                self._execute(conn, merge_sql, params)
 
             orphans = existing_names - new_names
             if orphans:
