@@ -60,6 +60,13 @@ def test_engine_end_to_end_on_mini_skill(tmp_path: Path, mini_skill):
     not_testable = next(t for t in result.test_results if t["test_id"] == "T3")
     assert not_testable["reason"] == "no classification endpoint wired in P2a"
 
+    # N11: a not_testable test's declared RF_* column exists in the flags
+    # frame, all-null (never 0) -- P4 renders that as "Not tested", distinct
+    # from a real "No breach" (0/false).
+    assert "RF_T3_NotTested" in result.flags.columns
+    assert str(result.flags["RF_T3_NotTested"].dtype) == "Int8"
+    assert result.flags["RF_T3_NotTested"].isna().all()
+
     assert "RF_HV" in result.flags.columns
     assert "RF_MISSING" in result.flags.columns
     assert int(result.flags["RF_HV"].sum()) == 2

@@ -33,7 +33,10 @@
           "params": {"type": "object"},
           "not_testable": {
             "type": "object",
-            "properties": {"reason": {"type": "string"}},
+            "properties": {
+              "reason": {"type": "string"},
+              "flags": {"type": "array", "items": {"type": "string"}, "minItems": 1}
+            },
             "required": ["reason"],
             "additionalProperties": false
           }

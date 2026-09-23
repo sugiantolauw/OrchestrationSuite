@@ -102,6 +102,7 @@ def execute_skill(
     test_results: list[dict] = []
     scored_units: dict[str, list[str]] = {}
     long_flag_frames: list[pd.DataFrame] = []
+    not_testable_flag_columns: set[str] = set()
 
     for test in skill.plan.get("tests", []):
         test_id = test["test_id"]
@@ -116,6 +117,11 @@ def execute_skill(
                     "exception_units": 0,
                 }
             )
+            # N11: a not_testable test's RF_* column(s) (declared in plan.yaml,
+            # never inferred) still exist in the flags frame, filled with a
+            # true null -- never 0 -- so a downstream renderer can tell "not
+            # tested" apart from "tested and no breach".
+            not_testable_flag_columns.update(test["not_testable"].get("flags", []))
             continue
 
         result = _run_test_primitive(skill, test["primitive"], prim_ctx, test["params"])
@@ -141,6 +147,9 @@ def execute_skill(
         )
 
     flags = _wide_flags(long_flag_frames)
+    for col in sorted(not_testable_flag_columns):
+        if col not in flags.columns:
+            flags[col] = pd.array([pd.NA] * len(flags), dtype="Int8")
 
     data_quality: dict[str, Any] = {}
     for name, pop in populations.items():

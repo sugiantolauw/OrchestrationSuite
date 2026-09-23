@@ -50,3 +50,4 @@ tests:
     assertion: operating
     not_testable:
       reason: "no classification endpoint wired in P2a"
+      flags: [RF_T3_NotTested]
