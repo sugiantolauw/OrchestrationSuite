@@ -147,7 +147,7 @@ findings:
       - else: Low
     metrics_cited: [missing_receipt_count, missing_receipt_pct, missing_receipt_amount, missing_receipt_no_affidavit_count]
     observation: >
-      {missing_receipt_count} claims ({missing_receipt_pct}% of total) are missing
+      {missing_receipt_count} claims ({missing_receipt_pct} of total) are missing
       receipt documentation, representing {missing_receipt_amount} in unsupported
       spend, of which {missing_receipt_no_affidavit_count} have no affidavit on
       file. Without receipts, the business purpose and legitimacy of these
@@ -171,7 +171,7 @@ findings:
     metrics_cited: [att_missing_count, att_total, att_missing_pct]
     observation: >
       {att_missing_count} of {att_total} entertainment-related claims
-      ({att_missing_pct}%) are missing attendee information. Policy requires
+      ({att_missing_pct}) are missing attendee information. Policy requires
       attendee names and business purpose for all entertainment and hospitality
       expenses to demonstrate legitimate business use.
     recommendation: >
@@ -261,11 +261,11 @@ findings:
     metrics_cited: [approver_total_reports, approver_count, approver_no_receipt_pct, approver_instant_pct, approver_worst_case_n, approver_worst_case_pct]
     observation: >
       Of {approver_total_reports} expense reports reviewed by {approver_count}
-      approvers, {approver_no_receipt_pct}% were approved without the approver
-      viewing the receipt. Additionally, {approver_instant_pct}% of reports
+      approvers, {approver_no_receipt_pct} were approved without the approver
+      viewing the receipt. Additionally, {approver_instant_pct} of reports
       assessed as instant (among steps where a receipt was viewed) received
       approval in under the instant-approval threshold. {approver_worst_case_n}
-      reports ({approver_worst_case_pct}%) received both instant approval and no
+      reports ({approver_worst_case_pct}) received both instant approval and no
       receipt review, representing the highest-risk approval behaviour.
     recommendation: >
       Implement minimum review time controls in the expense system. Require

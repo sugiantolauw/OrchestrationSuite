@@ -7,6 +7,7 @@ import pytest
 
 from orchestrator.contract import LocalFileDataSource
 from orchestrator.engine import execute_skill
+from orchestrator.findings import _format_template
 from orchestrator.skills import load_skill
 
 SKILL_DIR = Path(__file__).parent.parent / "skills" / "tne_exco"
@@ -96,3 +97,31 @@ def test_findings_build_without_error(tne_result):
     for f in tne_result.findings:
         assert f["severity"] in ("High", "Medium", "Low")
         assert f["metrics_cited"]
+
+
+def test_all_finding_templates_render_cleanly_against_real_metrics(tne_skill, tne_result):
+    # Renders every SKILL-001 finding template (not just the ones that trigger
+    # on this run's population) against this run's real computed metrics --
+    # catches a mismatched unit/template convention (e.g. a metric whose
+    # format_metric_value already appends "%" and a template that also has a
+    # literal "%" after the placeholder, rendering "84.6%%") that a spot check
+    # on only the triggered findings could miss.
+    metrics = tne_result.metrics
+    committed = json.loads(SNAPSHOT_PATH.read_text())["metrics"]
+    for name, expected in committed.items():
+        assert metrics[name]["value"] == expected, f"{name}: not the committed real-metrics snapshot value"
+
+    for rule in tne_skill.findings.get("findings", []):
+        cited_names = rule.get("metrics_cited", [])
+        missing = [n for n in cited_names if n not in metrics]
+        assert not missing, f"{rule['id']}: metrics_cited references unknown metric(s) {missing}"
+        cited = {n: metrics[n] for n in cited_names}
+        for field in ("observation", "recommendation"):
+            text = rule.get(field) or ""
+            if not text.strip():
+                continue
+            rendered = _format_template(text, cited)
+            assert "%%" not in rendered, f"{rule['id']}.{field}: double percent in rendered text: {rendered!r}"
+            assert "{" not in rendered and "}" not in rendered, (
+                f"{rule['id']}.{field}: unrendered template braces: {rendered!r}"
+            )
