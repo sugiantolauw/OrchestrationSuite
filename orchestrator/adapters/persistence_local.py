@@ -1113,29 +1113,27 @@ class LocalPersistence:
     # ── leases (CLAUDE.md §9C P1A concurrency foundation, §2.3 rule 3) ──────
 
     def acquire_lease(self, run_id: str, worker_id: str, *, ttl_s: float, now: str) -> bool:
+        # Item 6 (CLAUDE.md P2/P3 gate review): a single upsert, not a
+        # read-then-insert/update -- SQLite's UPSERT ... WHERE evaluates the
+        # WHERE clause against the EXISTING row at the same statement the
+        # conflict is detected in, so "no row" (fresh INSERT), "row expired"
+        # (DO UPDATE fires) and "row still held by someone else" (DO UPDATE's
+        # WHERE is false, a genuine no-op) are all one atomic decision, and
+        # ownership is read from the affected-row count, never a SEPARATE
+        # SELECT after the write (mirrors DeltaPersistence.acquire_lease's
+        # MERGE).
         expires_at = _add_seconds(now, ttl_s)
         with self._writer() as conn:
-            row = conn.execute(
-                "SELECT claimed_by, lease_expires_at FROM run_leases WHERE run_id = ?", (run_id,)
-            ).fetchone()
-            if row is None:
-                conn.execute(
-                    "INSERT INTO run_leases (run_id, claimed_by, claimed_at, heartbeat_at, "
-                    "lease_expires_at) VALUES (?,?,?,?,?)",
-                    (run_id, worker_id, now, now, expires_at),
-                )
-                return True
-            if row["lease_expires_at"] <= now:
-                # Expired -- take it over, whoever held it before.
-                conn.execute(
-                    "UPDATE run_leases SET claimed_by = ?, claimed_at = ?, heartbeat_at = ?, "
-                    "lease_expires_at = ? WHERE run_id = ? AND lease_expires_at = ?",
-                    (worker_id, now, now, expires_at, run_id, row["lease_expires_at"]),
-                )
-                return conn.execute(
-                    "SELECT claimed_by FROM run_leases WHERE run_id = ?", (run_id,)
-                ).fetchone()["claimed_by"] == worker_id
-            return False
+            cur = conn.execute(
+                "INSERT INTO run_leases (run_id, claimed_by, claimed_at, heartbeat_at, "
+                "lease_expires_at) VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(run_id) DO UPDATE SET claimed_by = excluded.claimed_by, "
+                "claimed_at = excluded.claimed_at, heartbeat_at = excluded.heartbeat_at, "
+                "lease_expires_at = excluded.lease_expires_at "
+                "WHERE run_leases.lease_expires_at <= ?",
+                (run_id, worker_id, now, now, expires_at, now),
+            )
+            return cur.rowcount > 0
 
     def renew_lease(self, run_id: str, worker_id: str, *, ttl_s: float, now: str) -> bool:
         expires_at = _add_seconds(now, ttl_s)

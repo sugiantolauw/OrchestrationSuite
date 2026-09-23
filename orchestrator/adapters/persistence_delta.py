@@ -1536,42 +1536,30 @@ class DeltaPersistence:
     # ── leases (CLAUDE.md §9C P1A concurrency foundation, §2.3 rule 3) ──────
 
     def acquire_lease(self, run_id: str, worker_id: str, *, ttl_s: float, now: str) -> bool:
+        # Item 6 (CLAUDE.md P2/P3 gate review): the old SELECT-then-INSERT/
+        # UPDATE was non-atomic -- two workers could both see "no row"
+        # (Delta has no enforced PRIMARY KEY, so both INSERTs would succeed,
+        # leaving two owners) or both see "expired" and both believe their
+        # own conditional UPDATE won. A single MERGE makes "no row" (INSERT)
+        # and "row expired" (UPDATE) one atomic decision -- Delta's own
+        # transaction protocol rejects a conflicting concurrent MERGE against
+        # the same row rather than letting both succeed -- and ownership is
+        # decided from num_affected_rows (this MERGE's own INSERT+UPDATE
+        # count), never a separate SELECT after the write.
         expires_at = _add_seconds(now, ttl_s)
         with self._cursor_ctx() as conn:
             cur = self._execute(
                 conn,
-                f"SELECT claimed_by, lease_expires_at FROM {self._table('run_leases')} "
-                "WHERE run_id = :run_id",
-                {"run_id": run_id},
+                f"MERGE INTO {self._table('run_leases')} t "
+                "USING (SELECT :run_id AS run_id) s ON t.run_id = s.run_id "
+                "WHEN MATCHED AND t.lease_expires_at <= :now THEN UPDATE SET "
+                "claimed_by = :claimed_by, claimed_at = :now, heartbeat_at = :now, "
+                "lease_expires_at = :expires_at "
+                "WHEN NOT MATCHED THEN INSERT (run_id, claimed_by, claimed_at, heartbeat_at, "
+                "lease_expires_at) VALUES (:run_id, :claimed_by, :now, :now, :expires_at)",
+                {"run_id": run_id, "claimed_by": worker_id, "now": now, "expires_at": expires_at},
             )
-            row = _fetchone_dict(cur)
-            if row is None:
-                self._execute(
-                    conn,
-                    f"INSERT INTO {self._table('run_leases')} (run_id, claimed_by, claimed_at, "
-                    "heartbeat_at, lease_expires_at) VALUES (:run_id, :claimed_by, :now, :now, "
-                    ":expires_at)",
-                    {"run_id": run_id, "claimed_by": worker_id, "now": now, "expires_at": expires_at},
-                )
-                return True
-            if row["lease_expires_at"] <= now:
-                self._execute(
-                    conn,
-                    f"UPDATE {self._table('run_leases')} SET claimed_by = :claimed_by, "
-                    "claimed_at = :now, heartbeat_at = :now, lease_expires_at = :expires_at "
-                    "WHERE run_id = :run_id AND lease_expires_at = :prior_expiry",
-                    {
-                        "claimed_by": worker_id, "now": now, "expires_at": expires_at,
-                        "run_id": run_id, "prior_expiry": row["lease_expires_at"],
-                    },
-                )
-                cur2 = self._execute(
-                    conn,
-                    f"SELECT claimed_by FROM {self._table('run_leases')} WHERE run_id = :run_id",
-                    {"run_id": run_id},
-                )
-                return _fetchone_dict(cur2)["claimed_by"] == worker_id
-            return False
+            return _num_affected_rows(cur) > 0
 
     def renew_lease(self, run_id: str, worker_id: str, *, ttl_s: float, now: str) -> bool:
         expires_at = _add_seconds(now, ttl_s)

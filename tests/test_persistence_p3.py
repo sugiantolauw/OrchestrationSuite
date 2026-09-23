@@ -201,6 +201,39 @@ def test_lease_taken_over_once_expired(persistence, uid):
     assert persistence.acquire_lease(run_id, "worker-a", ttl_s=60, now=well_past) is False
 
 
+def test_lease_acquire_concurrent_on_a_fresh_run_id_only_one_wins(persistence, uid):
+    """Item 6 (CLAUDE.md P2/P3 gate review): acquire_lease's old
+    read-then-insert was non-atomic. On Delta specifically, which has no
+    ENFORCED primary key, two workers racing to acquire a lease for a run_id
+    with NO existing row could both see "no row" and both INSERT, leaving
+    two owners of the same run -- exactly the failure mode a lease exists to
+    prevent. Fired genuinely concurrently (a barrier, not sequential calls)
+    against every backend `persistence` covers, including real Delta under
+    RUN_DELTA_TESTS=1 (conftest.py's delta_schema, a throwaway schema)."""
+    import threading
+
+    run_id = f"RUN-LEASE-RACE-{uid}"
+    now = "2026-01-01T00:00:00.000000Z"
+    n_workers = 6
+    barrier = threading.Barrier(n_workers)
+    results: list[bool] = []
+    lock = threading.Lock()
+
+    def attempt(worker_id: str):
+        barrier.wait()
+        won = persistence.acquire_lease(run_id, worker_id, ttl_s=60, now=now)
+        with lock:
+            results.append(won)
+
+    threads = [threading.Thread(target=attempt, args=(f"worker-{i}",)) for i in range(n_workers)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert sum(results) == 1, f"expected exactly one winner, got {results}"
+
+
 # ── exports ───────────────────────────────────────────────────────────────────
 
 
