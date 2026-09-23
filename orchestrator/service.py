@@ -152,7 +152,10 @@ def _skill_dir_for(ctx: AppContext, skill_id: str | None) -> Path:
     raise ValueError(f"no skill directory under {ctx.skills_dir} with manifest id={skill_id!r}")
 
 
-def _compute_run_fingerprint(ctx: AppContext, skill_dir: Path, source_table_versions: dict[str, str]) -> dict:
+def _compute_run_fingerprint(
+    ctx: AppContext, skill_dir: Path, source_table_versions: dict[str, str],
+    uploaded_file_hashes: dict[str, str] | None = None,
+) -> dict:
     reference_dir = skill_dir / "reference"
     reference_files = (
         sorted(p for p in reference_dir.rglob("*") if p.is_file()) if reference_dir.is_dir() else []
@@ -160,7 +163,7 @@ def _compute_run_fingerprint(ctx: AppContext, skill_dir: Path, source_table_vers
     return compute_fingerprint(
         settings=ctx.settings,
         source_table_versions=source_table_versions,
-        uploaded_file_hashes={},
+        uploaded_file_hashes=uploaded_file_hashes or {},
         skill_dir=skill_dir,
         requirements_path=REPO_ROOT / "requirements.txt",
         prompts_dirs=[skill_dir / "prompts"],
@@ -187,7 +190,15 @@ def build_node_context(ctx: AppContext, state: RunState) -> NodeContext:
 def build_run_fingerprint(ctx: AppContext, state: RunState) -> dict:
     skill_dir = _skill_dir_for(ctx, state.skill_id)
     pinned_versions = {b["source"]: b["version"] for b in state.data_assets}
-    return _compute_run_fingerprint(ctx, skill_dir, pinned_versions)
+    # Same reconstruction as start_audit_run: a binding whose value is a
+    # recorded upload's volume_path is pinned as an uploaded_file_hash too,
+    # so a resumed/verified run's recomputed fingerprint matches the one
+    # captured at creation (CLAUDE.md §4.1 "verified at every executor pass").
+    uploaded_volume_paths = {r["volume_path"] for r in ctx.persistence.list_uploaded_files()}
+    uploaded_file_hashes = {
+        b["table_fqn"]: b["version"] for b in state.data_assets if b["table_fqn"] in uploaded_volume_paths
+    }
+    return _compute_run_fingerprint(ctx, skill_dir, pinned_versions, uploaded_file_hashes)
 
 
 def build_app_context(env: dict | None = None) -> AppContext:
@@ -524,8 +535,21 @@ def start_audit_run(
     # bindings and the fingerprint's source_table_versions.
     source_versions = {name: data_source.resolve_version(name) for name in contract_sources}
 
+    # A source bound to an uploaded file (run_setup._auto_bind's exact-
+    # filename-stem match) is pinned in run_fingerprints.uploaded_file_hashes
+    # ({volume_path: sha256}, CLAUDE.md §4.1 P1A) as well as in
+    # source_table_versions above -- the fingerprint records not just WHAT
+    # version was read but that it came from a business-provided file, not a
+    # governed table.
+    uploaded_volume_paths = {r["volume_path"] for r in ctx.persistence.list_uploaded_files()}
+    uploaded_file_hashes = {
+        bindings[name]: source_versions[name]
+        for name in contract_sources
+        if bindings[name] in uploaded_volume_paths
+    }
+
     now = ctx.clock()
-    fingerprint = _compute_run_fingerprint(ctx, skill_dir, source_versions)
+    fingerprint = _compute_run_fingerprint(ctx, skill_dir, source_versions, uploaded_file_hashes)
 
     register_skill(skill, ctx.persistence, actor=run_owner, now=now)
 
