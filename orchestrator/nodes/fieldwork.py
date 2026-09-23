@@ -298,6 +298,40 @@ def execute(ctx: NodeContext, state: RunState) -> RunState:
             differences.append(f"{source}: engine_min_date={engine_min_date} independent_min_date={independent['min_date']}")
         if max_date_match is False:
             differences.append(f"{source}: engine_max_date={engine_max_date} independent_max_date={independent['max_date']}")
+
+    # Item 8 (CLAUDE.md §5 G6 caveat, P2/P3 gate review): the source-level
+    # check above only catches a whole SOURCE'S row count drifting from an
+    # independent count -- it says nothing about a single TESTED population
+    # (a filtered/derived subset of that source) silently losing rows a
+    # filter never declared. Every population's own accounting must close:
+    # its final row count plus every filter/post_filter's own declared
+    # excluded_counts must sum back to the source's independently-verified
+    # row count (from the per-source loop above, never re-queried). A
+    # mismatch means some row-count-changing step -- a filter whose exclusion
+    # was not counted, a derive/lookup that fanned rows out via a
+    # non-unique-keyed merge, anything -- happened without being accounted
+    # for, and the run fails outright rather than reporting a population
+    # whose own numbers do not add up.
+    independent_rows_by_source = {src: rec["independent_rows"] for src, rec in reconciliation.items()}
+    for pop_name, pop in sorted(result.populations.items()):
+        pop_source = (populations_cfg.get(pop_name) or {}).get("source")
+        independent = independent_rows_by_source.get(pop_source)
+        if independent is None:
+            differences.append(
+                f"population {pop_name!r}: source {pop_source!r} was never independently "
+                f"reconciled -- cannot verify this population's row accounting"
+            )
+            continue
+        excluded_total = sum(pop["excluded_counts"].values())
+        accounted = pop["rows"] + excluded_total
+        if accounted != independent:
+            differences.append(
+                f"population {pop_name!r} (source {pop_source!r}): {pop['rows']} tested row(s) + "
+                f"{excluded_total} declared exclusion(s) = {accounted}, but the source "
+                f"independently reconciles to {independent} row(s) -- some row-count-changing "
+                f"step was not accounted for in excluded_counts"
+            )
+
     if differences:
         raise ReconciliationError(state.run_id, differences)
 

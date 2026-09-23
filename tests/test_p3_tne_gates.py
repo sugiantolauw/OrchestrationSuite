@@ -218,6 +218,46 @@ def test_g6_amount_variance_is_decimal_safe_not_float_epsilon(local_persistence,
     assert _decimal_variance(1.0, None) is None
 
 
+def test_g6_caveat_fails_when_a_tested_populations_own_row_accounting_does_not_add_up(local_persistence, uid):
+    """Item 8 (CLAUDE.md §5 G6 caveat, P2/P3 gate review): the source-level
+    check above only catches a whole SOURCE's row count drifting from an
+    independent count -- it says nothing about a single TESTED population
+    (e.g. p_exp) silently losing a row a filter never declared in its own
+    excluded_counts. Isolated from the source-level check: `execute_skill`'s
+    REAL result is used untouched except for one population's own `rows`
+    figure, decremented by one with excluded_counts left as-is -- the raw
+    source check (which reads a DIFFERENT population, raw_expense_report,
+    never touched here) still passes; only the new per-population check
+    catches this."""
+    import orchestrator.nodes.fieldwork as fieldwork_module
+
+    ctx, state = _make_ctx_and_state(local_persistence, DATA_DIR, run_id=f"RUN-G6-POPROWS-{uid}")
+    state = discover(ctx, state)
+
+    real_execute_skill = fieldwork_module.execute_skill
+
+    def lying_execute_skill(*args, **kwargs):
+        result = real_execute_skill(*args, **kwargs)
+        p_exp = result.populations["p_exp"]
+        assert p_exp["rows"] > 0, "fixture must produce a non-empty p_exp population"
+        corrupted = {**p_exp, "rows": p_exp["rows"] - 1}  # one row silently unaccounted
+        return dataclasses.replace(result, populations={**result.populations, "p_exp": corrupted})
+
+    fieldwork_module.execute_skill = lying_execute_skill
+    try:
+        with pytest.raises(ReconciliationError) as exc:
+            execute(ctx, state)
+    finally:
+        fieldwork_module.execute_skill = real_execute_skill
+
+    message = str(exc.value)
+    assert "p_exp" in message
+    assert "expense_report" in message
+    # The raw source's OWN population is untouched, so nothing about
+    # raw_expense_report's row accounting itself should be implicated.
+    assert "raw_expense_report" not in message
+
+
 # ── G7 ────────────────────────────────────────────────────────────────────────
 
 
