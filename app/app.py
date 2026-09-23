@@ -125,6 +125,18 @@ def _start_executor_once() -> None:
     if _STARTED:
         return
     ctx = adapters.get_context()
+    # Reaper runs BEFORE the executor's admission loop starts (CLAUDE.md
+    # §2.3 rule 2: "A reaper runs on App start... this is load-bearing").
+    # reap_orphaned_runs_with_leases existed and was covered by
+    # tests/test_p3_service.py's restart-survival test (which calls it by
+    # hand, simulating what the App itself is supposed to do) but was never
+    # actually wired into a real App start -- found live, item 11 of the P3
+    # integration pass: after a genuine App restart, a run orphaned by the
+    # old process stayed `running` forever with no Resume action offered,
+    # because nothing had ever marked it `interrupted`.
+    from orchestrator.executor import reap_orphaned_runs_with_leases
+
+    reap_orphaned_runs_with_leases(ctx.persistence, now=ctx.clock())
     ctx.executor.start()
     _STARTED = True
 
