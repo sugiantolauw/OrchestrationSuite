@@ -382,12 +382,18 @@ class LocalPersistence:
 
     def _update_runs_projection(self, conn: sqlite3.Connection, state: RunState) -> None:
         audit_start, audit_end = state.audit_period
+        # approved_by (P1B's projection column, CLAUDE.md §4.8) has no
+        # matching RunState attribute -- it is derived from state.signoff,
+        # which the sign_off gate sets BEFORE calling transition() (CLAUDE.md
+        # §2.4). Without this it stayed NULL on every completed run forever
+        # (found live: P2/P3 gate review item 9).
+        approved_by = (state.signoff or {}).get("approver")
         values = [getattr(state, c) for c in _RUN_STATE_SUMMARY_COLUMNS]
         set_clause = ", ".join(f"{c} = ?" for c in _RUN_STATE_SUMMARY_COLUMNS)
         conn.execute(
             f"UPDATE runs SET {set_clause}, audit_period_start = ?, audit_period_end = ?, "
-            f"state_version = ? WHERE run_id = ? AND state_version < ?",
-            (*values, audit_start, audit_end, state.state_version, state.run_id, state.state_version),
+            f"approved_by = ?, state_version = ? WHERE run_id = ? AND state_version < ?",
+            (*values, audit_start, audit_end, approved_by, state.state_version, state.run_id, state.state_version),
         )
 
     def _update_runs_projection_with_retry(self, state: RunState) -> None:

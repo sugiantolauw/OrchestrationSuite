@@ -93,6 +93,13 @@ def test_full_local_run_to_signoff_and_export(tmp_path):
         assert status == "completed", run.get("status_reason")
         assert run["signoff"]["approver"] == "approver"
 
+        # CLAUDE.md §4.8's runs.approved_by projection column, P2/P3 gate
+        # review item 9: sign_off sets RunState.signoff but nothing wrote it
+        # into the runs table's own approved_by column, so it stayed NULL on
+        # every completed run.
+        row = next(r for r in ctx.persistence.list_runs() if r["run_id"] == run_id)
+        assert row["approved_by"] == "approver"
+
         filename, content = service.get_export(ctx, run_id, "xlsx")
         assert filename == "workpaper.xlsx"
         assert len(content) > 0

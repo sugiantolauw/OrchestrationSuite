@@ -642,12 +642,19 @@ class DeltaPersistence:
 
     def _update_runs_projection(self, conn, state: RunState) -> None:
         audit_start, audit_end = state.audit_period
+        # approved_by (P1B's projection column, CLAUDE.md §4.8) has no
+        # matching RunState attribute -- it is derived from state.signoff,
+        # which the sign_off gate sets BEFORE calling transition() (CLAUDE.md
+        # §2.4). Without this it stayed NULL on every completed run forever
+        # (found live: P2/P3 gate review item 9).
+        approved_by = (state.signoff or {}).get("approver")
         set_clause = ", ".join(f"{c} = :{c}" for c in _RUN_STATE_SUMMARY_COLUMNS)
         params = {c: getattr(state, c) for c in _RUN_STATE_SUMMARY_COLUMNS}
         params.update(
             {
                 "audit_period_start": audit_start,
                 "audit_period_end": audit_end,
+                "approved_by": approved_by,
                 "new_state_version": state.state_version,
                 "run_id": state.run_id,
             }
@@ -655,7 +662,8 @@ class DeltaPersistence:
         self._execute(
             conn,
             f"UPDATE {self._table('runs')} SET {set_clause}, audit_period_start = :audit_period_start, "
-            "audit_period_end = :audit_period_end, state_version = :new_state_version "
+            "audit_period_end = :audit_period_end, approved_by = :approved_by, "
+            "state_version = :new_state_version "
             "WHERE run_id = :run_id AND state_version < :new_state_version",
             params,
         )
