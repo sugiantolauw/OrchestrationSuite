@@ -139,6 +139,8 @@
     "split_window_groups": 0,
     "t31b_name_match_rate": 33.3,
     "t41_unmatched_register_rows": 844,
+    "t61d_dom_city_currency_conflict_rows": 0,
+    "t61d_int_city_currency_conflict_rows": 0,
     "total_files": 8,
     "total_records": 152921,
     "very_late_booking_count": 0

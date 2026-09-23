@@ -185,6 +185,15 @@ def _lookup_map(table, key_field: str, value_field: str) -> dict:
 
 
 def country_from_city_or_currency(df: pd.DataFrame, params: dict, ctx) -> tuple:
+    """T6.1d's 3-step country rule (CLAUDE.md §11 data decision 5): city
+    lookup, else currency lookup, else unmapped. `city` always wins when
+    present -- but that never used to check whether the row's OWN currency
+    independently implied a DIFFERENT country (P2/P3 gate review item N4):
+    a row whose city says Australia and whose currency is USD was silently
+    accepted with no signal that anything was worth a second look. Reported
+    now as `t61d_city_currency_conflict_rows` -- never defaulted, never
+    silently dropped (CLAUDE.md NN14); the declared rule still governs the
+    `country` value itself, this only adds visibility onto it."""
     city_col = params.get("city_column", "City/Location")
     currency_col = params.get("currency_column", "Transaction Currency")
     city_table = ctx.references[params.get("city_table", "city_country")]
@@ -194,12 +203,22 @@ def country_from_city_or_currency(df: pd.DataFrame, params: dict, ctx) -> tuple:
     currency_map = _lookup_map(currency_table, "currency", "country")
 
     city_present = df[city_col].notna()
+    city_country = df[city_col].map(city_map)
+    currency_country = df[currency_col].map(currency_map)
+
     country = pd.Series(pd.NA, index=df.index, dtype=object)
-    country.loc[city_present] = df.loc[city_present, city_col].map(city_map)
-    country.loc[~city_present] = df.loc[~city_present, currency_col].map(currency_map)
+    country.loc[city_present] = city_country.loc[city_present]
+    country.loc[~city_present] = currency_country.loc[~city_present]
 
     unmapped = country.isna()
-    counters = {"t61d_unmapped_rows": int(unmapped.sum())}
+
+    # Both sides resolved to a real country, independently, and disagree.
+    conflict = city_present & city_country.notna() & currency_country.notna() & (city_country != currency_country)
+
+    counters = {
+        "t61d_unmapped_rows": int(unmapped.sum()),
+        "t61d_city_currency_conflict_rows": int(conflict.sum()),
+    }
     return country, counters
 
 

@@ -282,8 +282,16 @@ def build_metrics(
     names a standard `kind` (CLAUDE.md §4.3); the primitive supplies the row-grain
     exceptions (`row_df`), the group-grain exceptions if any (`group_df`), the
     scoring-unit ids (`scored_units`) and any named scalar it computed itself
-    (`values`, e.g. an "excess" total or a "match_rate")."""
-    values = values or {}
+    (`values`, e.g. an "excess" total or a "match_rate").
+
+    `kind: value` may also name a POPULATION-level counter (`derivation_counters`/
+    `excluded_counts`, e.g. a custom `derive` step's own data-quality count --
+    P2/P3 gate review item 5) with no per-primitive special case: a Skill's
+    plan.yaml can surface any such counter as a real run metric the same way it
+    surfaces a primitive-computed value. `values` (the primitive's own) wins on
+    a name collision -- a population-level counter never silently overrides
+    one a primitive computed itself."""
+    values = {**population.excluded_counts, **population.derivation_counters, **(values or {})}
     out: dict[str, dict] = {}
     for name, spec in (metrics_spec or {}).items():
         kind = spec["kind"]

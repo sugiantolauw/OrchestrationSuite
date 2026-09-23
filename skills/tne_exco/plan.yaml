@@ -1002,6 +1002,10 @@ tests:
         daily_over_amount_dom: {kind: excess, unit: AUD}
         daily_over_employees_dom: {kind: distinct, column: Employee ID}
         daily_over_max_dom: {kind: max, column: Expense Amount (reimbursement currency), unit: AUD}
+        # N4: ambiguous/conflicting city<->currency country derivation, surfaced
+        # as a real run metric rather than computed-and-discarded (custom.py
+        # country_from_city_or_currency).
+        t61d_dom_city_currency_conflict_rows: {kind: value, key: t61d_city_currency_conflict_rows}
 
   - test_id: T6.1d_int
     control_id: CTL-TNE-13
@@ -1021,6 +1025,7 @@ tests:
         daily_over_count_int: {kind: count}
         daily_over_amount_int: {kind: excess, unit: AUD}
         daily_over_max_int: {kind: max, column: Expense Amount (reimbursement currency), unit: AUD}
+        t61d_int_city_currency_conflict_rows: {kind: value, key: t61d_city_currency_conflict_rows}
 
 # --- run-level reporting metrics (spec §2 "Run-level metrics (all computed)";
 # CLAUDE.md §0.2 -- replaces the fixed row/file/month-count constants
