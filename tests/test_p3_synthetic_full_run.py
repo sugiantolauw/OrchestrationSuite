@@ -1,0 +1,80 @@
+"""The one full run against the REAL synthetic_data/ (CLAUDE.md build brief P3
+§5's "full local run through service.start_audit_run with ORCH_BACKEND=local
+on synthetic_data/"): start_audit_run -> awaiting_signoff -> sign_off ->
+completed with an XLSX export, over the real 8 SKILL-001 source files rather
+than a fixture. This is genuinely slow -- xlsx parsing the ~30MB
+Expense_Report_Combined.xlsx costs roughly 50s per full read, and the run
+reads bound sources several times across discover/profile/execute/
+prioritise/G6 -- so it is kept in its own file, skipped when synthetic_data/
+is absent, and not part of the fast suite this session runs on every save."""
+
+from __future__ import annotations
+
+import time
+from pathlib import Path
+
+import pytest
+
+from orchestrator import service
+
+REPO_ROOT = Path(__file__).parent.parent
+SYNTHETIC_DATA_DIR = REPO_ROOT / "synthetic_data"
+
+pytestmark = pytest.mark.skipif(
+    not SYNTHETIC_DATA_DIR.is_dir(), reason="synthetic_data/ not present in this checkout"
+)
+
+
+def _wait_for_status(ctx, run_id, statuses, timeout):
+    deadline = time.time() + timeout
+    last = None
+    while time.time() < deadline:
+        last = service.get_run(ctx, run_id)["status"]
+        if last in statuses:
+            return last, time.time()
+        time.sleep(1)
+    raise AssertionError(f"run {run_id} did not reach {statuses} in {timeout}s (last={last})")
+
+
+def test_full_run_against_real_synthetic_data(tmp_path):
+    env = {
+        "ORCH_BACKEND": "local",
+        "ORCH_LOCAL_DB": str(tmp_path / "orch.db"),
+        "ORCH_LOCAL_DATA_ROOT": str(SYNTHETIC_DATA_DIR),
+        "ORCH_LOCAL_EXPORT_ROOT": str(tmp_path / "exports"),
+        "ORCH_WORKER_ID": "synthetic-full-run",
+    }
+    ctx = service.build_app_context(env)
+    ctx.executor.start()
+    started = time.time()
+    try:
+        bindings = service.suggest_bindings(ctx, "SKILL-001")
+        assert all(bindings.values()), bindings
+
+        run_id = service.start_audit_run(
+            ctx, skill_id="SKILL-001", bindings=bindings,
+            audit_period=("2025-01-01", "2026-04-30"),
+            objective="Full local run against real synthetic_data/", run_owner="tester",
+        )
+
+        status, reached_at = _wait_for_status(ctx, run_id, {"awaiting_signoff", "failed"}, timeout=600)
+        run = service.get_run(ctx, run_id)
+        assert status == "awaiting_signoff", run.get("status_reason")
+        duration_s = reached_at - started
+        print(f"\nsynthetic_data/ full run reached awaiting_signoff in {duration_s:.1f}s")
+
+        payload = service.get_run_payload(ctx, run_id)
+        assert payload["reconciliation"]
+        for source, rec in payload["reconciliation"].items():
+            assert rec["variance"] == 0, f"{source}: {rec}"  # G6, real data
+
+        service.sign_off(ctx, run_id, "approver")
+        status, _ = _wait_for_status(ctx, run_id, {"completed", "failed"}, timeout=120)
+        run = service.get_run(ctx, run_id)
+        assert status == "completed", run.get("status_reason")
+
+        filename, content = service.get_export(ctx, run_id, "xlsx")
+        assert filename == "workpaper.xlsx"
+        assert len(content) > 1000
+    finally:
+        ctx.executor.stop()

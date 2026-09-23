@@ -59,14 +59,27 @@ def discover(ctx: NodeContext, state: RunState) -> RunState:
     if missing:
         raise ContractViolation([f"no binding for contract source {s!r}" for s in missing])
 
+    # Re-resolve_version (cheap -- a file hash or DESCRIBE HISTORY, never a
+    # full read/parse; row_count() would BE a full read for a local xlsx
+    # source, redundant with profile()/execute() reading the same bytes
+    # again) rather than row_count(): this both confirms the bound table is
+    # still reachable and, as a bonus, catches the table having moved on to a
+    # different version since it was pinned at run creation -- a case
+    # row_count() alone would not distinguish from "unreachable".
     violations: list[str] = []
     for source, binding in bindings.items():
         if source not in contract_sources:
             continue
         try:
-            ctx.data_source.row_count(source, version=binding["version"])
+            current_version = ctx.data_source.resolve_version(source)
         except Exception as exc:  # noqa: BLE001 - surfaced as a named contract violation
-            violations.append(f"{source}: bound table unreachable at version {binding['version']!r}: {exc!r}")
+            violations.append(f"{source}: bound table unreachable: {exc!r}")
+            continue
+        if current_version != binding["version"]:
+            violations.append(
+                f"{source}: bound at version {binding['version']!r} but now resolves to "
+                f"{current_version!r} -- the source changed after it was pinned"
+            )
     if violations:
         raise ContractViolation(violations)
 
