@@ -11,8 +11,8 @@ Corporate target: to be filled by the platform owner before migration.
 |---|---|---|---|---|---|
 | 1 | Databricks Apps (create + deploy) | P3 (restart test), P5 | **Verified** 2026-09-23 — created in 139 s (compute MEDIUM), deployed in 9 s | ? | App URL needs OAuth; PAT is redirected to login |
 | 2 | App container CPU / memory limits | P3 | **Verified** 2026-09-23 — 4 vCPU, 15.6 GB RAM (MEDIUM); no cgroup limits visible below that | ? | Revisit if compute size changes |
-| 3 | Container recycling / scale-to-zero behaviour | P3 | Observing — probe app writes a heartbeat (pid + boot epoch) every 30 s to `app_probe.heartbeat` | ? | §2.5: if frequent, revisit Apps-vs-Jobs before P3 |
-| 4 | Background threads survive a multi-minute run | P3 | **Verified running** 2026-09-23 — daemon thread writing every 30 s; long-duration result pending | ? | |
+| 3 | Container recycling / scale-to-zero behaviour | P3 | **Observed** 2026-09-23 — one container, one pid for 53 min (02:59–03:52 UTC) with zero HTTP traffic: no recycling, no idle scale-down | ? | Re-observe over a longer window and across a redeploy in P3 |
+| 4 | Background threads survive a multi-minute run | P3 | **Verified** 2026-09-23 — daemon thread wrote 102 heartbeats over 53 min, max gap 33 s | ? | |
 | 5 | HTTP / gateway timeout on callbacks | P3 | Unverified | ? | Polling callbacks must stay under it |
 | 6 | Serverless SQL warehouse | P1A (Delta tests) | **Verified** 2026-09-23 — cold start 8.5 s, warm 1.2 s; single-row writes 2–8 s | ? | |
 | 7 | Warehouse attachable as App resource | P5 | **Verified** 2026-09-23 — `CAN_USE` resource; `valueFrom` injects the warehouse id; App SP writes Delta after `GRANT … TO \`<sp client id>\`` | ? | |
