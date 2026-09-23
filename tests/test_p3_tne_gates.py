@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import sys
 import tempfile
 from pathlib import Path
 
@@ -112,6 +113,26 @@ def test_g6_reconciliation_passes_with_zero_variance(local_persistence, uid):
         assert rec["variance"] == 0, f"{source}: {rec}"
         assert rec["engine_rows"] == rec["independent_rows"]
 
+    # P2/P3 gate review item 2: G6 also reconciles Sigma(amount) and min/max
+    # date, wherever the source's raw_<source> population declares one --
+    # not rows alone. expense_report declares both.
+    exp = state.reconciliation["expense_report"]
+    assert exp["amount"] is not None
+    assert exp["amount_variance"] == 0.0
+    assert exp["amount"] == exp["independent_amount"]
+    assert exp["min_date"] is not None and exp["max_date"] is not None
+    assert exp["min_date_match"] is True
+    assert exp["max_date_match"] is True
+    assert exp["min_date"] == exp["independent_min_date"]
+    assert exp["max_date"] == exp["independent_max_date"]
+
+    # travel_request_segment declares neither (spec §11/§0.5: no single
+    # natural amount/date column) -- reconciled on rows alone, never a
+    # fabricated amount/date comparison.
+    seg = state.reconciliation["travel_request_segment"]
+    assert seg["amount"] is None and seg["amount_variance"] is None
+    assert seg["min_date"] is None and seg["min_date_match"] is None
+
 
 def test_g6_reconciliation_fails_on_injected_variance(local_persistence, uid):
     ctx, state = _make_ctx_and_state(local_persistence, DATA_DIR, run_id=f"RUN-G6-BAD-{uid}")
@@ -130,6 +151,71 @@ def test_g6_reconciliation_fails_on_injected_variance(local_persistence, uid):
     finally:
         ctx.data_source.row_count = real_row_count
     assert "expense_report" in str(exc.value)
+
+
+def test_g6_reconciliation_fails_on_injected_amount_variance(local_persistence, uid):
+    # P2/P3 gate review item 2: a Sigma(amount) mismatch fails the run exactly
+    # like a row-count mismatch does -- amount is not just reported, it gates.
+    ctx, state = _make_ctx_and_state(local_persistence, DATA_DIR, run_id=f"RUN-G6-AMT-{uid}")
+    state = discover(ctx, state)
+
+    real_column_stats = ctx.data_source.column_stats
+
+    def lying_column_stats(source, *, version=None, amount_column=None, date_column=None):
+        stats = real_column_stats(
+            source, version=version, amount_column=amount_column, date_column=date_column
+        )
+        if source == "expense_report" and stats["amount"] is not None:
+            stats = {**stats, "amount": stats["amount"] + 1.0}
+        return stats
+
+    ctx.data_source.column_stats = lying_column_stats
+    try:
+        with pytest.raises(ReconciliationError) as exc:
+            execute(ctx, state)
+    finally:
+        ctx.data_source.column_stats = real_column_stats
+    assert "expense_report" in str(exc.value)
+    assert "amount" in str(exc.value)
+
+
+def test_g6_reconciliation_fails_on_injected_date_variance(local_persistence, uid):
+    ctx, state = _make_ctx_and_state(local_persistence, DATA_DIR, run_id=f"RUN-G6-DATE-{uid}")
+    state = discover(ctx, state)
+
+    real_column_stats = ctx.data_source.column_stats
+
+    def lying_column_stats(source, *, version=None, amount_column=None, date_column=None):
+        stats = real_column_stats(
+            source, version=version, amount_column=amount_column, date_column=date_column
+        )
+        if source == "expense_report" and stats["max_date"] is not None:
+            stats = {**stats, "max_date": "2099-12-31"}
+        return stats
+
+    ctx.data_source.column_stats = lying_column_stats
+    try:
+        with pytest.raises(ReconciliationError) as exc:
+            execute(ctx, state)
+    finally:
+        ctx.data_source.column_stats = real_column_stats
+    assert "expense_report" in str(exc.value)
+    assert "max_date" in str(exc.value)
+
+
+def test_g6_amount_variance_is_decimal_safe_not_float_epsilon(local_persistence, uid):
+    # A sub-cent float artefact (the kind repeated pandas summation can
+    # produce) must NOT register as a G6 variance; a genuine cent-level
+    # mismatch always must. Exercised directly against _decimal_variance
+    # rather than a full run, since reproducing a genuine float summation-
+    # order difference between two independent reads is not reliable to
+    # construct as a fixture.
+    from orchestrator.nodes.fieldwork import _decimal_variance
+
+    assert _decimal_variance(1960.0, 1959.9999999999998) == 0.0
+    assert _decimal_variance(1960.00, 1960.01) == pytest.approx(-0.01)
+    assert _decimal_variance(None, 1.0) is None
+    assert _decimal_variance(1.0, None) is None
 
 
 # ── G7 ────────────────────────────────────────────────────────────────────────
@@ -210,6 +296,45 @@ def test_g9_two_independent_executions_are_byte_identical(local_persistence_db_p
     assert len(results[0]["frame_sources"]) == 8  # one snapshot per SKILL-001 contract source
     assert results[0]["frame_sha256"] == results[1]["frame_sha256"]
     assert results[0]["frame_bytes"] == results[1]["frame_bytes"]
+
+
+def test_g9_two_subprocesses_with_different_hash_seeds_are_byte_identical(tmp_path, uid):
+    # CLAUDE.md P2/P3 gate review item 3: the in-process gate above shares one
+    # interpreter's PYTHONHASHSEED across both iterations, so it cannot catch
+    # set/dict iteration order or float-summation-order nondeterminism -- only
+    # genuinely separate PROCESSES with DIFFERENT hash seeds can. Runs
+    # tests/g9_subprocess_worker.py (never imported -- a real subprocess) twice
+    # end to end through discover/execute/find/prioritise/act/export, and
+    # compares metrics, flagged_rows, findings (incl. rendered text/severity/
+    # exposure), management actions, reconciliation and the XLSX workpaper's
+    # own cell values.
+    import os
+    import subprocess
+
+    worker = REPO_ROOT / "tests" / "g9_subprocess_worker.py"
+    results = []
+    for i, hash_seed in enumerate((["1"], ["2"]), start=1):
+        db_path = tmp_path / f"g9-sub-{i}.db"
+        out_path = tmp_path / f"g9-sub-{i}.json"
+        env = {**os.environ, "PYTHONHASHSEED": hash_seed[0]}
+        proc = subprocess.run(
+            [sys.executable, str(worker), str(db_path), f"RUN-G9SUB-{uid}", str(out_path)],
+            env=env, capture_output=True, text=True, timeout=120,
+        )
+        assert proc.returncode == 0, f"worker {i} (PYTHONHASHSEED={hash_seed[0]}) failed:\n{proc.stdout}\n{proc.stderr}"
+        results.append(json.loads(out_path.read_text()))
+
+    assert results[0]["metrics"] == results[1]["metrics"]
+    assert results[0]["flagged_rows"] == results[1]["flagged_rows"]
+    assert results[0]["findings"] == results[1]["findings"]
+    assert results[0]["management_actions"] == results[1]["management_actions"]
+    assert results[0]["reconciliation"] == results[1]["reconciliation"]
+    assert results[0]["xlsx_cells"] == results[1]["xlsx_cells"]
+    # A monetary finding really did fire on this fixture, and every sheet was
+    # actually compared -- an early-exit-to-empty on both sides would pass
+    # every assertion above without proving anything.
+    assert any(f.get("exposure_amount") for f in results[0]["findings"])
+    assert set(results[0]["xlsx_cells"]) >= {"Findings", "Reconciliation", "Metrics"}
 
 
 # ── G10 ───────────────────────────────────────────────────────────────────────

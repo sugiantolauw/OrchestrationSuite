@@ -1,20 +1,38 @@
 populations:
   # --- raw, unfiltered: one per contract source, for total_records / total_files
-  # reconciliation reporting only. No test reads these directly. ---
+  # reconciliation reporting only. No test reads these directly. `amount_column`/
+  # `date_column`, where a source has one unambiguous natural column of that
+  # kind, additionally drives G6's Sigma(amount) and min/max-date reconciliation
+  # (orchestrator.nodes.fieldwork.execute, CLAUDE.md §5 G6, P2/P3 gate review
+  # item 2) -- independently re-verified against DataSourceAdapter.column_stats
+  # at the same pinned version, never re-derived from the same in-memory frame.
+  # Omitted where a source has no single natural amount/date column
+  # (travel_request_segment, per_diem_rates: neither; approval_aging,
+  # booking_detail: a date but no amount).
   raw_expense_report:
     source: expense_report
+    amount_column: Expense Amount (reimbursement currency)
+    date_column: Transaction Date
   raw_attendee_validity:
     source: attendee_validity
+    amount_column: Entry Amount
+    date_column: Transaction Date
   raw_missing_receipt:
     source: missing_receipt
+    amount_column: Expense Amount (reimbursement currency)
+    date_column: Transaction Date
   raw_approval_aging:
     source: approval_aging
+    date_column: Approved Date/Time
   raw_travel_requests_no_expense:
     source: travel_requests_no_expense
+    amount_column: Total Approved Amount (rpt)
+    date_column: Start Date
   raw_travel_request_segment:
     source: travel_request_segment
   raw_booking_detail:
     source: booking_detail
+    date_column: Depart Date
   raw_per_diem_rates:
     source: per_diem_rates
 

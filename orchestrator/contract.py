@@ -262,3 +262,30 @@ class LocalFileDataSource:
     def row_count(self, source: str, *, version: str | None = None) -> int:
         v = version or self.resolve_version(source)
         return len(self.read_population(source, version=v))
+
+    def column_stats(
+        self,
+        source: str,
+        *,
+        version: str | None = None,
+        amount_column: str | None = None,
+        date_column: str | None = None,
+    ) -> dict:
+        # A SEPARATE read (re-parsed from the file's bytes, same as row_count
+        # above) rather than reusing the engine's own in-memory population --
+        # this is the independent side of G6's amount/date reconciliation
+        # (CLAUDE.md §5 G6, P2/P3 gate review item 2).
+        v = version or self.resolve_version(source)
+        amount = min_date = max_date = None
+        if amount_column or date_column:
+            df = self.read_population(
+                source, version=v, columns=[c for c in (amount_column, date_column) if c]
+            )
+            if amount_column:
+                amount = float(df[amount_column].sum()) if len(df) else 0.0
+            if date_column and len(df):
+                dates = pd.to_datetime(df[date_column])
+                if dates.notna().any():
+                    min_date = dates.min().date().isoformat()
+                    max_date = dates.max().date().isoformat()
+        return {"amount": amount, "min_date": min_date, "max_date": max_date}

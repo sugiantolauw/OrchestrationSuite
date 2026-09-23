@@ -1257,17 +1257,28 @@ def _combined_status(results: list[dict]) -> dict:
 
 
 def _reconciliation_panel(reconciliation: dict | None) -> html.Div | None:
+    # CLAUDE.md §5 G6 / P2/P3 gate review item 2: reconciled on rows always,
+    # plus Sigma(amount) and min/max date wherever the source's raw_<source>
+    # population declares one -- every figure here comes from RunState's
+    # persisted reconciliation dict, never recomputed in this callback.
     if not reconciliation:
         return None
     chips = []
     for source, rec in sorted(reconciliation.items()):
         variance = rec.get("variance")
-        variance_text = "reconciled" if variance in (0, None) else f"variance {variance}"
+        amount_variance = rec.get("amount_variance")
+        date_ok = rec.get("min_date_match") is not False and rec.get("max_date_match") is not False
+        ok = variance in (0, None) and amount_variance in (0, 0.0, None) and date_ok
+        parts = []
         engine_rows = rec.get("engine_rows")
-        chips.append(html.Span(
-            f"{source}: {_fmt_count(engine_rows)} rows · {variance_text}" if engine_rows is not None else f"{source}: n/a",
-            className="chip", style={"color": "#2c7a4b" if variance in (0, None) else "#b85042"},
-        ))
+        if engine_rows is not None:
+            parts.append(f"{_fmt_count(engine_rows)} rows")
+        if rec.get("amount") is not None:
+            parts.append(_fmt_currency(rec["amount"]))
+        if rec.get("min_date") and rec.get("max_date"):
+            parts.append(f"{rec['min_date']} to {rec['max_date']}")
+        text = f"{source}: {' · '.join(parts)} · {'reconciled' if ok else 'VARIANCE'}" if parts else f"{source}: n/a"
+        chips.append(html.Span(text, className="chip", style={"color": "#2c7a4b" if ok else "#b85042"}))
     return html.Div([
         html.Div("Population reconciliation (G6)", style={"fontWeight": 700, "fontSize": 11, "color": "#1e2761", "marginBottom": 4}),
         html.Div(chips, className="chip-row"),
@@ -1313,7 +1324,7 @@ def _methodology_panel(payload: dict | None) -> html.Details:
                 html.Table([
                     html.Thead(html.Tr([html.Th("Layer"), html.Th("What it proves")])),
                     html.Tbody([
-                        html.Tr([html.Td("Population reconciliation"), html.Td("Source row count reconciled against an independent count (CLAUDE.md G6)")]),
+                        html.Tr([html.Td("Population reconciliation"), html.Td("Source row count, total amount and min/max date reconciled against an independently obtained figure, wherever the source declares an amount/date column (CLAUDE.md G6)")]),
                         html.Tr([html.Td("Deterministic rule"), html.Td("The test was applied consistently to every record — the same plan.yaml primitive, every run")]),
                         html.Tr([html.Td("Evidence citation"), html.Td("Each metric links to its source table/file version and row keys (source_ref)")]),
                         html.Tr([html.Td("Auditor judgement"), html.Td("Sign-off is required before a finding leaves the system (CLAUDE.md §2.4)")]),
@@ -1325,7 +1336,7 @@ def _methodology_panel(payload: dict | None) -> html.Details:
             html.Div([
                 html.Div("Limitations", style={"fontWeight": 700, "fontSize": 11, "color": "#1e2761", "marginBottom": 4}),
                 html.Ul([
-                    html.Li("Source data completeness has not been independently verified beyond the G6 row-count reconciliation."),
+                    html.Li("Source data completeness has not been independently verified beyond the G6 row/amount/date reconciliation."),
                     html.Li("Thresholds carrying provenance 'analyst-set' are pending policy confirmation — flagged wherever they drive a severity."),
                     html.Li("Tests marked 'Not testable' are declared gaps (e.g. no preferred-hotel list, no classification endpoint yet), never a silent zero."),
                     html.Li("Rule-based results indicate exceptions, not confirmed findings — sign-off is a human judgement."),

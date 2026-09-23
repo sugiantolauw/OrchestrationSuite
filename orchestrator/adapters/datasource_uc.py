@@ -396,6 +396,62 @@ class UCTableDataSource:
             v = int(row[cols.index("version")])
         return self._row_count_at_version(quoted, v)
 
+    def column_stats(
+        self,
+        source: str,
+        *,
+        version: str | None = None,
+        amount_column: str | None = None,
+        date_column: str | None = None,
+    ) -> dict:
+        """G6's amount/min-max-date reconciliation (CLAUDE.md §5 G6, P2/P3 gate
+        review item 2), pushed into the warehouse (§2.3 rule 4) rather than
+        pulling the whole source into pandas just to sum or bound-check it."""
+        if not amount_column and not date_column:
+            return {"amount": None, "min_date": None, "max_date": None}
+        fqn = self._fqn(source)
+        quoted = _quoted_fqn(fqn)
+        v = int(version) if version is not None else None
+        if v is None:
+            cur = self._execute(f"DESCRIBE HISTORY {quoted} LIMIT 1")
+            cols = [d[0] for d in cur.description]
+            row = cur.fetchone()
+            v = int(row[cols.index("version")])
+
+        actual_columns = self._describe_columns(quoted, v)
+        logical_to_actual = self._logical_column_map([c for c in actual_columns if c != "_source_row"])
+
+        aggregations: dict[str, str] = {}
+        if amount_column:
+            actual = logical_to_actual.get(amount_column)
+            if actual is None:
+                raise UCSourceError(f"{source}: amount_column {amount_column!r} not found in {fqn}")
+            aggregations["__amount"] = f"sum({_quote_ident(actual)})"
+        if date_column:
+            actual = logical_to_actual.get(date_column)
+            if actual is None:
+                raise UCSourceError(f"{source}: date_column {date_column!r} not found in {fqn}")
+            aggregations["__min_date"] = f"min({_quote_ident(actual)})"
+            aggregations["__max_date"] = f"max({_quote_ident(actual)})"
+
+        select_sql = ", ".join(f"{expr} AS {_quote_ident(out)}" for out, expr in aggregations.items())
+        cur = self._execute(f"SELECT {select_sql} FROM {quoted} VERSION AS OF {v}")
+        row = cur.fetchone()
+        cols = [d[0] for d in cur.description]
+
+        amount = None
+        if amount_column:
+            v_amount = row[cols.index("__amount")]
+            amount = float(v_amount) if v_amount is not None else 0.0
+        min_date = max_date = None
+        if date_column:
+            v_min, v_max = row[cols.index("__min_date")], row[cols.index("__max_date")]
+            if v_min is not None:
+                min_date = pd.Timestamp(v_min).date().isoformat()
+            if v_max is not None:
+                max_date = pd.Timestamp(v_max).date().isoformat()
+        return {"amount": amount, "min_date": min_date, "max_date": max_date}
+
     # ── UI helper (source-binding dropdowns) ────────────────────────────────
 
     def list_tables(self, catalog: str | None = None, schema: str | None = None) -> list[dict]:

@@ -201,7 +201,7 @@
       "rows": 29103
     },
     "raw_attendee_validity": {
-      "amount": null,
+      "amount": 998832.14,
       "rows": 1394
     },
     "raw_booking_detail": {
@@ -209,11 +209,11 @@
       "rows": 7019
     },
     "raw_expense_report": {
-      "amount": null,
+      "amount": 17911073.40000003,
       "rows": 92798
     },
     "raw_missing_receipt": {
-      "amount": null,
+      "amount": 35381.45999999999,
       "rows": 871
     },
     "raw_per_diem_rates": {
@@ -225,7 +225,7 @@
       "rows": 16747
     },
     "raw_travel_requests_no_expense": {
-      "amount": null,
+      "amount": 5688373.4,
       "rows": 4784
     },
     "t31a_pop": {

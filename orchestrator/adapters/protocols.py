@@ -46,6 +46,24 @@ class DataSourceAdapter(Protocol):
         not an already-qualified table_fqn. Used for G6's independent row count."""
         ...
 
+    def column_stats(
+        self,
+        source: str,
+        *,
+        version: str | None = None,
+        amount_column: str | None = None,
+        date_column: str | None = None,
+    ) -> dict:
+        """Independently computed Sigma(amount)/min-max date for a bound source, at
+        the same pinned version -- same pattern as row_count (a SEPARATE read/
+        aggregation, never reused from the engine's own in-memory population).
+        Used for G6's amount and date reconciliation (CLAUDE.md §5 G6, P2/P3
+        gate review item 2). Either column may be omitted when a source has no
+        single natural amount or date column; the corresponding key is then
+        None. Returns {"amount": float | None, "min_date": str | None,
+        "max_date": str | None} (dates as ISO 'YYYY-MM-DD')."""
+        ...
+
 
 class ModelClient(Protocol):
     def chat(

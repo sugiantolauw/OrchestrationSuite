@@ -25,6 +25,7 @@ import dataclasses
 import hashlib
 import io
 import json
+from decimal import Decimal
 
 import pandas as pd
 import xlsxwriter
@@ -163,18 +164,38 @@ def plan(ctx: NodeContext, state: RunState) -> RunState:
 # ── execute phase ────────────────────────────────────────────────────────────
 
 
+def _decimal_variance(engine_value: float | None, independent_value: float | None) -> float | None:
+    """Exact, Decimal-safe difference for G6's amount reconciliation (CLAUDE.md
+    §5 G6, P2/P3 gate review item 2) -- built from each float's own repr
+    string, never from the float itself, so summation-order artefacts below a
+    cent (e.g. 1959.9999999999998 vs 1960.0) never register as a variance
+    while a genuine cent-level mismatch always does. Returns None only when
+    either side is None (no amount_column declared, or nothing to sum)."""
+    if engine_value is None or independent_value is None:
+        return None
+    diff = round(Decimal(str(engine_value)) - Decimal(str(independent_value)), 2)
+    return float(diff)
+
+
 def execute(ctx: NodeContext, state: RunState) -> RunState:
     """Runs every test in plan order via orchestrator.engine.execute_skill
     (CLAUDE.md §4.2) and persists its two durable outputs: run_metrics (every
     metric any test produced) and flagged_rows (the row-level RF_* evidence,
     long-format). NEVER calls an LLM.
 
-    G6 reconciliation compares each contract source's row count as the engine
-    saw it (via that source's `raw_<source>` population, declared unfiltered in
-    plan.yaml) against an INDEPENDENTLY obtained row count from
-    DataSourceAdapter.row_count() at the same pinned version -- not a number
-    re-derived from the same in-memory frame. A non-zero variance fails the
-    run outright (CLAUDE.md §5 G6); it is never silently reported and ignored.
+    G6 reconciliation compares each contract source's row count, Sigma(amount)
+    (where the source's `raw_<source>` population declares an `amount_column`)
+    and min/max date (where it declares a `date_column`) as the engine saw
+    them (via that unfiltered `raw_<source>` population in plan.yaml) against
+    INDEPENDENTLY obtained figures from DataSourceAdapter.row_count() /
+    .column_stats() at the same pinned version -- never a number re-derived
+    from the same in-memory frame. The amount comparison is Decimal-safe
+    (`_decimal_variance`), never a raw float `==`. A non-zero variance in ANY
+    of the four -- rows, amount, min date, max date -- fails the run outright
+    (CLAUDE.md §5 G6, P2/P3 gate review item 2); it is never silently reported
+    and ignored. A source whose `raw_<source>` population declares neither
+    column (no single natural amount/date column for that source) is
+    reconciled on rows alone, same as before this fix.
 
     Passes state.data_assets' versions (resolved once, at start_audit_run, per
     source) straight through as execute_skill's pinned_versions -- a source
@@ -224,23 +245,59 @@ def execute(ctx: NodeContext, state: RunState) -> RunState:
     else:
         table_ref = "flagged_rows"
 
+    populations_cfg = ctx.skill.plan.get("populations", {})
     reconciliation: dict[str, dict] = {}
     differences: list[str] = []
     for source, version in result.source_versions.items():
         raw_pop = result.populations.get(f"raw_{source}")
+        raw_pop_cfg = populations_cfg.get(f"raw_{source}") or {}
+        amount_col = raw_pop_cfg.get("amount_column")
+        date_col = raw_pop_cfg.get("date_column")
+
         engine_rows = raw_pop["rows"] if raw_pop is not None else None
+        engine_amount = raw_pop["amount"] if raw_pop is not None else None
+        engine_min_date = raw_pop["min_date"] if raw_pop is not None else None
+        engine_max_date = raw_pop["max_date"] if raw_pop is not None else None
+
         independent_rows = ctx.data_source.row_count(source, version=version)
-        variance = None if engine_rows is None else engine_rows - independent_rows
+        row_variance = None if engine_rows is None else engine_rows - independent_rows
+
+        if amount_col or date_col:
+            independent = ctx.data_source.column_stats(
+                source, version=version, amount_column=amount_col, date_column=date_col
+            )
+        else:
+            independent = {"amount": None, "min_date": None, "max_date": None}
+
+        amount_variance = _decimal_variance(engine_amount, independent["amount"]) if amount_col else None
+        min_date_match = engine_min_date == independent["min_date"] if date_col else None
+        max_date_match = engine_max_date == independent["max_date"] if date_col else None
+
         reconciliation[source] = {
             "engine_rows": engine_rows,
             "independent_rows": independent_rows,
-            "variance": variance,
-            "amount": raw_pop["amount"] if raw_pop is not None else None,
-            "min_date": raw_pop["min_date"] if raw_pop is not None else None,
-            "max_date": raw_pop["max_date"] if raw_pop is not None else None,
+            "variance": row_variance,
+            "amount": engine_amount,
+            "independent_amount": independent["amount"] if amount_col else None,
+            "amount_variance": amount_variance,
+            "min_date": engine_min_date,
+            "max_date": engine_max_date,
+            "independent_min_date": independent["min_date"] if date_col else None,
+            "independent_max_date": independent["max_date"] if date_col else None,
+            "min_date_match": min_date_match,
+            "max_date_match": max_date_match,
         }
-        if variance not in (None, 0):
+        if row_variance not in (None, 0):
             differences.append(f"{source}: engine_rows={engine_rows} independent_rows={independent_rows}")
+        if amount_variance not in (None, 0.0):
+            differences.append(
+                f"{source}: engine_amount={engine_amount} independent_amount={independent['amount']} "
+                f"variance={amount_variance}"
+            )
+        if min_date_match is False:
+            differences.append(f"{source}: engine_min_date={engine_min_date} independent_min_date={independent['min_date']}")
+        if max_date_match is False:
+            differences.append(f"{source}: engine_max_date={engine_max_date} independent_max_date={independent['max_date']}")
     if differences:
         raise ReconciliationError(state.run_id, differences)
 
@@ -767,7 +824,12 @@ def _write_xlsx_workpaper(state: RunState, findings: list[dict], metrics: dict[s
     ws4 = wb.add_worksheet("Reconciliation")
     ws4.write_row(
         0, 0,
-        ["source", "engine_rows", "independent_rows", "variance", "amount", "min_date", "max_date"],
+        [
+            "source", "engine_rows", "independent_rows", "row_variance",
+            "amount", "independent_amount", "amount_variance",
+            "min_date", "independent_min_date", "min_date_match",
+            "max_date", "independent_max_date", "max_date_match",
+        ],
         bold,
     )
     reconciliation = state.reconciliation or {}
@@ -777,8 +839,14 @@ def _write_xlsx_workpaper(state: RunState, findings: list[dict], metrics: dict[s
         ws4.write_number(r, 2, rec.get("independent_rows") or 0)
         ws4.write_number(r, 3, rec.get("variance") or 0)
         ws4.write_number(r, 4, rec.get("amount") or 0.0, money)
-        _write_str(ws4, r, 5, rec.get("min_date"))
-        _write_str(ws4, r, 6, rec.get("max_date"))
+        ws4.write_number(r, 5, rec.get("independent_amount") or 0.0, money)
+        ws4.write_number(r, 6, rec.get("amount_variance") or 0.0, money)
+        _write_str(ws4, r, 7, rec.get("min_date"))
+        _write_str(ws4, r, 8, rec.get("independent_min_date"))
+        _write_str(ws4, r, 9, str(rec.get("min_date_match")))
+        _write_str(ws4, r, 10, rec.get("max_date"))
+        _write_str(ws4, r, 11, rec.get("independent_max_date"))
+        _write_str(ws4, r, 12, str(rec.get("max_date_match")))
     _write_str(ws4, len(reconciliation) + 2, 0, footer)
 
     counts: dict[str, int] = {}
