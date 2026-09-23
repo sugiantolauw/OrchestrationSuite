@@ -1,9 +1,12 @@
 # SKILL-001 T&E ExCo — per-test specification
 
-**Status: DRAFT — pending audit approval.** Required by CLAUDE.md §0.2 and the P2 definition of
-done: written *before* porting, and it wins wherever `computation.py` disagrees. Each item marked
-**[PENDING]** is a judgement made by the build that an auditor must confirm or change; the build
-proceeds on the stated default and the UI labels it.
+**Status: DRAFT — defaults accepted by the user 2026-09-23; policy sources and a named reviewer
+outstanding.** Required by CLAUDE.md §0.2 and the P2 definition of done: written *before* porting,
+and it wins wherever `computation.py` disagrees. Each item marked **[ACCEPTED DEFAULT 2026-09-23]**
+was a judgement made by the build that the user accepted as stated on 2026-09-23. Thresholds remain
+`provenance: analyst-set`, `pending_policy_confirmation: true` because no policy reference has been
+supplied, and the UI continues to label them. Publishing SKILL-001 (`draft → published`) still
+requires a named reviewer.
 
 Data profiled 2026-09-23 from `synthetic_data/` (row counts match `FILE_REGISTRY` exactly).
 
@@ -13,7 +16,7 @@ Data profiled 2026-09-23 from `synthetic_data/` (row counts match `FILE_REGISTRY
 
 | Rule | Specification |
 |---|---|
-| **ExCo identity** | By `Employee ID`, never by name (§0.5). IDs: 52725, 52394, 52622, 52424, 51867, 52660, 51606, **52472**, 52674, 52703, 50079. **[PENDING]** "Delacroix, Marie" also has ID 50040 (27 claims) — excluded by default because 52472 is the ID that appears as an approver in both expense and approval data, so 52472 is taken to be the executive and 50040 a namesake. |
+| **ExCo identity** | By `Employee ID`, never by name (§0.5). IDs: 52725, 52394, 52622, 52424, 51867, 52660, 51606, **52472**, 52674, 52703, 50079. **[ACCEPTED DEFAULT 2026-09-23]** "Delacroix, Marie" also has ID 50040 (27 claims) — excluded by default because 52472 is the ID that appears as an approver in both expense and approval data, so 52472 is taken to be the executive and 50040 a namesake. |
 | **Name-only sources** | `travel_requests_no_expense`, `travel_request_segment` and `booking_detail` carry no employee ID. They are matched on the exact trimmed display name of the ExCo IDs above. Every name join reports its match rate. This is a declared exception to the ID rule, forced by the source. |
 | **Expense population `P_EXP`** | Rows of `expense_report` where `Employee ID` ∈ ExCo **or** `Employee ID(Cross Change Approver)` ∈ ExCo, **as a set union** (a row counts once). Each row carries `role ∈ {prepared, approved, both}`. `computation.py` concatenated the two sets, which counts rows in both twice (23 rows in this data). With the default ExCo IDs (50040 excluded): 3,711 rows before the period filter (prepared 1,417 / approved 2,317 / both 23), 3,628 in the period. Including 50040 would add 27 prepared rows (3,738 / 3,654). |
 | **Audit period** | 2025-01-01 to 2026-04-30 inclusive, calendar dates in **Australia/Sydney**. The source dates carry no time component, so they are compared as dates. Rows outside the period are excluded and counted (`out_of_period_rows`). The source contains dates back to 2017. |
@@ -37,7 +40,7 @@ threshold · exclusions · expected evidence · primitive · deviation from `com
 - **Grain / identity / scoring unit:** a travel request (`Travel Request ID`).
 - **Exception:** every request in the population. The source is itself the system's "authorised request without expense entry" register.
 - **Threshold:** 0 (catalogue).
-- **Exclusions:** `Cancelled` and `Sent Back to Employee`. **[PENDING]** Are cancelled requests out of scope?
+- **Exclusions:** `Cancelled` and `Sent Back to Employee`. **[ACCEPTED DEFAULT 2026-09-23]** Are cancelled requests out of scope?
 - **Evidence:** request ID, employee, start date, policy, `Total Approved Amount (rpt)`.
 - **Metrics:** `preapproval_unlinked_count`, `preapproval_unlinked_amount`, `preapproval_employees`.
 - **Primitive:** `list_membership` (column `Approval Status`, allowed list).
@@ -47,8 +50,8 @@ threshold · exclusions · expected evidence · primitive · deviation from `com
 ### T3.1b — Travel booked without pre-approval
 - **Population:** `booking_detail` rows whose `Lead Traveller Name` is an ExCo name, `Depart Date` in period, and `Booking Status` ≠ `Cancelled`.
 - **Join key (user decision):** employee name + travel class.
-  - Every `Booking Type` value is `Business Travel`, so the class comes from `Dom | Int`: `Domestic` ↔ request `Expense Type` ending `- Domestic Travel`; `International` and `Trans Tasman` ↔ `- International Travel`. **[PENDING]** Confirm this reading of "employee name + expense type".
-  - **[PENDING]** Add a date condition (request `Start Date` within ±3 days of `Depart Date`)? Without one, any request of the same class at any time satisfies the join, which hides unapproved trips. Default: no date condition, as instructed.
+  - Every `Booking Type` value is `Business Travel`, so the class comes from `Dom | Int`: `Domestic` ↔ request `Expense Type` ending `- Domestic Travel`; `International` and `Trans Tasman` ↔ `- International Travel`. **[ACCEPTED DEFAULT 2026-09-23]** Confirm this reading of "employee name + expense type".
+  - **[ACCEPTED DEFAULT 2026-09-23]** Add a date condition (request `Start Date` within ±3 days of `Depart Date`)? Without one, any request of the same class at any time satisfies the join, which hides unapproved trips. Default: no date condition, as instructed.
 - **Grain / scoring unit:** a booking (`Booking ID`).
 - **Exception:** a booking with no matching request.
 - **Evidence:** booking ID, traveller, depart date, class, match rate.
@@ -59,7 +62,7 @@ threshold · exclusions · expected evidence · primitive · deviation from `com
 ### T3.2a — Non-preferred supplier usage
 - **Source correction:** `booking_detail` has **no supplier column**. `computation.py` read `Supplier Name`, which does not exist. The test runs on `P_EXP` using `Vendor`.
 - **Population:** `P_EXP` rows with `Expense Type` ∈ {Airfares, Accommodation, Car Rentals} × {Domestic, International} Travel. Excludes vendor `FCM` (the travel agency: its lines are agency charges, not the supplier).
-- **Preferred lists [PENDING — analyst-set, no policy source]:**
+- **Preferred lists [ACCEPTED DEFAULT 2026-09-23 — analyst-set, policy source pending]:**
   - Airlines: Qantas, QantasLink, Jetstar, Virgin Australia — matched as whole words in the upper-cased vendor (e.g. `QANTAS AIRWAYS (I)`, `VIRGIN AUSTRALIA - AU - AGENCY`).
   - Car: Avis, Budget, Hertz.
   - Hotels: **none supplied**. The accommodation sub-tests are `not_testable`, reason "no preferred-hotel list supplied".
@@ -69,7 +72,7 @@ threshold · exclusions · expected evidence · primitive · deviation from `com
 
 ### T3.3a — Late / urgent travel bookings
 - **Population:** as T3.1b (ExCo bookings in period, not cancelled).
-- **Threshold [PENDING — analyst-set]:**
+- **Threshold [ACCEPTED DEFAULT 2026-09-23 — analyst-set, policy source pending]:**
   - late = `Advance Purchase Days` < 7 (Domestic) or < 14 (International, Trans Tasman);
   - very late = < 3 (any class).
   - `computation.py` declared these constants but then applied 14 to every booking ("simplified"), and the catalogue said "< 14". The class split is used here, and the catalogue is updated to match (G8).
@@ -83,7 +86,7 @@ threshold · exclusions · expected evidence · primitive · deviation from `com
 - **Entry identity:** `(Employee ID, Report Name, Transaction Date, Vendor, Entry Amount)`. The source has no entry key.
 - **Population:** entries of ExCo claimants (`Employee ID`) in period, with `Expense Type` ∈ {`Staff/Client Function: Offsite Food/Drink`, `Staff/Client Function: Onsite Food/Drink`}.
 - **Per-head spend:** `Entry Amount` / `Number of Attendees` (fixes defect §0.2 `:202`, which compared the whole claim).
-- **Threshold [PENDING — analyst-set]:** $40 per head if every attendee is internal, $80 if **any** attendee is external (P2 build-brief correction, B5: the first port aggregated the per-row internal/external classification with the FIRST attendee row read for the entry, not `any` — `ratio_per_group`'s `limit_selector_aggregate: any` parameter now implements the "any attendee" rule literally). External = `Company` or `External ID` present. **[PENDING]** Confirm the internal/external rule. On this data the rule classifies **every** entry as external: `Company` is null on all 1,394 attendee rows and `External ID` is populated on all of them, so it is probably populated for employees too. A usable rule needs to know what `External ID` holds. **Consequence for Surface 2:** because `External ID` is non-null on every real row, `any` and `first` never disagree on this data, so the `any` fix cannot be exercised through `tests/fixtures/tne_planted/`; it is covered by a direct primitive-level test instead (`tests/test_p2a_primitives.py::test_ratio_per_group_limit_selector_aggregate_any_vs_first`) against a synthetic population not bound by this contract.
+- **Threshold [ACCEPTED DEFAULT 2026-09-23 — analyst-set, policy source pending]:** $40 per head if every attendee is internal, $80 if **any** attendee is external (P2 build-brief correction, B5: the first port aggregated the per-row internal/external classification with the FIRST attendee row read for the entry, not `any` — `ratio_per_group`'s `limit_selector_aggregate: any` parameter now implements the "any attendee" rule literally). External = `Company` or `External ID` present. **[ACCEPTED DEFAULT 2026-09-23]** Confirm the internal/external rule. On this data the rule classifies **every** entry as external: `Company` is null on all 1,394 attendee rows and `External ID` is populated on all of them, so it is probably populated for employees too. A usable rule needs to know what `External ID` holds. **Consequence for Surface 2:** because `External ID` is non-null on every real row, `any` and `first` never disagree on this data, so the `any` fix cannot be exercised through `tests/fixtures/tne_planted/`; it is covered by a direct primitive-level test instead (`tests/test_p2a_primitives.py::test_ratio_per_group_limit_selector_aggregate_any_vs_first`) against a synthetic population not bound by this contract.
 - **Grain / scoring unit:** an entertainment entry.
 - **Metrics:** `ent_assessed`, `ent_over_internal_count`, `ent_over_external_count`, `ent_over_amount`.
 - **Primitive:** `ratio_per_group`.
@@ -97,7 +100,7 @@ threshold · exclusions · expected evidence · primitive · deviation from `com
 - **Deviation:** `computation.py` defaulted `all_have_affidavit = True` ("default assumption based on audit results"). Here it is computed.
 
 ### T4.2 — Missing attendee details
-- **Population:** `P_EXP` lines with `Expense Type` ∈ {`Staff/Client Function: Offsite Food/Drink`, `Staff/Client Function: Onsite Food/Drink`, `Staff/Client Function: No Food/No Drink`}. **[PENDING]** The catalogue also names gifts; gifts have no attendees, so they are excluded by default.
+- **Population:** `P_EXP` lines with `Expense Type` ∈ {`Staff/Client Function: Offsite Food/Drink`, `Staff/Client Function: Onsite Food/Drink`, `Staff/Client Function: No Food/No Drink`}. **[ACCEPTED DEFAULT 2026-09-23]** The catalogue also names gifts; gifts have no attendees, so they are excluded by default.
 - **Exception:** no attendee record for the line. Anti-join to `attendee_validity` on `(Employee ID, Transaction Date, Expense Type, amount)`, where `Entry Amount` = `Expense Amount (reimbursement currency)` to the cent.
 - **Grain / scoring unit:** an expense line.
 - **Metrics:** `att_total`, `att_missing_count`, `att_missing_pct`.
@@ -118,7 +121,7 @@ threshold · exclusions · expected evidence · primitive · deviation from `com
 
 ### T5.1 — Potential split claims
 - **Population:** `P_EXP`, amount > 0, vendor not in {`FCM`, `THE MOVING COMPANY`} (exact trimmed match, not substring).
-- **Same-day group:** `(Employee ID, Vendor, Transaction Date, Expense Type)` with count > 1 **and** sum > $5,000 **and** every line ≤ $5,000. **[PENDING]** The last condition is new: a split is by definition made of parts that are each under the limit. Without it, a single $6,000 line plus a $10 line counts as a "split".
+- **Same-day group:** `(Employee ID, Vendor, Transaction Date, Expense Type)` with count > 1 **and** sum > $5,000 **and** every line ≤ $5,000. **[ACCEPTED DEFAULT 2026-09-23]** The last condition is new: a split is by definition made of parts that are each under the limit. Without it, a single $6,000 line plus a $10 line counts as a "split".
 - **Window group:** within `(Employee ID, Vendor, Expense Type)`, every 3-calendar-day window `[d, d+2]` anchored on each line's date. A window is an exception when it has more than one line, its **lines in the window** sum to > $5,000, and each line is ≤ $5,000. Overlapping windows are merged into one claim group.
 - **Defect fixed:** `computation.py:365` summed the whole employee/vendor/type group once any pair fell within 2 days. The bug at `:390` (`dir()`) disappears with the rewrite.
 - **Claim identity (P2 build-brief correction, B3):** a claim group's identity is its ROW MEMBERSHIP, not a key tuple. Same-day detection and window detection run independently and can each find a group; if a window detection's member rows are the IDENTICAL set to a same-day detection's, they are the same claim and are counted once. Same-day and window detections with DIFFERENT member sets (e.g. a same-day pair that is also, correctly, part of a larger merged window) remain distinct claims. The first port scored every same-day and window detection as its own unit keyed on `(group_keys [+ date])`, which double-counts every case where a same-day pair is also independently found by the window pass over the identical rows — this is the population-inflation defect CLAUDE.md §0.2 describes, reproduced by scoring on key tuples instead of row membership.
@@ -129,7 +132,7 @@ threshold · exclusions · expected evidence · primitive · deviation from `com
 
 ### T5.2 — Duplicate expense claims
 - **Population:** `P_EXP`, amount > 0.
-- **Duplicate key:** `(Employee ID, Transaction Date, Vendor, amount)` exact. Lines sharing a `Parent Key` are excluded as itemisations of one entry, not duplicates. **[PENDING]** Confirm itemisation semantics.
+- **Duplicate key:** `(Employee ID, Transaction Date, Vendor, amount)` exact. Lines sharing a `Parent Key` are excluded as itemisations of one entry, not duplicates. **[ACCEPTED DEFAULT 2026-09-23]** Confirm itemisation semantics.
 - **OOP vs card sub-test:** a duplicate group containing both `Out of Pocket` and a corporate card (`Amex IBCP`, `ANZ Visa CBCP`).
 - **Grain:** lines.
 - **Scoring unit:** the duplicate group.
@@ -141,7 +144,7 @@ threshold · exclusions · expected evidence · primitive · deviation from `com
 - **Population:** `approval_aging` rows with `Approver ID` ∈ ExCo and `Approved Date/Time` in period.
 - **Grain / scoring unit:** an approval step `(Report ID, Step, Approver ID)`. A report can have up to 3 steps.
 - **Receipt viewed:** `Report Receipt Viewed` = `Yes` OR `All Entry Receipts Viewed` = `Yes` (the actual column names; `computation.py` referenced non-existent ones and silently set every row to "not viewed").
-- **Instant:** viewed (the two-column rule above, **not** `Receipts Viewed Date` — a P2 build-brief correction: `Receipts Viewed Date` is evidence of when a receipt was viewed, not a substitute definition of "was it viewed") AND `Minutes of Approval from Receipt View` < `thresholds.instant_approval_minutes` (1). **[PENDING]** For steps where no receipt was viewed, `Minutes of Approval from Receipt View` is undefined; instant is assessed only on steps where receipts were viewed (the two-column rule).
+- **Instant:** viewed (the two-column rule above, **not** `Receipts Viewed Date` — a P2 build-brief correction: `Receipts Viewed Date` is evidence of when a receipt was viewed, not a substitute definition of "was it viewed") AND `Minutes of Approval from Receipt View` < `thresholds.instant_approval_minutes` (1). **[ACCEPTED DEFAULT 2026-09-23]** For steps where no receipt was viewed, `Minutes of Approval from Receipt View` is undefined; instant is assessed only on steps where receipts were viewed (the two-column rule).
 - **Exception:** not viewed, OR (viewed AND instant). Not viewed is unconditionally an exception — it does not also require worst-case timing. Worst case is a separate, always-defined comparison: not viewed AND approved within the instant threshold of `Approver Received Date` (never the exception definition; reported as `approver_worst_case_n`/`_pct` only).
 - **Metrics:** `approver_total_reports`, `approver_count`, `approver_no_receipt_pct`, `approver_instant_pct`, `approver_worst_case_n`, `approver_worst_case_pct`, plus a per-approver table.
 - **P2 build-brief correction:** the first port of this test used `Receipts Viewed Date` (a date/notna check) to gate "instant", and used `worst_case` (not viewed AND approved within the instant threshold of `Approver Received Date`) as the exception definition itself — which missed every not-viewed step that wasn't ALSO approved within the instant threshold, and missed every viewed-and-instant step entirely (a step can only be `worst_case` when NOT viewed, by construction, so "viewed and instant" was never flagged at all). Both are fixed above; the oracle in `tests/fixtures/tne_planted/plants.yaml` was rebuilt from this corrected text, not from either version of the code.
@@ -155,7 +158,7 @@ threshold · exclusions · expected evidence · primitive · deviation from `com
 - **Deviation:** `computation.py` returned a hardcoded `0` ("based on audit findings"). It is now computed.
 
 ### T6.1d — Daily spend over per-diem
-- **Population [PENDING]:** claims **prepared by** ExCo (`Employee ID` ∈ ExCo), not the approved set. Daily spend is the traveller's own. `computation.py` grouped the combined population, which mixes in other people's claims that an ExCo member merely approved. Expense types in scope: Meals and Incidentals, Domestic and International Travel. A per-diem covers meals and incidentals, not airfares or accommodation. **[PENDING]** Confirm the scope.
+- **Population [ACCEPTED DEFAULT 2026-09-23]:** claims **prepared by** ExCo (`Employee ID` ∈ ExCo), not the approved set. Daily spend is the traveller's own. `computation.py` grouped the combined population, which mixes in other people's claims that an ExCo member merely approved. Expense types in scope: Meals and Incidentals, Domestic and International Travel. A per-diem covers meals and incidentals, not airfares or accommodation. **[ACCEPTED DEFAULT 2026-09-23]** Confirm the scope.
 - **Country (user decision: city + transaction currency):**
   1. `City/Location` present → declared city→country lookup (`reference/city_country.yaml`, analyst-set).
   2. City absent → `Transaction Currency` when the currency belongs to one country (AUD→Australia, SGD→Singapore, NZD→New Zealand, PHP→Philippines, THB→Thailand, INR→India, KRW→Korea, South, MYR→Malaysia, FJD→Fiji, CHF→Switzerland).
@@ -195,10 +198,15 @@ in a sidecar file (§9) — never inferred from the generator.
 
 ## 4. Open items for the auditor
 
-Every **[PENDING]** above, plus:
+The judgements previously marked pending were accepted as stated by the user on 2026-09-23.
+Still open:
 
-- Policy sources for every threshold. All are currently `provenance: analyst-set`, `pending_policy_confirmation: true`.
-- Preferred-supplier lists (airline, car, hotel).
+- Policy sources for every threshold. All remain `provenance: analyst-set`,
+  `pending_policy_confirmation: true`.
+- Preferred-supplier lists (airline and car are analyst-set; no hotel list, so the accommodation
+  sub-tests stay `not_testable`).
+- The auditor-confirmed exception list for the Surface 1 comparison (§9 of the brief).
+- A named reviewer to promote SKILL-001 from `draft` to `published`.
 
 ## 5. Surface 2 gate hardening (P2 build-brief, independent review)
 

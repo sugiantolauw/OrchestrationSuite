@@ -1677,6 +1677,25 @@ Source files are in `synthetic_data/`; row counts match `FILE_REGISTRY` exactly.
   records the signed-in user from the forwarded identity as `run_owner` (Q1); CI runs Tier A against
   `LocalPersistence`, Delta-backed tests run inside the workspace (Q3).
 
+### Approval decisions from the user (2026-09-23): "accept all defaults, allow self sign-off for now"
+
+- **Self sign-off allowed until P7.** When the approver equals `run_owner` the sign-off is recorded
+  with `self_approved: true, sod_enforced: false`, and the trace event, run page, `/runs`,
+  `/workspace/tne` and the XLSX run metadata all label it "self-approved — segregation of duties
+  not enforced". P7 replaces this with an enforced preparer/reviewer/approver rule; keep it
+  data-driven so that is a config change.
+- **Every default in `docs/specs/SKILL-001_test_specification.md` is accepted as stated**:
+  ExCo ID 52472 (50040 excluded as a namesake), cancelled requests out of scope, the T3.1b
+  class mapping with no date condition, gifts excluded from T3.3b, the T5.1 "every line under the
+  limit" rule, `Parent Key` itemisation, the T6.1a instant-approval scope, and the T6.1d population
+  and expense-type scope.
+- **Thresholds and preferred-supplier lists stay `provenance: analyst-set`,
+  `pending_policy_confirmation: true`.** No policy reference was supplied, so accepting the default
+  values does not make them policy. The UI labels stay.
+- **The RBA F11.1 monthly-rate method (decision 6) is accepted.**
+- **Still outstanding (user-held):** the auditor-confirmed exception list for Surface 1, and a named
+  reviewer to publish SKILL-001.
+
 ---
 
 ## 12. What to do first
