@@ -1,0 +1,5 @@
+# Flat list derived from reference/preferred_suppliers.yaml `car` -- used
+# directly by plan.yaml's list_membership tests.
+- AVIS
+- BUDGET
+- HERTZ

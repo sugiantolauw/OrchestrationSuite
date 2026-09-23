@@ -1,0 +1,4 @@
+# Vendors excluded from the T5.1 split-claim population (exact trimmed match, not
+# substring -- docs/specs/SKILL-001_test_specification.md T5.1).
+- FCM
+- THE MOVING COMPANY

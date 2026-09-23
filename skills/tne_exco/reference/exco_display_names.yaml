@@ -1,0 +1,16 @@
+# Flat list derived from reference/exco.yaml `active` -- used by plan.yaml's
+# name-only joins (T3.1a, T3.1b, T3.2a, T3.3a all read from sources with no
+# Employee ID column, so they match on the exact trimmed display name; declared
+# exception to the ID rule, forced by the source -- spec §0). Keep in sync with
+# exco.yaml; guarded by tests/test_skill_tne.py::test_exco_reference_files_stay_in_sync.
+- "Chen, Alex"
+- "Nakamura, Yuki"
+- "Okonkwo, Emeka"
+- "Johansson, Erik"
+- "Mendes, Sofia"
+- "Kowalski, Jan"
+- "Thompson, Sarah"
+- "Delacroix, Marie"
+- "van den Berg, Lucas"
+- "Ramirez, Carlos"
+- "Fitzgerald, Aoife"

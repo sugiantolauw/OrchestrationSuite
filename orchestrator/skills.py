@@ -273,6 +273,12 @@ def validate_skill(skill: Skill) -> None:
                 violations.append(f"{test_id}: unknown reference {ref!r}")
 
         known_metric_names |= set(params.get("metrics", {}).keys())
+        if custom_entry is not None:
+            # A custom primitive (CLAUDE.md §4.3, T6.1a-shaped) may compute fixed
+            # metric names internally rather than reading a generic `metrics:`
+            # config -- it declares them via produces_metrics so findings.yaml can
+            # still be validated against real, produced metric names.
+            known_metric_names |= set(custom_entry.get("produces_metrics", []))
 
     for tid, spec in thresholds.items():
         provenance = spec.get("provenance", {})

@@ -1,0 +1,25 @@
+# T6.1d country fallback #2: Transaction Currency -> country, used only when
+# City/Location is absent and the currency belongs to exactly one country
+# (docs/specs/SKILL-001_test_specification.md T6.1d). Country spellings match
+# synthetic_data/Complete_Per_Diem_Rates_by_Country_Region.csv exactly, verified
+# by profiling that file.
+- currency: AUD
+  country: Australia
+- currency: SGD
+  country: Singapore
+- currency: NZD
+  country: New Zealand
+- currency: PHP
+  country: Philippines
+- currency: THB
+  country: Thailand
+- currency: INR
+  country: India
+- currency: KRW
+  country: "Korea, South"
+- currency: MYR
+  country: Malaysia
+- currency: FJD
+  country: Fiji
+- currency: CHF
+  country: Switzerland

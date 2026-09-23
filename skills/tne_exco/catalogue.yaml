@@ -1,0 +1,121 @@
+# Mirrors reference_app/src/test_catalogue.py's grain (14 tests) and shape, for
+# the UI's Test Catalogue tab / PPTX methodology appendix. `threshold` is a
+# template string with {threshold_id} placeholders resolved against
+# thresholds.yaml -- so G8 (tests/test_g8_thresholds.py) can assert catalogue
+# text == rendered thresholds.yaml values BY CONSTRUCTION, never by hand-typing
+# the number twice.
+tests:
+  - test_id: T3.1a
+    category: Pre-travel
+    test_name: Pre-approvals Not Linked to Expense Reports
+    control_objective: All travel should be pre-approved before expenses are incurred
+    population: Authorised travel requests without matching expense report entry
+    rule: Identify travel requests in the pre-approval register that have no linked expense report
+    threshold: Zero unlinked requests expected
+
+  - test_id: T3.1b
+    category: Pre-travel
+    test_name: Employees Claiming Without Pre-Approval
+    control_objective: All travel should be pre-approved before expenses are incurred
+    population: ExCo bookings with no corresponding travel request on file
+    rule: Anti-join bookings to travel requests on employee name + travel class; flag bookings with no match
+    threshold: Zero unmatched bookings expected
+
+  - test_id: T3.2a
+    category: Pre-travel
+    test_name: Non-Preferred Supplier Usage
+    control_objective: Preferred suppliers should be used to maximise negotiated rates
+    population: ExCo bookings (airline, car rental; accommodation not_testable -- no preferred-hotel list)
+    rule: Compare booking vendor against the preferred-supplier list per category
+    threshold: Zero non-preferred bookings expected
+
+  - test_id: T3.3a
+    category: Pre-travel
+    test_name: Late / Urgent Travel Bookings
+    control_objective: Travel should be booked in advance to obtain best fares
+    population: All ExCo bookings with Advance Purchase Days data
+    rule: Flag bookings under the class-specific advance-purchase threshold; sub-flag under the very-late threshold
+    threshold: "< {late_booking_domestic_days} days (domestic) / < {late_booking_international_days} days (international/Trans-Tasman) = late; < {very_late_booking_days} days = very late"
+
+  - test_id: T3.3b
+    category: Pre-travel
+    test_name: Entertainment Per-Head Threshold Exceedance
+    control_objective: Entertainment spend should comply with per-head limits
+    population: Entertainment/meal entries with attendee count > 0
+    rule: Calculate per-head cost (Entry Amount / Number of Attendees); flag if over the internal or external limit
+    threshold: "${entertainment_internal_limit} internal / ${entertainment_external_limit} external per head"
+
+  - test_id: T4.1
+    category: Spend compliance
+    test_name: Missing Receipt Documentation
+    control_objective: All claims must have supporting receipt documentation
+    population: All ExCo expense claims
+    rule: Semi-join claims against the missing-receipt register on the full claim key
+    threshold: Zero missing receipts expected
+
+  - test_id: T4.2
+    category: Spend compliance
+    test_name: Missing Attendee Details
+    control_objective: Entertainment claims must list attendees and business purpose
+    population: Entertainment expense claims
+    rule: Anti-join claims against the attendee register on employee, date, type and amount
+    threshold: Zero missing attendee records expected
+
+  - test_id: T4.3
+    category: Spend compliance
+    test_name: Potential Personal Expenses in Business Claims
+    control_objective: Business claims should not include personal expenses
+    population: All ExCo expense claims
+    rule: Classify claim descriptions for personal-use indicators (not_testable until P6 classify node)
+    threshold: Zero personal expenses expected
+
+  - test_id: T4.4
+    category: Spend compliance
+    test_name: High-Value Reimbursements
+    control_objective: High-value claims require enhanced review
+    population: All ExCo expense claims
+    rule: Flag claims where Expense Amount exceeds the high-value threshold
+    threshold: "${high_value_limit} per claim"
+
+  - test_id: T5.1
+    category: Fraud risk
+    test_name: Potential Split Claims
+    control_objective: Claims should not be split to circumvent approval thresholds
+    population: ExCo claims grouped by Employee + Vendor + Expense Type (FCM and The Moving Company excluded)
+    rule: Flag same-day groups and sliding {split_window_days}-day windows where SUM exceeds the aggregate threshold, COUNT > 1, and every line is individually under the threshold
+    threshold: "${split_aggregate_threshold} aggregate over {split_window_days} days; each line ≤ ${high_value_limit}"
+
+  - test_id: T5.2
+    category: Fraud risk
+    test_name: Duplicate Expense Claims
+    control_objective: Duplicate claims should be detected and prevented
+    population: ExCo claims matched on Employee + Date + Vendor + Amount (itemised lines sharing a Parent Key excluded)
+    rule: Flag exact-key duplicate groups; sub-test for a group containing both an out-of-pocket and a corporate-card line
+    threshold: Zero duplicates expected
+
+  - test_id: T6.1a
+    category: Approval effectiveness
+    test_name: Approver Review Sufficiency
+    control_objective: Approvers should review receipts and spend adequate time on approval
+    population: All expense-report approval steps by ExCo approvers
+    rule: >-
+      Flag steps where receipt was not viewed, or approved within
+      {instant_approval_minutes} minute of receipt view (worst case: not viewed
+      and approved within {instant_approval_minutes} minute of being received)
+    threshold: "100% receipt-viewed; zero worst-case approvals expected"
+
+  - test_id: T6.1c
+    category: Approval effectiveness
+    test_name: Attendee Hierarchy Validity
+    control_objective: Entertainment attendees should not be direct reports of the claimant
+    population: Entertainment-entry attendee records for ExCo claimants
+    rule: Flag attendee records where "Is Attendee also in Hierarchy?" = Yes
+    threshold: Zero hierarchy exceptions expected
+
+  - test_id: T6.1d
+    category: Approval effectiveness
+    test_name: Daily Spend Limit Exceedances
+    control_objective: Daily spend per employee should not exceed policy limits
+    population: ExCo-prepared Meals/Incidentals claims aggregated by Employee + Transaction Date + country
+    rule: Sum daily spend per employee-day-country; flag days exceeding the country's per-diem rate (SGD, converted to AUD at the transaction month's RBA rate)
+    threshold: Per-diem rate per country (synthetic_data/Complete_Per_Diem_Rates_by_Country_Region.csv), converted S$ to A$ at the transaction month's RBA F11.1 mean rate

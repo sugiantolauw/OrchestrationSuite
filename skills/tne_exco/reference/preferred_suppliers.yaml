@@ -1,0 +1,15 @@
+# Preferred-supplier lists for T3.2a -- [PENDING], analyst-set, no policy source
+# supplied yet (docs/specs/SKILL-001_test_specification.md T3.2a). Matched as
+# whole words in the upper-cased Vendor column (list_membership match:
+# whole_word_upper), so "QANTAS" matches "QANTAS AIRWAYS (I)" but not
+# "QANTASLINKX PTY LTD".
+airlines:
+  - QANTAS
+  - QANTASLINK
+  - JETSTAR
+  - VIRGIN AUSTRALIA
+car:
+  - AVIS
+  - BUDGET
+  - HERTZ
+hotels: []  # none supplied -- the accommodation sub-tests are not_testable

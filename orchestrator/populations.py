@@ -94,7 +94,15 @@ def _apply_filter(df: pd.DataFrame, flt: dict, ctx: PopulationContext) -> pd.Ser
     if op == "between":
         lo, hi = value
         if _looks_like_date(series):
-            lo, hi = pd.Timestamp(lo), pd.Timestamp(hi)
+            lo = pd.Timestamp(lo)
+            # A bare upper-bound date means "through the end of that day", not
+            # "through midnight at its start" -- otherwise every row on the last
+            # day of the period with a non-midnight time-of-day (e.g. an
+            # approval timestamp) is silently dropped. CLAUDE.md §0.5: an audit
+            # period is a business-calendar concept; this is the boundary half of
+            # that fix (the timezone half is not yet addressed -- see the P2b-1
+            # report).
+            hi = pd.Timestamp(hi) + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)
         return (series >= lo) & (series <= hi)
     if op == "gt":
         return series > value
@@ -138,6 +146,18 @@ def _as_ref_frame(table: Any) -> pd.DataFrame:
     return table if isinstance(table, pd.DataFrame) else pd.DataFrame(table)
 
 
+def _resolve_table(ctx: "PopulationContext", name: str) -> pd.DataFrame:
+    """A `lookup`/`fx_rate` table is usually a Skill-authored reference/ file, but
+    may instead be another declared contract source read as-is (e.g. a rate table
+    that is itself audited, contract-validated data rather than Skill-authored
+    reference data) -- references are checked first since that is the common case."""
+    if name in ctx.references:
+        return _as_ref_frame(ctx.references[name])
+    if name in ctx.sources:
+        return ctx.sources[name]["df"]
+    raise PopulationError(f"unknown lookup table: {name!r} (not a reference or a source)")
+
+
 def apply_derivations(
     df: pd.DataFrame,
     derive_list: list[dict] | None,
@@ -162,7 +182,7 @@ def apply_derivations(
             df[out_col] = mapped
 
         elif op == "lookup":
-            ref_df = _as_ref_frame(ctx.references[d["table"]])
+            ref_df = _resolve_table(ctx, d["table"])
             left_keys = d["on"] if isinstance(d["on"], list) else [d["on"]]
             right_keys = d.get("ref_on", left_keys)
             right_keys = right_keys if isinstance(right_keys, list) else [right_keys]
@@ -188,7 +208,7 @@ def apply_derivations(
             df[out_col] = pd.to_datetime(df[src_col]).dt.strftime("%Y-%m")
 
         elif op == "fx_rate":
-            ref_df = _as_ref_frame(ctx.references[d["table"]])
+            ref_df = _resolve_table(ctx, d["table"])
             month_col = d["month_column"]
             key_col = d.get("key_column", "month")
             value_col = d.get("value_column", "rate")
@@ -242,6 +262,12 @@ def build_population(name: str, pop_config: dict, ctx: PopulationContext) -> Pop
     df = src["df"].copy()
     version = src["version"]
 
+    # pre_filter_derive runs before any filter is applied -- needed whenever a filter
+    # must key on a cleaned-up value rather than the raw column (e.g. coercing a
+    # column that mixes numeric ids with a non-numeric sentinel before an `in`
+    # filter). Counters from this stage are merged with the post-filter stage's.
+    df, pre_counters = apply_derivations(df, pop_config.get("pre_filter_derive"), ctx)
+
     excluded_counts: dict[str, int] = {}
     mask = pd.Series(True, index=df.index)
     for i, flt in enumerate(pop_config.get("filters", [])):
@@ -252,6 +278,7 @@ def build_population(name: str, pop_config: dict, ctx: PopulationContext) -> Pop
 
     df = df[mask].reset_index(drop=True)
     df, counters = apply_derivations(df, pop_config.get("derive"), ctx)
+    counters = {**pre_counters, **counters}
 
     amount_col = pop_config.get("amount_column")
     date_col = pop_config.get("date_column")

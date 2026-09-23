@@ -1,0 +1,931 @@
+populations:
+  # --- raw, unfiltered: one per contract source, for total_records / total_files
+  # reconciliation reporting only. No test reads these directly. ---
+  raw_expense_report:
+    source: expense_report
+  raw_attendee_validity:
+    source: attendee_validity
+  raw_missing_receipt:
+    source: missing_receipt
+  raw_approval_aging:
+    source: approval_aging
+  raw_travel_requests_no_expense:
+    source: travel_requests_no_expense
+  raw_travel_request_segment:
+    source: travel_request_segment
+  raw_booking_detail:
+    source: booking_detail
+  raw_per_diem_rates:
+    source: per_diem_rates
+
+  # --- P_EXP family (spec §0 "Expense population P_EXP") ---
+  # role sets, unfiltered by period -- run-level claims_prepared/approved/combined
+  # reporting reads these populations' own rows/amount directly, never a hardcoded
+  # constant (CLAUDE.md §0.2, computation.py:641-642).
+  p_exp_prepared_all:
+    source: expense_report
+    filters:
+      - column: Employee ID
+        op: in
+        value: {ref: exco_employee_ids}
+    amount_column: Expense Amount (reimbursement currency)
+    date_column: Transaction Date
+
+  p_exp_approved_all:
+    source: expense_report
+    pre_filter_derive:
+      - op: custom
+        name: cross_approver_numeric
+        as: cross_approver_id
+    filters:
+      - column: cross_approver_id
+        op: in
+        value: {ref: exco_employee_ids}
+    amount_column: Expense Amount (reimbursement currency)
+    date_column: Transaction Date
+
+  p_exp_both_all:
+    source: expense_report
+    pre_filter_derive:
+      - op: custom
+        name: cross_approver_numeric
+        as: cross_approver_id
+    filters:
+      - all_of:
+          - column: Employee ID
+            op: in
+            value: {ref: exco_employee_ids}
+          - column: cross_approver_id
+            op: in
+            value: {ref: exco_employee_ids}
+    amount_column: Expense Amount (reimbursement currency)
+    date_column: Transaction Date
+
+  # The combined population (role union), in period -- used by every P_EXP test
+  # except T6.1d (prepared-only, spec [PENDING] population note).
+  p_exp:
+    source: expense_report
+    pre_filter_derive:
+      - op: custom
+        name: cross_approver_numeric
+        as: cross_approver_id
+    filters:
+      - all_of:
+          - any_of:
+              - column: Employee ID
+                op: in
+                value: {ref: exco_employee_ids}
+              - column: cross_approver_id
+                op: in
+                value: {ref: exco_employee_ids}
+          - column: Transaction Date
+            op: between
+            value: {ref: audit_period}
+    amount_column: Expense Amount (reimbursement currency)
+    date_column: Transaction Date
+
+  # Prepared-only, in period -- T6.1d's population (spec [PENDING]: prepared by
+  # ExCo, not the approved set, since daily spend is the traveller's own).
+  p_exp_prepared:
+    source: expense_report
+    filters:
+      - column: Employee ID
+        op: in
+        value: {ref: exco_employee_ids}
+      - column: Transaction Date
+        op: between
+        value: {ref: audit_period}
+    amount_column: Expense Amount (reimbursement currency)
+    date_column: Transaction Date
+
+  # p_exp plus the T5.1 vendor exclusion and positive-amount filter (negative/zero
+  # rows cannot split a claim -- spec §0 "Negative and zero amounts").
+  p_exp_split:
+    source: expense_report
+    pre_filter_derive:
+      - op: custom
+        name: cross_approver_numeric
+        as: cross_approver_id
+    filters:
+      - all_of:
+          - any_of:
+              - column: Employee ID
+                op: in
+                value: {ref: exco_employee_ids}
+              - column: cross_approver_id
+                op: in
+                value: {ref: exco_employee_ids}
+          - column: Transaction Date
+            op: between
+            value: {ref: audit_period}
+      - column: Vendor
+        op: not_in
+        value: {ref: split_exclusions}
+      - column: Expense Amount (reimbursement currency)
+        op: gt
+        value: 0
+    amount_column: Expense Amount (reimbursement currency)
+    date_column: Transaction Date
+
+  # p_exp plus the T5.2 positive-amount filter.
+  p_exp_dup:
+    source: expense_report
+    pre_filter_derive:
+      - op: custom
+        name: cross_approver_numeric
+        as: cross_approver_id
+    filters:
+      - all_of:
+          - any_of:
+              - column: Employee ID
+                op: in
+                value: {ref: exco_employee_ids}
+              - column: cross_approver_id
+                op: in
+                value: {ref: exco_employee_ids}
+          - column: Transaction Date
+            op: between
+            value: {ref: audit_period}
+      - column: Expense Amount (reimbursement currency)
+        op: gt
+        value: 0
+    amount_column: Expense Amount (reimbursement currency)
+    date_column: Transaction Date
+
+  # T3.2a sub-populations: p_exp scoped to one supplier category + class, vendor
+  # FCM excluded (agency charge, not a supplier -- spec T3.2a).
+  p_exp_pref_air_dom:
+    source: expense_report
+    pre_filter_derive:
+      - op: custom
+        name: cross_approver_numeric
+        as: cross_approver_id
+    filters:
+      - all_of:
+          - any_of:
+              - column: Employee ID
+                op: in
+                value: {ref: exco_employee_ids}
+              - column: cross_approver_id
+                op: in
+                value: {ref: exco_employee_ids}
+          - column: Transaction Date
+            op: between
+            value: {ref: audit_period}
+      - column: Expense Type
+        op: eq
+        value: "Airfares - Domestic Travel"
+      - column: Vendor
+        op: ne
+        value: FCM
+    amount_column: Expense Amount (reimbursement currency)
+    date_column: Transaction Date
+
+  p_exp_pref_air_int:
+    source: expense_report
+    pre_filter_derive:
+      - op: custom
+        name: cross_approver_numeric
+        as: cross_approver_id
+    filters:
+      - all_of:
+          - any_of:
+              - column: Employee ID
+                op: in
+                value: {ref: exco_employee_ids}
+              - column: cross_approver_id
+                op: in
+                value: {ref: exco_employee_ids}
+          - column: Transaction Date
+            op: between
+            value: {ref: audit_period}
+      - column: Expense Type
+        op: eq
+        value: "Airfares - International Travel"
+      - column: Vendor
+        op: ne
+        value: FCM
+    amount_column: Expense Amount (reimbursement currency)
+    date_column: Transaction Date
+
+  p_exp_pref_car_dom:
+    source: expense_report
+    pre_filter_derive:
+      - op: custom
+        name: cross_approver_numeric
+        as: cross_approver_id
+    filters:
+      - all_of:
+          - any_of:
+              - column: Employee ID
+                op: in
+                value: {ref: exco_employee_ids}
+              - column: cross_approver_id
+                op: in
+                value: {ref: exco_employee_ids}
+          - column: Transaction Date
+            op: between
+            value: {ref: audit_period}
+      - column: Expense Type
+        op: eq
+        value: "Car Rentals - Domestic Travel"
+      - column: Vendor
+        op: ne
+        value: FCM
+    amount_column: Expense Amount (reimbursement currency)
+    date_column: Transaction Date
+
+  p_exp_pref_car_int:
+    source: expense_report
+    pre_filter_derive:
+      - op: custom
+        name: cross_approver_numeric
+        as: cross_approver_id
+    filters:
+      - all_of:
+          - any_of:
+              - column: Employee ID
+                op: in
+                value: {ref: exco_employee_ids}
+              - column: cross_approver_id
+                op: in
+                value: {ref: exco_employee_ids}
+          - column: Transaction Date
+            op: between
+            value: {ref: audit_period}
+      - column: Expense Type
+        op: eq
+        value: "Car Rental – International Travel"
+      - column: Vendor
+        op: ne
+        value: FCM
+    amount_column: Expense Amount (reimbursement currency)
+    date_column: Transaction Date
+
+  # T6.1d: p_exp_prepared scoped to Meals/Incidentals expense types, with a
+  # derived country and derived per-diem AUD limit (spec T6.1d).
+  # No filter here depends on a derived column, so the derivation runs AFTER
+  # filtering (plain `derive`, not `pre_filter_derive`) -- unlike t61d_pop_dom/
+  # t61d_pop_int below, whose country-based filter forces derive-before-filter.
+  # This keeps t61d_unmapped_rows / t61d_country_not_in_per_diem_table scoped to
+  # the true tested population (Meals/Incidentals, ExCo, in period) rather than
+  # the whole raw source.
+  t61d_pop:
+    source: expense_report
+    filters:
+      - column: Employee ID
+        op: in
+        value: {ref: exco_employee_ids}
+      - column: Transaction Date
+        op: between
+        value: {ref: audit_period}
+      - column: Expense Type
+        op: in
+        value:
+          - "Meals - Domestic Travel"
+          - "Meals - International Travel"
+          - "Incidentals - Domestic Travel"
+          - "Incidentals - International Travel"
+    derive:
+      - op: custom
+        name: country_from_city_or_currency
+        as: country
+        params:
+          city_table: city_country
+          currency_table: currency_country
+      - op: month
+        column: Transaction Date
+        as: transaction_month
+      - op: lookup
+        table: per_diem_rates
+        "on": [country]
+        ref_on: ["Country/Region"]
+        value_column: "Rate Per Day (S$)"
+        as: rate_per_day_sgd
+        unmapped_counter: t61d_country_not_in_per_diem_table
+      - op: fx_rate
+        table: monthly_aud_sgd_rate
+        month_column: transaction_month
+        key_column: month
+        value_column: aud_per_sgd_factor
+        as: aud_per_sgd_factor
+      - op: multiply
+        left: {column: rate_per_day_sgd}
+        right: {column: aud_per_sgd_factor}
+        as: daily_limit_aud
+    amount_column: Expense Amount (reimbursement currency)
+    date_column: Transaction Date
+
+  # KNOWN LIMITATION (P2b-1): this population's own filter needs the derived
+  # `country` column, so pre_filter_derive runs before ANY filter -- its
+  # t61d_*_country_not_in_per_diem_table / t61d_unmapped_rows counters are
+  # therefore scoped to the whole raw expense_report source, not to the
+  # Meals/Incidentals ExCo-in-period population (unlike t61d_pop above). The
+  # exceedance TEST result is unaffected (the population filters still narrow
+  # correctly); only these two data-quality counters over-count. See the
+  # P2b-1 report.
+  t61d_pop_dom:
+    source: expense_report
+    pre_filter_derive:
+      - op: custom
+        name: country_from_city_or_currency
+        as: country
+        params:
+          city_table: city_country
+          currency_table: currency_country
+      - op: month
+        column: Transaction Date
+        as: transaction_month
+      - op: lookup
+        table: per_diem_rates
+        "on": [country]
+        ref_on: ["Country/Region"]
+        value_column: "Rate Per Day (S$)"
+        as: rate_per_day_sgd
+        unmapped_counter: t61d_dom_country_not_in_per_diem_table
+      - op: fx_rate
+        table: monthly_aud_sgd_rate
+        month_column: transaction_month
+        key_column: month
+        value_column: aud_per_sgd_factor
+        as: aud_per_sgd_factor
+      - op: multiply
+        left: {column: rate_per_day_sgd}
+        right: {column: aud_per_sgd_factor}
+        as: daily_limit_aud
+    filters:
+      - column: Employee ID
+        op: in
+        value: {ref: exco_employee_ids}
+      - column: Transaction Date
+        op: between
+        value: {ref: audit_period}
+      - column: Expense Type
+        op: in
+        value:
+          - "Meals - Domestic Travel"
+          - "Meals - International Travel"
+          - "Incidentals - Domestic Travel"
+          - "Incidentals - International Travel"
+      - column: country
+        op: eq
+        value: Australia
+    amount_column: Expense Amount (reimbursement currency)
+    date_column: Transaction Date
+
+  t61d_pop_int:
+    source: expense_report
+    pre_filter_derive:
+      - op: custom
+        name: country_from_city_or_currency
+        as: country
+        params:
+          city_table: city_country
+          currency_table: currency_country
+      - op: month
+        column: Transaction Date
+        as: transaction_month
+      - op: lookup
+        table: per_diem_rates
+        "on": [country]
+        ref_on: ["Country/Region"]
+        value_column: "Rate Per Day (S$)"
+        as: rate_per_day_sgd
+        unmapped_counter: t61d_int_country_not_in_per_diem_table
+      - op: fx_rate
+        table: monthly_aud_sgd_rate
+        month_column: transaction_month
+        key_column: month
+        value_column: aud_per_sgd_factor
+        as: aud_per_sgd_factor
+      - op: multiply
+        left: {column: rate_per_day_sgd}
+        right: {column: aud_per_sgd_factor}
+        as: daily_limit_aud
+    filters:
+      - column: Employee ID
+        op: in
+        value: {ref: exco_employee_ids}
+      - column: Transaction Date
+        op: between
+        value: {ref: audit_period}
+      - column: Expense Type
+        op: in
+        value:
+          - "Meals - Domestic Travel"
+          - "Meals - International Travel"
+          - "Incidentals - Domestic Travel"
+          - "Incidentals - International Travel"
+      - all_of:
+          - column: country
+            op: not_null
+          - column: country
+            op: ne
+            value: Australia
+    amount_column: Expense Amount (reimbursement currency)
+    date_column: Transaction Date
+
+  # T3.1a: travel_requests_no_expense scoped to ExCo, in period, linked-status.
+  t31a_pop:
+    source: travel_requests_no_expense
+    filters:
+      - column: Employee
+        op: in
+        value: {ref: exco_display_names}
+      - column: Start Date
+        op: between
+        value: {ref: audit_period}
+      - column: Approval Status
+        op: in
+        value: ["Approved", "Approved - Pending Booking"]
+    amount_column: Total Approved Amount (rpt)
+    date_column: Start Date
+
+  # T3.1b / T3.2a / T3.3a: booking_detail scoped to ExCo, in period, not cancelled,
+  # with a derived travel class (Dom|Int -> Dom/Int -- spec T3.1b join key).
+  t31b_bookings_pop:
+    source: booking_detail
+    derive:
+      - op: map
+        column: Dom | Int
+        mapping:
+          Domestic: Dom
+          International: Int
+          Trans Tasman: Int
+        as: class
+    filters:
+      - column: Lead Traveller Name
+        op: in
+        value: {ref: exco_display_names}
+      - column: Depart Date
+        op: between
+        value: {ref: audit_period}
+      - column: Booking Status
+        op: ne
+        value: Cancelled
+    date_column: Depart Date
+
+  # Right side of the T3.1b anti-join: travel requests scoped to ExCo names, with
+  # the same class derivation from Expense Type.
+  t31b_requests_pop:
+    source: travel_request_segment
+    derive:
+      - op: map
+        column: Expense Type
+        mapping:
+          "Airfares - Domestic Travel": Dom
+          "Accommodation - Domestic Travel": Dom
+          "Car Rentals - Domestic Travel": Dom
+          "Airfares - International Travel": Int
+          "Accommodation - International Travel": Int
+          "Car Rental – International Travel": Int
+        as: class
+    filters:
+      - column: Employee
+        op: in
+        value: {ref: exco_display_names}
+
+  # T3.3b: attendee_validity scoped to ExCo claimants, in period, entertainment
+  # expense types (spec T3.3b).
+  t33b_pop:
+    source: attendee_validity
+    derive:
+      - op: custom
+        name: attendee_external_classification
+        as: external
+    filters:
+      - column: Employee ID
+        op: in
+        value: {ref: exco_employee_ids}
+      - column: Transaction Date
+        op: between
+        value: {ref: audit_period}
+      - column: Expense Type
+        op: in
+        value:
+          - "Staff/Client Function: Offsite Food/Drink"
+          - "Staff/Client Function: Onsite Food/Drink"
+    amount_column: Entry Amount
+    date_column: Transaction Date
+
+  # T4.2: entertainment-type P_EXP lines (spec [PENDING]: gifts excluded, no attendees).
+  t42_pop:
+    source: expense_report
+    pre_filter_derive:
+      - op: custom
+        name: cross_approver_numeric
+        as: cross_approver_id
+    filters:
+      - all_of:
+          - any_of:
+              - column: Employee ID
+                op: in
+                value: {ref: exco_employee_ids}
+              - column: cross_approver_id
+                op: in
+                value: {ref: exco_employee_ids}
+          - column: Transaction Date
+            op: between
+            value: {ref: audit_period}
+      - column: Expense Type
+        op: in
+        value:
+          - "Staff/Client Function: Offsite Food/Drink"
+          - "Staff/Client Function: Onsite Food/Drink"
+          - "Staff/Client Function: No Food/No Drink"
+    amount_column: Expense Amount (reimbursement currency)
+    date_column: Transaction Date
+
+  # T6.1a: approval_aging scoped to ExCo approvers, in period.
+  t61a_pop:
+    source: approval_aging
+    filters:
+      - column: Approver ID
+        op: in
+        value: {ref: exco_employee_ids}
+      - column: Approved Date/Time
+        op: between
+        value: {ref: audit_period}
+
+  # T6.1c: attendee_validity scoped to ExCo claimants, in period.
+  t61c_pop:
+    source: attendee_validity
+    filters:
+      - column: Employee ID
+        op: in
+        value: {ref: exco_employee_ids}
+      - column: Transaction Date
+        op: between
+        value: {ref: audit_period}
+
+  # missing_receipt register -- unscoped; T4.1 anti-joins it against p_exp, so
+  # scoping this side by ExCo would double-restrict nothing (the join key
+  # includes Employee ID) but is left open so t41_unmatched_register_rows means
+  # "unmatched anywhere in the register", not "unmatched within a pre-filtered
+  # slice" -- matches spec T4.1.
+  missing_receipt_pop:
+    source: missing_receipt
+
+tests:
+  - test_id: T3.1a
+    control_id: CTL-TNE-01
+    risk_id: RSK-TNE-01
+    assertion: operating
+    flag: RF_PRE_Unlinked
+    primitive: list_membership
+    params:
+      population: t31a_pop
+      column: Approval Status
+      allowed_values: ["Approved", "Approved - Pending Booking"]
+      negate: false
+      match: exact
+      flag: RF_PRE_Unlinked
+      metrics:
+        preapproval_unlinked_count: {kind: count}
+        preapproval_unlinked_amount: {kind: sum, column: Total Approved Amount (rpt), unit: AUD}
+        preapproval_employees: {kind: distinct, column: Employee}
+
+  - test_id: T3.1b
+    control_id: CTL-TNE-01
+    risk_id: RSK-TNE-01
+    assertion: operating
+    flag: RF_CS_NoPreapproval
+    primitive: anti_join_gap
+    params:
+      left_population: t31b_bookings_pop
+      right_population: t31b_requests_pop
+      left_keys: [Lead Traveller Name, class]
+      right_keys: [Employee, class]
+      mode: anti
+      flag: RF_CS_NoPreapproval
+      metrics:
+        no_preapproval_bookings: {kind: count}
+        no_preapproval_employees: {kind: distinct, column: Lead Traveller Name}
+        t31b_name_match_rate: {kind: match_rate}
+
+  - test_id: T3.2a_air_dom
+    control_id: CTL-TNE-02
+    risk_id: RSK-TNE-02
+    assertion: operating
+    flag: RF_SP_DomAirline_NotPreferred
+    primitive: list_membership
+    params:
+      population: p_exp_pref_air_dom
+      column: Vendor
+      allowed_values: {ref: preferred_airlines}
+      negate: true
+      match: whole_word_upper
+      flag: RF_SP_DomAirline_NotPreferred
+      metrics:
+        pref_dom_airline: {kind: count}
+
+  - test_id: T3.2a_air_int
+    control_id: CTL-TNE-02
+    risk_id: RSK-TNE-02
+    assertion: operating
+    flag: RF_SP_IntAirline_NotPreferred
+    primitive: list_membership
+    params:
+      population: p_exp_pref_air_int
+      column: Vendor
+      allowed_values: {ref: preferred_airlines}
+      negate: true
+      match: whole_word_upper
+      flag: RF_SP_IntAirline_NotPreferred
+      metrics:
+        pref_int_airline: {kind: count}
+
+  - test_id: T3.2a_car_dom
+    control_id: CTL-TNE-02
+    risk_id: RSK-TNE-02
+    assertion: operating
+    flag: RF_SP_DomCarRental_NotPreferred
+    primitive: list_membership
+    params:
+      population: p_exp_pref_car_dom
+      column: Vendor
+      allowed_values: {ref: preferred_car}
+      negate: true
+      match: whole_word_upper
+      flag: RF_SP_DomCarRental_NotPreferred
+      metrics:
+        pref_dom_car: {kind: count}
+
+  - test_id: T3.2a_car_int
+    control_id: CTL-TNE-02
+    risk_id: RSK-TNE-02
+    assertion: operating
+    flag: RF_SP_IntCarRental_NotPreferred
+    primitive: list_membership
+    params:
+      population: p_exp_pref_car_int
+      column: Vendor
+      allowed_values: {ref: preferred_car}
+      negate: true
+      match: whole_word_upper
+      flag: RF_SP_IntCarRental_NotPreferred
+      metrics:
+        pref_int_car: {kind: count}
+
+  - test_id: T3.2a_accom
+    control_id: CTL-TNE-02
+    risk_id: RSK-TNE-02
+    assertion: operating
+    not_testable:
+      reason: "no preferred-hotel list supplied (spec T3.2a)"
+
+  - test_id: T3.3a_dom
+    control_id: CTL-TNE-03
+    risk_id: RSK-TNE-03
+    assertion: operating
+    flag: RF_CS_LateBooking
+    primitive: threshold_exceedance
+    params:
+      population: t31b_bookings_pop
+      column: Advance Purchase Days
+      limit: {threshold: late_booking_domestic_days}
+      direction: below
+      exclude: {column: class, op: ne, value: Dom}
+      flag: RF_CS_LateBooking
+      metrics:
+        late_booking_count_dom: {kind: count}
+        late_booking_employees_dom: {kind: distinct, column: Lead Traveller Name}
+
+  - test_id: T3.3a_int
+    control_id: CTL-TNE-03
+    risk_id: RSK-TNE-03
+    assertion: operating
+    flag: RF_CS_LateBooking
+    primitive: threshold_exceedance
+    params:
+      population: t31b_bookings_pop
+      column: Advance Purchase Days
+      limit: {threshold: late_booking_international_days}
+      direction: below
+      exclude: {column: class, op: ne, value: Int}
+      flag: RF_CS_LateBooking
+      metrics:
+        late_booking_count_int: {kind: count}
+        late_booking_employees_int: {kind: distinct, column: Lead Traveller Name}
+
+  - test_id: T3.3a_very_late
+    control_id: CTL-TNE-03
+    risk_id: RSK-TNE-03
+    assertion: operating
+    flag: RF_CS_VeryLateBooking
+    primitive: threshold_exceedance
+    params:
+      population: t31b_bookings_pop
+      column: Advance Purchase Days
+      limit: {threshold: very_late_booking_days}
+      direction: below
+      flag: RF_CS_VeryLateBooking
+      metrics:
+        very_late_booking_count: {kind: count}
+
+  - test_id: T3.3b
+    control_id: CTL-TNE-04
+    risk_id: RSK-TNE-04
+    assertion: operating
+    flag: RF_CS_EntertainmentOverLimit
+    primitive: ratio_per_group
+    params:
+      population: t33b_pop
+      numerator_column: Entry Amount
+      denominator_column: Number of Attendees
+      group_by: [Employee ID, Report Name, Transaction Date, Vendor, Entry Amount]
+      numerator_aggregate: first
+      direction: above
+      limit_selector_column: external
+      limit_cases:
+        internal: {threshold: entertainment_internal_limit}
+        external: {threshold: entertainment_external_limit}
+      flag: RF_CS_EntertainmentOverLimit
+      metrics:
+        ent_assessed: {kind: value, key: assessed}
+        ent_over_internal_count: {kind: value, key: count_internal}
+        ent_over_external_count: {kind: value, key: count_external}
+        ent_over_amount: {kind: sum, column: Entry Amount, unit: AUD}
+
+  - test_id: T4.1
+    control_id: CTL-TNE-05
+    risk_id: RSK-TNE-05
+    assertion: operating
+    flag: RF_CS_MissingReceipt
+    primitive: anti_join_gap
+    params:
+      left_population: p_exp
+      right_population: missing_receipt_pop
+      left_keys: [Employee ID, Report Legacy Key, Transaction Date, Expense Type, Expense Amount (reimbursement currency)]
+      right_keys: [Employee ID, Report Legacy Key, Transaction Date, Expense Type, Expense Amount (reimbursement currency)]
+      mode: semi
+      carry_right_columns: [Has Affidavit]
+      flag: RF_CS_MissingReceipt
+      metrics:
+        missing_receipt_count: {kind: count}
+        missing_receipt_pct: {kind: pct_of_population}
+        missing_receipt_amount: {kind: sum, column: Expense Amount (reimbursement currency), unit: AUD}
+        missing_receipt_no_affidavit_count:
+          kind: count_where
+          where: {column: Has Affidavit, op: ne, value: "Yes"}
+        t41_unmatched_register_rows: {kind: value, key: right_unmatched_count}
+
+  - test_id: T4.2
+    control_id: CTL-TNE-06
+    risk_id: RSK-TNE-06
+    assertion: operating
+    flag: RF_ATT_Missing
+    primitive: anti_join_gap
+    params:
+      left_population: t42_pop
+      right_population: raw_attendee_validity
+      left_keys: [Employee ID, Transaction Date, Expense Type, Expense Amount (reimbursement currency)]
+      right_keys: [Employee ID, Transaction Date, Expense Type, Entry Amount]
+      mode: anti
+      flag: RF_ATT_Missing
+      metrics:
+        att_total: {kind: value, key: population_size}
+        att_missing_count: {kind: count}
+        att_missing_pct: {kind: pct_of_population}
+
+  - test_id: T4.3
+    control_id: CTL-TNE-07
+    risk_id: RSK-TNE-07
+    assertion: operating
+    not_testable:
+      reason: "classification endpoint not yet wired (P6 classify node)"
+
+  - test_id: T4.4
+    control_id: CTL-TNE-08
+    risk_id: RSK-TNE-08
+    assertion: operating
+    flag: RF_CS_Reimbursement_GT_5K
+    primitive: threshold_exceedance
+    params:
+      population: p_exp
+      column: Expense Amount (reimbursement currency)
+      limit: {threshold: high_value_limit}
+      direction: above
+      flag: RF_CS_Reimbursement_GT_5K
+      metrics:
+        hv_count: {kind: count}
+        hv_amount: {kind: sum, column: Expense Amount (reimbursement currency), unit: AUD}
+        hv_employees: {kind: distinct, column: Employee ID}
+
+  - test_id: T5.1
+    control_id: CTL-TNE-09
+    risk_id: RSK-TNE-09
+    assertion: operating
+    flag: RF_CS_SplitClaims_SameDay
+    primitive: split_detection
+    params:
+      population: p_exp_split
+      group_keys: [Employee ID, Vendor, Expense Type]
+      date_column: Transaction Date
+      amount_column: Expense Amount (reimbursement currency)
+      window_days: {threshold: split_window_days}
+      aggregate_threshold: {threshold: split_aggregate_threshold}
+      max_line: {threshold: high_value_limit}
+      flag_same_day: RF_CS_SplitClaims_SameDay
+      flag_window: RF_CS_SplitClaims_Window
+      metrics:
+        split_same_day_groups: {kind: value, key: same_day_groups}
+        split_same_day_lines: {kind: value, key: same_day_lines}
+        split_window_groups: {kind: value, key: window_groups}
+        split_window_lines: {kind: value, key: window_lines}
+        split_amount: {kind: value, key: split_amount, unit: AUD}
+
+  - test_id: T5.2
+    control_id: CTL-TNE-10
+    risk_id: RSK-TNE-10
+    assertion: operating
+    flag: RF_CS_Duplicate
+    primitive: duplicate_detection
+    params:
+      population: p_exp_dup
+      key_columns: [Employee ID, Transaction Date, Vendor, Expense Amount (reimbursement currency)]
+      amount_column: Expense Amount (reimbursement currency)
+      exclude_within: [Parent Key]
+      payment_column: Payment Type
+      oop_values: ["out of pocket"]
+      card_values: ["amex ibcp", "anz visa cbcp"]
+      flag: RF_CS_Duplicate
+      metrics:
+        duplicate_groups: {kind: groups}
+        duplicate_lines: {kind: rows}
+        duplicate_amount: {kind: value, key: duplicate_amount, unit: AUD}
+        duplicate_oop_card_groups: {kind: value, key: oop_card_groups}
+
+  - test_id: T6.1a
+    control_id: CTL-TNE-11
+    risk_id: RSK-TNE-11
+    assertion: operating
+    flag: RF_APR_InsufficientReview
+    primitive: t6_1a_approver_review
+    params:
+      population: t61a_pop
+      receipt_viewed_columns: [Report Receipt Viewed, All Entry Receipts Viewed]
+      instant_minutes_column: Minutes of Approval from Receipt View
+      instant_threshold: {threshold: instant_approval_minutes}
+      receipts_viewed_date_column: Receipts Viewed Date
+      approver_received_date_column: Approver Received Date
+      approved_datetime_column: Approved Date/Time
+      approver_id_column: Approver ID
+      approver_name_column: Approver Name
+      flag: RF_APR_InsufficientReview
+
+  - test_id: T6.1c
+    control_id: CTL-TNE-12
+    risk_id: RSK-TNE-12
+    assertion: operating
+    flag: RF_ATT_HierarchyInvalid
+    primitive: list_membership
+    params:
+      population: t61c_pop
+      column: Is Attendee also in Hierarchy?
+      allowed_values: ["Yes"]
+      negate: false
+      match: exact
+      flag: RF_ATT_HierarchyInvalid
+      metrics:
+        att_hierarchy_invalid: {kind: count}
+        att_hierarchy_total: {kind: value, key: population_size}
+
+  - test_id: T6.1d_dom
+    control_id: CTL-TNE-13
+    risk_id: RSK-TNE-13
+    assertion: operating
+    flag: RF_CS_DailySpendOverLimit
+    primitive: threshold_exceedance
+    params:
+      population: t61d_pop_dom
+      column: Expense Amount (reimbursement currency)
+      limit: {column: daily_limit_aud}
+      direction: above
+      group_by: [Employee ID, Transaction Date, country]
+      aggregate: sum
+      flag: RF_CS_DailySpendOverLimit
+      metrics:
+        daily_over_count_dom: {kind: count}
+        daily_over_amount_dom: {kind: excess, unit: AUD}
+        daily_over_employees_dom: {kind: distinct, column: Employee ID}
+        daily_over_max_dom: {kind: max, column: Expense Amount (reimbursement currency), unit: AUD}
+
+  - test_id: T6.1d_int
+    control_id: CTL-TNE-13
+    risk_id: RSK-TNE-13
+    assertion: operating
+    flag: RF_CS_DailySpendOverLimit
+    primitive: threshold_exceedance
+    params:
+      population: t61d_pop_int
+      column: Expense Amount (reimbursement currency)
+      limit: {column: daily_limit_aud}
+      direction: above
+      group_by: [Employee ID, Transaction Date, country]
+      aggregate: sum
+      flag: RF_CS_DailySpendOverLimit
+      metrics:
+        daily_over_count_int: {kind: count}
+        daily_over_amount_int: {kind: excess, unit: AUD}
+        daily_over_max_int: {kind: max, column: Expense Amount (reimbursement currency), unit: AUD}

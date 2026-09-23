@@ -1,0 +1,6 @@
+# Flat list derived from reference/preferred_suppliers.yaml `airlines` -- used
+# directly by plan.yaml's list_membership tests.
+- QANTAS
+- QANTASLINK
+- JETSTAR
+- VIRGIN AUSTRALIA

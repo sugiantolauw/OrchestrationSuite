@@ -1,0 +1,15 @@
+# Flat list derived from reference/exco.yaml `active` -- used directly by plan.yaml
+# population filters (Employee ID / Employee ID(Cross Change Approver) / Approver ID
+# / Attendee ID membership). Keep in sync with exco.yaml; guarded by
+# tests/test_skill_tne.py::test_exco_reference_files_stay_in_sync.
+- 52725
+- 52394
+- 52622
+- 52424
+- 51867
+- 52660
+- 51606
+- 52472
+- 52674
+- 52703
+- 50079

@@ -17,6 +17,7 @@ PARAMS_SCHEMA: dict = {
         "left_keys": {"type": "array", "items": {"type": "string"}, "minItems": 1},
         "right_keys": {"type": "array", "items": {"type": "string"}, "minItems": 1},
         "mode": {"type": "string", "enum": ["anti", "semi"]},
+        "carry_right_columns": {"type": "array", "items": {"type": "string"}, "minItems": 1},
         "flag": {"type": "string"},
         "metrics": METRICS_PROPERTY_SCHEMA,
     },
@@ -52,6 +53,19 @@ def run(ctx: PrimitiveContext, params: dict) -> PrimitiveResult:
         exc_mask = matched_mask
 
     row_df = left_df[exc_mask.to_numpy()].copy()
+
+    carry_cols = params.get("carry_right_columns")
+    if carry_cols:
+        # count_where/sum_where need to see a right-side attribute on the matched
+        # rows (e.g. T4.1's "no affidavit on file" lives on the register, the
+        # right population, not on the expense line itself). Ambiguous multi-match
+        # is resolved by keeping the first right row per key -- documented, not
+        # silent, via the primitive's own params.
+        right_carry = right_df[right_keys + carry_cols].drop_duplicates(subset=right_keys, keep="first")
+        row_df = row_df.merge(
+            right_carry, how="left", left_on=left_keys, right_on=right_keys, suffixes=("", "__right")
+        )
+
     flags = flags_from_rows(row_df, flag=flag)
     scored_units = row_df["__row_key"].tolist()
 
