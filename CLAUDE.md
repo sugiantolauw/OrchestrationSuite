@@ -1601,7 +1601,21 @@ One chat completion against each endpoint, recording which parameters pass throu
 | Model Serving | OK — `databricks-claude-sonnet-5`, `databricks-gpt-oss-120b` present (parameter matrix not yet run) |
 
 Root cause for all three failures: the workspace's AWS IAM roles no longer trust Databricks.
-**P1A is blocked on the platform** until the AWS trust is repaired or a different workspace is used.
+That workspace was abandoned.
+
+### Recorded results — 2026-09-23, current workspace (Databricks-managed storage)
+
+The user supplied a second workspace; host and token live only in the gitignored `.env`.
+
+| Check | Result |
+|---|---|
+| Identity / network | OK — PAT authenticates; host reachable through the session proxy |
+| Unity Catalog | OK — catalog `orchestrationsuite` (Databricks-managed storage); schema `audit_ledger` created |
+| Serverless SQL warehouse | OK — `Serverless Starter Warehouse`; cold start 8.5 s, warm query 1.2 s |
+| Delta semantics | OK — CAS `UPDATE … WHERE v = expected` returns 1 then **0** affected rows; CHECK constraints enforced; deletion vectors + row tracking accepted; `DESCRIBE HISTORY` works; single-row write 2–8 s |
+| Databricks Apps | OK — app created (139 s, compute MEDIUM) and deployed (9 s); app URL requires OAuth (PAT is redirected to login), so programmatic E2E needs an OAuth/M2M identity |
+| App → warehouse | Warehouse attachable as an App resource (`CAN_USE`); App service principal granted via `GRANT … TO \`<sp client id>\`` |
+| Model Serving | OK — `databricks-claude-sonnet-5`, `databricks-gpt-oss-120b`, `-20b` present (parameter matrix still to run before P6) |
 
 ### Recorded data decisions for SKILL-001 (from the user, 2026-09-23)
 
