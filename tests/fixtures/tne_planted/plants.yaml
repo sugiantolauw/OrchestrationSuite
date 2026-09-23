@@ -590,6 +590,37 @@ tests:
         Depart Date: '2025-04-13'
         Currency: AUD
       exception: true
+    # B1/M1 (CLAUDE.md build brief): Chen, Alex's ONLY declared requests
+    # (_T31B_requests below) are all "- Domestic Travel" -- class Dom. This
+    # booking is International (class Int), so under the correct join key
+    # (employee name + class) it has no matching request and must be flagged.
+    # A join-on-name-only mutation would find Chen, Alex's Domestic requests
+    # and wrongly treat this as pre-approved -- catches M1.
+    - natural_id: '620001'
+      fields:
+        Lead Traveller Name: Chen, Alex
+        Booking ID: 620001
+        Dom | Int: International
+        Advance Purchase Days: 45
+        Booking Status: Booked
+        Depart Date: '2025-09-15'
+        Currency: AUD
+      exception: true
+    # Second M1 catch (mirror case): Okonkwo, Emeka's ONLY declared requests
+    # are all "- International Travel" -- class Int. This booking is
+    # Domestic (class Dom), so it has no matching request and must be
+    # flagged. A second plant is needed because a single miss out of 31
+    # plants keeps recall (30/31 = 0.968) above the 0.95 gate.
+    - natural_id: '620002'
+      fields:
+        Lead Traveller Name: Okonkwo, Emeka
+        Booking ID: 620002
+        Dom | Int: Domestic
+        Advance Purchase Days: 45
+        Booking Status: Booked
+        Depart Date: '2025-09-20'
+        Currency: AUD
+      exception: true
     negatives:
     - natural_id: '610000'
       fields: &id001
@@ -5994,6 +6025,54 @@ tests:
         City/Location: Sydney
         Line Marker: 30207
     negatives:
+    # B1/M8 (CLAUDE.md build brief): a NON-ExCo employee's line that would be
+    # a genuine high-value exception (> $5,000) if the ExCo membership filter
+    # were removed. Under CORRECT code this row is excluded from p_exp_hv
+    # before threshold_exceedance ever runs, so it is never flagged -- a
+    # mutation that drops the ExCo filter everywhere would flag it, and since
+    # it is declared here (expected_false), that is caught as a false
+    # positive. 90003 is one of generate.py's NON_EXCO identities.
+    - natural_id: '900014#90014'
+      exception: false
+      fields:
+        Employee: Novak, Petra
+        Employee ID: 90004
+        Employee ID(Cross Change Approver): null
+        Report Legacy Key: 900014
+        Report Name: Fixture Report
+        Transaction Date: '2025-03-21'
+        Expense Type: Office Supplies
+        Vendor: Corner Cafe
+        Parent Key: 6900014
+        Payment Type: Out of Pocket
+        Reimbursement Currency: AUD
+        Expense Amount (reimbursement currency): 9000.0
+        Transaction Currency: AUD
+        City/Location: Sydney
+        Line Marker: 90014
+    # B1: a genuine ExCo background row -- IN the real filtered population,
+    # ordinary and clearly non-exceptional under every rule ($45, nowhere near
+    # the $5,000 high-value limit). Declared so a general over-flagging bug
+    # (not any one specific mutation) is directly observable as a false
+    # positive here, not silently invisible outside scope.
+    - natural_id: '900015#90015'
+      exception: false
+      fields:
+        Employee: Chen, Alex
+        Employee ID: 52725
+        Employee ID(Cross Change Approver): null
+        Report Legacy Key: 900015
+        Report Name: Fixture Report
+        Transaction Date: '2025-03-23'
+        Expense Type: Office Supplies
+        Vendor: Corner Cafe
+        Parent Key: 6900015
+        Payment Type: Out of Pocket
+        Reimbursement Currency: AUD
+        Expense Amount (reimbursement currency): 45.0
+        Transaction Currency: AUD
+        City/Location: Sydney
+        Line Marker: 90015
     - natural_id: 40414#30208
       exception: false
       fields:
@@ -6886,6 +6965,125 @@ tests:
         Transaction Currency: AUD
         City/Location: Sydney
         Line Marker: 30255
+    # B1/M2 (CLAUDE.md build brief): a genuine 2-line window claim (03-01 +
+    # 03-02, sum 6000 > 5000) plus an unrelated same-group line far outside
+    # the window (05-15, declared as a negative below so it materialises but
+    # is never itself a claim). A mutation that sums the WHOLE
+    # employee/vendor/type group once any pair falls within the window (the
+    # historical computation.py:365 defect) pulls the unrelated line in too,
+    # producing a DIFFERENT (3-row) claim identity and losing this exact
+    # 2-row claim's id -- catches M2 as a false negative.
+    - natural_id: T51-W-M2
+      kind: window
+      group_keys:
+      - 52725
+      - M2 Sum Vendor
+      - Office Supplies
+      members:
+      - Employee: Chen, Alex
+        Employee ID: 52725
+        Employee ID(Cross Change Approver): null
+        Report Legacy Key: 900001
+        Report Name: Fixture Report
+        Transaction Date: '2025-03-01'
+        Expense Type: Office Supplies
+        Vendor: M2 Sum Vendor
+        Parent Key: 6900001
+        Payment Type: Out of Pocket
+        Reimbursement Currency: AUD
+        Expense Amount (reimbursement currency): 3000
+        Transaction Currency: AUD
+        City/Location: Sydney
+        Line Marker: 90001
+      - Employee: Chen, Alex
+        Employee ID: 52725
+        Employee ID(Cross Change Approver): null
+        Report Legacy Key: 900002
+        Report Name: Fixture Report
+        Transaction Date: '2025-03-02'
+        Expense Type: Office Supplies
+        Vendor: M2 Sum Vendor
+        Parent Key: 6900002
+        Payment Type: Out of Pocket
+        Reimbursement Currency: AUD
+        Expense Amount (reimbursement currency): 3000
+        Transaction Currency: AUD
+        City/Location: Sydney
+        Line Marker: 90002
+    # B1/M3: a genuine same-day claim (06-03 x2, sum 6000 > 5000) that is
+    # ALSO, independently and correctly, part of a larger 3-line window claim
+    # anchored two days earlier (06-01 + both 06-03 lines, sum 6200 > 5000) --
+    # the window's member set differs from the same-day group's, so under
+    # CORRECT code both are distinct claims. Disabling same-day detection
+    # loses the 2-line claim's id (only the 3-line window claim remains) --
+    # catches M3 as a false negative. T51-W-M3 below reuses these same two
+    # 06-03 rows (dedup by content, orchestrator/eval/surface2.py's member-set
+    # id makes it the correct claim to check FOR THIS test) plus a third,
+    # smaller 06-01 line.
+    - natural_id: T51-SD-M3
+      kind: same_day
+      group_keys:
+      - 52394
+      - M3 SameDay Vendor
+      - Office Supplies
+      - '2025-06-03'
+      members:
+      - &m3_row_a
+        Employee: Nakamura, Yuki
+        Employee ID: 52394
+        Employee ID(Cross Change Approver): null
+        Report Legacy Key: 900004
+        Report Name: Fixture Report
+        Transaction Date: '2025-06-03'
+        Expense Type: Office Supplies
+        Vendor: M3 SameDay Vendor
+        Parent Key: 6900004
+        Payment Type: Out of Pocket
+        Reimbursement Currency: AUD
+        Expense Amount (reimbursement currency): 3000
+        Transaction Currency: AUD
+        City/Location: Sydney
+        Line Marker: 90004
+      - &m3_row_b
+        Employee: Nakamura, Yuki
+        Employee ID: 52394
+        Employee ID(Cross Change Approver): null
+        Report Legacy Key: 900005
+        Report Name: Fixture Report
+        Transaction Date: '2025-06-03'
+        Expense Type: Office Supplies
+        Vendor: M3 SameDay Vendor
+        Parent Key: 6900005
+        Payment Type: Out of Pocket
+        Reimbursement Currency: AUD
+        Expense Amount (reimbursement currency): 3000
+        Transaction Currency: AUD
+        City/Location: Sydney
+        Line Marker: 90005
+    - natural_id: T51-W-M3
+      kind: window
+      group_keys:
+      - 52394
+      - M3 SameDay Vendor
+      - Office Supplies
+      members:
+      - Employee: Nakamura, Yuki
+        Employee ID: 52394
+        Employee ID(Cross Change Approver): null
+        Report Legacy Key: 900006
+        Report Name: Fixture Report
+        Transaction Date: '2025-06-01'
+        Expense Type: Office Supplies
+        Vendor: M3 SameDay Vendor
+        Parent Key: 6900006
+        Payment Type: Out of Pocket
+        Reimbursement Currency: AUD
+        Expense Amount (reimbursement currency): 200
+        Transaction Currency: AUD
+        City/Location: Sydney
+        Line Marker: 90006
+      - *m3_row_a
+      - *m3_row_b
     negatives:
     - natural_id: T51-SD-N01
       kind: same_day
@@ -7438,6 +7636,33 @@ tests:
         Transaction Currency: AUD
         City/Location: Sydney
         Line Marker: 30284
+    # B1/M2 scaffolding: exists only so the mutated ("sum the whole group")
+    # primitive has an unrelated same-group line to wrongly pull into T51-W-M2
+    # above. Far enough from 03-01/03-02 (window_days=3) that CORRECT code
+    # never forms a window containing it -- alone or with the M2 pair -- so it
+    # is never itself flagged.
+    - natural_id: T51-W-M2-SCAFFOLD
+      kind: window
+      group_keys:
+      - 52725
+      - M2 Sum Vendor
+      - Office Supplies
+      members:
+      - Employee: Chen, Alex
+        Employee ID: 52725
+        Employee ID(Cross Change Approver): null
+        Report Legacy Key: 900003
+        Report Name: Fixture Report
+        Transaction Date: '2025-05-15'
+        Expense Type: Office Supplies
+        Vendor: M2 Sum Vendor
+        Parent Key: 6900003
+        Payment Type: Out of Pocket
+        Reimbursement Currency: AUD
+        Expense Amount (reimbursement currency): 50
+        Transaction Currency: AUD
+        City/Location: Sydney
+        Line Marker: 90003
   T5.2:
     scoring_unit: claim_group
     source: expense_report
@@ -8929,9 +9154,20 @@ tests:
         Minutes of Approval from Receipt View: 30
         Receipts Viewed Date: null
         Reimbursement Currency: AUD
-    negatives:
+    # B2 rebuild (CLAUDE.md build brief), from spec text, not from the old
+    # code: exception = not viewed OR (viewed AND instant). "Viewed" is the
+    # two-column OR (Report Receipt Viewed == 'Yes' OR All Entry Receipts
+    # Viewed == 'Yes'); "instant" is viewed AND Minutes of Approval from
+    # Receipt View < thresholds.instant_approval_minutes (1). The 16 rows
+    # below (RPT-61A-N01..16, names kept from the pre-rebuild fixture where
+    # they were the negatives) are all genuine exceptions under the corrected
+    # rule -- N01-08 are viewed-and-instant (Minutes = 0 < 1); N09-16 are
+    # not-viewed but NOT worst-case-timed (Approved Date/Time is ~61 seconds
+    # after Approver Received Date, i.e. >= the instant threshold), which the
+    # OLD worst_case-only flag never caught. They were WRONGLY declared
+    # `exception: false` under the old, incorrect code and are corrected here.
     - natural_id: RPT-61A-N01|1|52725
-      exception: false
+      exception: true
       fields:
         Report ID: RPT-61A-N01
         Approver ID: 52725
@@ -8945,7 +9181,7 @@ tests:
         Receipts Viewed Date: '2025-04-10T08:59:30'
         Reimbursement Currency: AUD
     - natural_id: RPT-61A-N02|1|52394
-      exception: false
+      exception: true
       fields:
         Report ID: RPT-61A-N02
         Approver ID: 52394
@@ -8959,7 +9195,7 @@ tests:
         Receipts Viewed Date: '2025-05-11T08:59:30'
         Reimbursement Currency: AUD
     - natural_id: RPT-61A-N03|1|52622
-      exception: false
+      exception: true
       fields:
         Report ID: RPT-61A-N03
         Approver ID: 52622
@@ -8973,7 +9209,7 @@ tests:
         Receipts Viewed Date: '2025-06-12T08:59:30'
         Reimbursement Currency: AUD
     - natural_id: RPT-61A-N04|1|52424
-      exception: false
+      exception: true
       fields:
         Report ID: RPT-61A-N04
         Approver ID: 52424
@@ -8987,7 +9223,7 @@ tests:
         Receipts Viewed Date: '2025-07-13T08:59:30'
         Reimbursement Currency: AUD
     - natural_id: RPT-61A-N05|1|51867
-      exception: false
+      exception: true
       fields:
         Report ID: RPT-61A-N05
         Approver ID: 51867
@@ -9001,7 +9237,7 @@ tests:
         Receipts Viewed Date: '2025-08-14T08:59:30'
         Reimbursement Currency: AUD
     - natural_id: RPT-61A-N06|1|52660
-      exception: false
+      exception: true
       fields:
         Report ID: RPT-61A-N06
         Approver ID: 52660
@@ -9015,7 +9251,7 @@ tests:
         Receipts Viewed Date: '2025-09-15T08:59:30'
         Reimbursement Currency: AUD
     - natural_id: RPT-61A-N07|1|51606
-      exception: false
+      exception: true
       fields:
         Report ID: RPT-61A-N07
         Approver ID: 51606
@@ -9029,7 +9265,7 @@ tests:
         Receipts Viewed Date: '2025-10-16T08:59:30'
         Reimbursement Currency: AUD
     - natural_id: RPT-61A-N08|1|52472
-      exception: false
+      exception: true
       fields:
         Report ID: RPT-61A-N08
         Approver ID: 52472
@@ -9043,7 +9279,7 @@ tests:
         Receipts Viewed Date: '2025-11-17T08:59:30'
         Reimbursement Currency: AUD
     - natural_id: RPT-61A-N09|1|52424
-      exception: false
+      exception: true
       fields:
         Report ID: RPT-61A-N09
         Approver ID: 52424
@@ -9057,7 +9293,7 @@ tests:
         Receipts Viewed Date: null
         Reimbursement Currency: AUD
     - natural_id: RPT-61A-N10|1|51867
-      exception: false
+      exception: true
       fields:
         Report ID: RPT-61A-N10
         Approver ID: 51867
@@ -9071,7 +9307,7 @@ tests:
         Receipts Viewed Date: null
         Reimbursement Currency: AUD
     - natural_id: RPT-61A-N11|1|52660
-      exception: false
+      exception: true
       fields:
         Report ID: RPT-61A-N11
         Approver ID: 52660
@@ -9085,7 +9321,7 @@ tests:
         Receipts Viewed Date: null
         Reimbursement Currency: AUD
     - natural_id: RPT-61A-N12|1|51606
-      exception: false
+      exception: true
       fields:
         Report ID: RPT-61A-N12
         Approver ID: 51606
@@ -9099,7 +9335,7 @@ tests:
         Receipts Viewed Date: null
         Reimbursement Currency: AUD
     - natural_id: RPT-61A-N13|1|52472
-      exception: false
+      exception: true
       fields:
         Report ID: RPT-61A-N13
         Approver ID: 52472
@@ -9113,7 +9349,7 @@ tests:
         Receipts Viewed Date: null
         Reimbursement Currency: AUD
     - natural_id: RPT-61A-N14|1|52674
-      exception: false
+      exception: true
       fields:
         Report ID: RPT-61A-N14
         Approver ID: 52674
@@ -9127,7 +9363,7 @@ tests:
         Receipts Viewed Date: null
         Reimbursement Currency: AUD
     - natural_id: RPT-61A-N15|1|52703
-      exception: false
+      exception: true
       fields:
         Report ID: RPT-61A-N15
         Approver ID: 52703
@@ -9141,7 +9377,7 @@ tests:
         Receipts Viewed Date: null
         Reimbursement Currency: AUD
     - natural_id: RPT-61A-N16|1|50079
-      exception: false
+      exception: true
       fields:
         Report ID: RPT-61A-N16
         Approver ID: 50079
@@ -9153,6 +9389,234 @@ tests:
         All Entry Receipts Viewed: 'No'
         Minutes of Approval from Receipt View: 30
         Receipts Viewed Date: null
+        Reimbursement Currency: AUD
+    negatives:
+    # B2: the ONLY true negative under the corrected rule is VIEWED and NOT
+    # instant (Minutes of Approval from Receipt View >= 1). "Not viewed" is
+    # unconditionally an exception now, so there is no not-viewed negative.
+    - natural_id: RPT-61A-TN01|1|52725
+      exception: false
+      fields:
+        Report ID: RPT-61A-TN01
+        Approver ID: 52725
+        Approver Name: Chen, Alex
+        Step: '1'
+        Approved Date/Time: '2025-04-15T09:05:00'
+        Approver Received Date: '2025-04-15T09:00:00'
+        Report Receipt Viewed: 'Yes'
+        All Entry Receipts Viewed: 'No'
+        Minutes of Approval from Receipt View: 5
+        Receipts Viewed Date: '2025-04-15T08:59:00'
+        Reimbursement Currency: AUD
+    - natural_id: RPT-61A-TN02|1|52394
+      exception: false
+      fields:
+        Report ID: RPT-61A-TN02
+        Approver ID: 52394
+        Approver Name: Nakamura, Yuki
+        Step: '1'
+        Approved Date/Time: '2025-05-16T09:05:00'
+        Approver Received Date: '2025-05-16T09:00:00'
+        Report Receipt Viewed: 'No'
+        All Entry Receipts Viewed: 'Yes'
+        Minutes of Approval from Receipt View: 5
+        Receipts Viewed Date: '2025-05-16T08:59:00'
+        Reimbursement Currency: AUD
+    - natural_id: RPT-61A-TN03|1|52622
+      exception: false
+      fields:
+        Report ID: RPT-61A-TN03
+        Approver ID: 52622
+        Approver Name: Okonkwo, Emeka
+        Step: '1'
+        Approved Date/Time: '2025-06-17T09:10:00'
+        Approver Received Date: '2025-06-17T09:00:00'
+        Report Receipt Viewed: 'Yes'
+        All Entry Receipts Viewed: 'No'
+        Minutes of Approval from Receipt View: 10
+        Receipts Viewed Date: '2025-06-17T08:58:00'
+        Reimbursement Currency: AUD
+    - natural_id: RPT-61A-TN04|1|52424
+      exception: false
+      fields:
+        Report ID: RPT-61A-TN04
+        Approver ID: 52424
+        Approver Name: Johansson, Erik
+        Step: '1'
+        Approved Date/Time: '2025-07-18T09:15:00'
+        Approver Received Date: '2025-07-18T09:00:00'
+        Report Receipt Viewed: 'Yes'
+        All Entry Receipts Viewed: 'No'
+        Minutes of Approval from Receipt View: 15
+        Receipts Viewed Date: '2025-07-18T08:57:00'
+        Reimbursement Currency: AUD
+    - natural_id: RPT-61A-TN05|1|51867
+      exception: false
+      fields:
+        Report ID: RPT-61A-TN05
+        Approver ID: 51867
+        Approver Name: Mendes, Sofia
+        Step: '1'
+        Approved Date/Time: '2025-08-19T09:05:00'
+        Approver Received Date: '2025-08-19T09:00:00'
+        Report Receipt Viewed: 'Yes'
+        All Entry Receipts Viewed: 'No'
+        Minutes of Approval from Receipt View: 5
+        Receipts Viewed Date: '2025-08-19T08:59:00'
+        Reimbursement Currency: AUD
+    - natural_id: RPT-61A-TN06|1|52660
+      exception: false
+      fields:
+        Report ID: RPT-61A-TN06
+        Approver ID: 52660
+        Approver Name: Kowalski, Jan
+        Step: '1'
+        Approved Date/Time: '2025-09-20T09:05:00'
+        Approver Received Date: '2025-09-20T09:00:00'
+        Report Receipt Viewed: 'Yes'
+        All Entry Receipts Viewed: 'No'
+        Minutes of Approval from Receipt View: 5
+        Receipts Viewed Date: '2025-09-20T08:59:00'
+        Reimbursement Currency: AUD
+    - natural_id: RPT-61A-TN07|1|51606
+      exception: false
+      fields:
+        Report ID: RPT-61A-TN07
+        Approver ID: 51606
+        Approver Name: Thompson, Sarah
+        Step: '1'
+        Approved Date/Time: '2025-10-21T09:05:00'
+        Approver Received Date: '2025-10-21T09:00:00'
+        Report Receipt Viewed: 'No'
+        All Entry Receipts Viewed: 'Yes'
+        Minutes of Approval from Receipt View: 5
+        Receipts Viewed Date: '2025-10-21T08:59:00'
+        Reimbursement Currency: AUD
+    - natural_id: RPT-61A-TN08|1|52472
+      exception: false
+      fields:
+        Report ID: RPT-61A-TN08
+        Approver ID: 52472
+        Approver Name: Delacroix, Marie
+        Step: '1'
+        Approved Date/Time: '2025-11-22T09:05:00'
+        Approver Received Date: '2025-11-22T09:00:00'
+        Report Receipt Viewed: 'Yes'
+        All Entry Receipts Viewed: 'No'
+        Minutes of Approval from Receipt View: 5
+        Receipts Viewed Date: '2025-11-22T08:59:00'
+        Reimbursement Currency: AUD
+    - natural_id: RPT-61A-TN09|1|52674
+      exception: false
+      fields:
+        Report ID: RPT-61A-TN09
+        Approver ID: 52674
+        Approver Name: van den Berg, Lucas
+        Step: '1'
+        Approved Date/Time: '2025-04-23T09:05:00'
+        Approver Received Date: '2025-04-23T09:00:00'
+        Report Receipt Viewed: 'Yes'
+        All Entry Receipts Viewed: 'No'
+        Minutes of Approval from Receipt View: 5
+        Receipts Viewed Date: '2025-04-23T08:59:00'
+        Reimbursement Currency: AUD
+    - natural_id: RPT-61A-TN10|1|52703
+      exception: false
+      fields:
+        Report ID: RPT-61A-TN10
+        Approver ID: 52703
+        Approver Name: Ramirez, Carlos
+        Step: '1'
+        Approved Date/Time: '2025-05-24T09:05:00'
+        Approver Received Date: '2025-05-24T09:00:00'
+        Report Receipt Viewed: 'Yes'
+        All Entry Receipts Viewed: 'No'
+        Minutes of Approval from Receipt View: 5
+        Receipts Viewed Date: '2025-05-24T08:59:00'
+        Reimbursement Currency: AUD
+    - natural_id: RPT-61A-TN11|1|50079
+      exception: false
+      fields:
+        Report ID: RPT-61A-TN11
+        Approver ID: 50079
+        Approver Name: Fitzgerald, Aoife
+        Step: '1'
+        Approved Date/Time: '2025-06-25T09:05:00'
+        Approver Received Date: '2025-06-25T09:00:00'
+        Report Receipt Viewed: 'Yes'
+        All Entry Receipts Viewed: 'No'
+        Minutes of Approval from Receipt View: 5
+        Receipts Viewed Date: '2025-06-25T08:59:00'
+        Reimbursement Currency: AUD
+    - natural_id: RPT-61A-TN12|1|52725
+      exception: false
+      fields:
+        Report ID: RPT-61A-TN12
+        Approver ID: 52725
+        Approver Name: Chen, Alex
+        Step: '1'
+        Approved Date/Time: '2025-07-26T09:05:00'
+        Approver Received Date: '2025-07-26T09:00:00'
+        Report Receipt Viewed: 'Yes'
+        All Entry Receipts Viewed: 'No'
+        Minutes of Approval from Receipt View: 5
+        Receipts Viewed Date: '2025-07-26T08:59:00'
+        Reimbursement Currency: AUD
+    - natural_id: RPT-61A-TN13|1|52394
+      exception: false
+      fields:
+        Report ID: RPT-61A-TN13
+        Approver ID: 52394
+        Approver Name: Nakamura, Yuki
+        Step: '1'
+        Approved Date/Time: '2025-08-27T09:05:00'
+        Approver Received Date: '2025-08-27T09:00:00'
+        Report Receipt Viewed: 'Yes'
+        All Entry Receipts Viewed: 'No'
+        Minutes of Approval from Receipt View: 5
+        Receipts Viewed Date: '2025-08-27T08:59:00'
+        Reimbursement Currency: AUD
+    - natural_id: RPT-61A-TN14|1|52622
+      exception: false
+      fields:
+        Report ID: RPT-61A-TN14
+        Approver ID: 52622
+        Approver Name: Okonkwo, Emeka
+        Step: '1'
+        Approved Date/Time: '2025-09-28T09:05:00'
+        Approver Received Date: '2025-09-28T09:00:00'
+        Report Receipt Viewed: 'Yes'
+        All Entry Receipts Viewed: 'No'
+        Minutes of Approval from Receipt View: 5
+        Receipts Viewed Date: '2025-09-28T08:59:00'
+        Reimbursement Currency: AUD
+    - natural_id: RPT-61A-TN15|1|52424
+      exception: false
+      fields:
+        Report ID: RPT-61A-TN15
+        Approver ID: 52424
+        Approver Name: Johansson, Erik
+        Step: '1'
+        Approved Date/Time: '2025-10-29T09:05:00'
+        Approver Received Date: '2025-10-29T09:00:00'
+        Report Receipt Viewed: 'Yes'
+        All Entry Receipts Viewed: 'No'
+        Minutes of Approval from Receipt View: 5
+        Receipts Viewed Date: '2025-10-29T08:59:00'
+        Reimbursement Currency: AUD
+    - natural_id: RPT-61A-TN16|1|51867
+      exception: false
+      fields:
+        Report ID: RPT-61A-TN16
+        Approver ID: 51867
+        Approver Name: Mendes, Sofia
+        Step: '1'
+        Approved Date/Time: '2025-11-30T09:05:00'
+        Approver Received Date: '2025-11-30T09:00:00'
+        Report Receipt Viewed: 'Yes'
+        All Entry Receipts Viewed: 'No'
+        Minutes of Approval from Receipt View: 5
+        Receipts Viewed Date: '2025-11-30T08:59:00'
         Reimbursement Currency: AUD
   T6.1c:
     scoring_unit: attendee_row
@@ -9995,6 +10459,90 @@ tests:
         Transaction Currency: AUD
         City/Location: Sydney
         Line Marker: 30368
+    # B1/M4 (CLAUDE.md build brief): two lines on one day, EACH under the
+    # daily limit (DOM-N01's single line at $149.71 is a confirmed negative)
+    # but summing to well over it. A mutation that aggregates the day with
+    # max() instead of sum() would miss this group entirely -- catches M4 as
+    # a false negative.
+    - natural_id: DOM-M4
+      group_kind: t61d
+      group_keys:
+      - 52725
+      - '2025-03-20'
+      - Australia
+      members:
+      - Employee: Chen, Alex
+        Employee ID: 52725
+        Employee ID(Cross Change Approver): null
+        Report Legacy Key: 900010
+        Report Name: Fixture Report
+        Transaction Date: '2025-03-20'
+        Expense Type: Meals - Domestic Travel
+        Vendor: Fixture Per Diem Vendor
+        Parent Key: 6900010
+        Payment Type: Out of Pocket
+        Reimbursement Currency: AUD
+        Expense Amount (reimbursement currency): 80
+        Transaction Currency: AUD
+        City/Location: Sydney
+        Line Marker: 90010
+      - Employee: Chen, Alex
+        Employee ID: 52725
+        Employee ID(Cross Change Approver): null
+        Report Legacy Key: 900011
+        Report Name: Fixture Report
+        Transaction Date: '2025-03-20'
+        Expense Type: Incidentals - Domestic Travel
+        Vendor: Fixture Per Diem Vendor
+        Parent Key: 6900011
+        Payment Type: Out of Pocket
+        Reimbursement Currency: AUD
+        Expense Amount (reimbursement currency): 80
+        Transaction Currency: AUD
+        City/Location: Sydney
+        Line Marker: 90011
+    # N5: a day with one genuinely-over-limit line ($200) plus a credit
+    # (-$100) that must be EXCLUDED from the population, not netted into the
+    # daily total. If the credit were netted (the pre-N5 behaviour), the day's
+    # total would be $100 -- under the limit -- and this exception would be
+    # missed.
+    - natural_id: DOM-M4-CREDIT
+      group_kind: t61d
+      group_keys:
+      - 52394
+      - '2025-03-22'
+      - Australia
+      members:
+      - Employee: Nakamura, Yuki
+        Employee ID: 52394
+        Employee ID(Cross Change Approver): null
+        Report Legacy Key: 900012
+        Report Name: Fixture Report
+        Transaction Date: '2025-03-22'
+        Expense Type: Meals - Domestic Travel
+        Vendor: Fixture Per Diem Vendor
+        Parent Key: 6900012
+        Payment Type: Out of Pocket
+        Reimbursement Currency: AUD
+        Expense Amount (reimbursement currency): 200
+        Transaction Currency: AUD
+        City/Location: Sydney
+        Line Marker: 90012
+      - Employee: Nakamura, Yuki
+        Employee ID: 52394
+        Employee ID(Cross Change Approver): null
+        Report Legacy Key: 900013
+        Report Name: Fixture Report
+        Transaction Date: '2025-03-22'
+        Expense Type: Meals - Domestic Travel
+        Vendor: Fixture Per Diem Vendor
+        Parent Key: 6900013
+        Payment Type: Out of Pocket
+        Reimbursement Currency: AUD
+        Expense Amount (reimbursement currency): -100
+        Transaction Currency: AUD
+        City/Location: Sydney
+        Line Marker: 90013
     negatives:
     - natural_id: DOM-N01
       group_kind: t61d
