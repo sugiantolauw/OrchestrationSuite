@@ -203,18 +203,22 @@ findings:
   - id: T5_1
     test_id: T5.1
     title: Potential Split Claims to Circumvent Approval Thresholds
-    trigger: split_same_day_groups > 0 or split_window_groups > 0
+    # B3: the scored, distinct claim-group population -- a window group whose
+    # member set equals a same-day group's is the SAME claim group, so the
+    # trigger and severity read split_groups (deduplicated), never the
+    # kind-specific same-day/window counts, which double-count that overlap.
+    trigger: split_groups > 0
     severity:
-      - when: split_same_day_groups > thresholds.split_high_count or split_window_groups > thresholds.split_high_count
+      - when: split_groups > thresholds.split_high_count
         then: High
       - else: Medium
-    metrics_cited: [split_same_day_groups, split_same_day_lines, split_window_groups, split_window_lines, split_amount]
+    metrics_cited: [split_groups, split_same_day_groups, split_window_groups, split_lines, split_amount]
     observation: >
-      {split_same_day_groups} same-day split-claim groups ({split_same_day_lines}
-      lines) and {split_window_groups} windowed split-claim groups
-      ({split_window_lines} lines) were identified, totalling {split_amount} at
-      risk. Split claims may indicate intentional structuring of expenses below
-      approval thresholds or policy limits.
+      {split_groups} split-claim groups were identified ({split_same_day_groups}
+      found by same-day matching, {split_window_groups} by the rolling window --
+      a claim group found by both counts once), spanning {split_lines} lines and
+      totalling {split_amount} at risk. Split claims may indicate intentional
+      structuring of expenses below approval thresholds or policy limits.
     recommendation: >
       Investigate flagged split claims to determine if they represent legitimate
       separate expenses or intentional structuring. Implement automated detection

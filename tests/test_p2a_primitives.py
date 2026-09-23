@@ -93,7 +93,8 @@ def test_threshold_exceedance_group_by_aggregate_and_column_limit():
     res = run_primitive("threshold_exceedance", ctx, params)
     assert res.metrics["over_count"]["value"] == 1
     assert res.metrics["over_amount"]["value"] == 200.0
-    assert res.scored_units == ["1|2025-01-01"]
+    assert len(res.scored_units) == 1
+    assert res.scored_units[0].startswith("thr:")
     assert set(res.flags["__row_key"]) == {"k:1", "k:2"}
 
 
@@ -148,7 +149,8 @@ def test_duplicate_detection_happy_path_and_amount():
     assert res.metrics["dup_groups"]["value"] == 1
     assert res.metrics["dup_lines"]["value"] == 2
     assert res.metrics["dup_amount"]["value"] == 100.0
-    assert res.scored_units == ["1|2025-01-01|V|100.0"]
+    assert len(res.scored_units) == 1
+    assert res.scored_units[0].startswith("dup:")
 
 
 def test_duplicate_detection_exclude_within_parent_key_itemisation():
@@ -174,7 +176,8 @@ def test_duplicate_detection_exclude_within_parent_key_itemisation():
     # duplicate. Employee 2's 2 lines have different Parent Keys -- a real duplicate.
     assert res.metrics["dup_groups"]["value"] == 1
     assert res.metrics["dup_lines"]["value"] == 2
-    assert res.scored_units == ["2|2025-01-01|W|50.0"]
+    assert len(res.scored_units) == 1
+    assert res.scored_units[0].startswith("dup:")
 
 
 def test_duplicate_detection_oop_vs_card_subtest():
@@ -263,9 +266,9 @@ def _split_params(**overrides) -> dict:
         "max_line": {"threshold": "hv"},
         "metrics": {
             "same_day_groups": {"kind": "value", "key": "same_day_groups"},
-            "same_day_lines": {"kind": "value", "key": "same_day_lines"},
             "window_groups": {"kind": "value", "key": "window_groups"},
-            "window_lines": {"kind": "value", "key": "window_lines"},
+            "split_groups": {"kind": "value", "key": "split_groups"},
+            "split_lines": {"kind": "value", "key": "split_lines"},
             "split_amount": {"kind": "value", "key": "split_amount", "unit": "AUD"},
         },
     }
@@ -277,15 +280,19 @@ def test_split_detection_same_day_and_window_merge():
     res = run_primitive("split_detection", _split_ctx(), _split_params())
     # Employee 1: same-day group on 01-01 (2 lines, 6000 > 5000) plus a window
     # merge across 01-01..01-02 (3 lines, 6100 > 5000): the window is the overlap
-    # of two anchor windows and must be reported as ONE merged group.
+    # of two anchor windows and must be reported as ONE merged group. The
+    # window's member set (3 rows) != the same-day group's (2 rows), so B3's
+    # member-set identity keeps them as two distinct claim groups.
     assert res.metrics["same_day_groups"]["value"] == 1
-    assert res.metrics["same_day_lines"]["value"] == 2
     assert res.metrics["window_groups"]["value"] == 1
-    assert res.metrics["window_lines"]["value"] == 3
+    assert res.metrics["split_groups"]["value"] == 2
+    assert res.metrics["split_lines"]["value"] == 3  # union of flagged rows, no double count
     # Employee 2: 6000+10 four days apart (> window_days) and 6000 alone breaches
     # max_line -- no split flagged either way.
     # Employee 3: 3x1000 = 3000, under the aggregate threshold -- no split.
     assert res.metrics["split_amount"]["value"] == 6100.0  # union of flagged rows, no double count
+    assert len(res.scored_units) == 2
+    assert all(u.startswith("claim:") for u in res.scored_units)
 
 
 def test_split_detection_max_line_excludes_group():
@@ -589,6 +596,42 @@ def test_ratio_per_group_per_row_limit_selection():
     assert res.scored_units == ["k:2"]
 
 
+def test_ratio_per_group_limit_selector_aggregate_any_vs_first():
+    # B5 (CLAUDE.md build brief): T3.3b-shaped group with TWO attendee rows,
+    # mixed internal/external, per-head ($100/2=$50) between the internal
+    # ($40) and external ($80) limits, internal row materialised FIRST.
+    # Spec: external limit applies if ANY attendee is external.
+    df = pd.DataFrame(
+        {
+            "Entry": ["E1", "E1"],
+            "Entry Amount": [100.0, 100.0],
+            "Number of Attendees": [2, 2],
+            "External": ["internal", "external"],
+        }
+    )
+    ctx = _ctx({"pop": _pop("pop", df)}, thresholds={"int40": {"value": 40, "unit": "AUD"}, "ext80": {"value": 80, "unit": "AUD"}})
+    base_params = {
+        "population": "pop",
+        "numerator_column": "Entry Amount",
+        "denominator_column": "Number of Attendees",
+        "group_by": ["Entry"],
+        "numerator_aggregate": "first",
+        "direction": "above",
+        "limit_selector_column": "External",
+        "limit_cases": {"internal": {"threshold": "int40"}, "external": {"threshold": "ext80"}},
+        "metrics": {"over_count": {"kind": "groups"}},
+    }
+
+    res_any = run_primitive("ratio_per_group", ctx, {**base_params, "limit_selector_aggregate": "any"})
+    assert res_any.metrics["over_count"]["value"] == 0  # external limit (80) applies -- 50 < 80, not flagged
+
+    res_first = run_primitive("ratio_per_group", ctx, {**base_params, "limit_selector_aggregate": "first"})
+    assert res_first.metrics["over_count"]["value"] == 1  # internal (first row) limit (40) applies -- 50 > 40, flagged
+
+    res_default = run_primitive("ratio_per_group", ctx, base_params)  # no limit_selector_aggregate -> defaults to 'first'
+    assert res_default.metrics["over_count"]["value"] == 1
+
+
 def test_ratio_per_group_numerator_aggregate_first_for_denormalised_amount():
     # T3.3b-shaped scenario: Entry Amount is already an entry-level total, repeated
     # on every attendee row of that entry -- summing it across the group (the
@@ -615,7 +658,8 @@ def test_ratio_per_group_numerator_aggregate_first_for_denormalised_amount():
     res = run_primitive("ratio_per_group", ctx, params)
     # E1: 120/3=40, not >40 -> not flagged. E2: 50/1=50 >40 -> flagged.
     assert res.metrics["over_count"]["value"] == 1
-    assert res.scored_units == ["E2"]
+    assert len(res.scored_units) == 1
+    assert res.scored_units[0].startswith("ratio:")
 
 
 def test_ratio_per_group_requires_limit_or_selector():

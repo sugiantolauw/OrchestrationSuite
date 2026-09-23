@@ -58,11 +58,20 @@ T6_1A_PARAMS_SCHEMA: dict = {
 
 
 def t6_1a_approver_review(ctx: PrimitiveContext, params: dict) -> PrimitiveResult:
-    """T6.1a -- approver review sufficiency (spec §1 T6.1a). Not expressible with
-    a generic primitive: it combines an OR-of-two-columns "receipt viewed" flag,
-    an "instant" flag whose denominator is conditioned on a THIRD column
-    (receipts actually viewed -- spec's [PENDING] default), and a per-approver
-    breakdown table, in one pass over one population."""
+    """T6.1a -- approver review sufficiency (spec §1 T6.1a, CLAUDE.md build brief
+    item B2). Not expressible with a generic primitive: it combines an
+    OR-of-two-columns "receipt viewed" flag, an "instant" flag gated on that same
+    viewed flag, a worst-case flag that is a distinct comparison entirely, and a
+    per-approver breakdown table, in one pass over one population.
+
+    Exception unit = approval step where receipts were NOT viewed, OR, where
+    viewed, approval was instant (Minutes of Approval from Receipt View <
+    thresholds.instant_approval_minutes). "Viewed" is the two-column OR
+    (Report Receipt Viewed == 'Yes' OR All Entry Receipts Viewed == 'Yes') --
+    Receipts Viewed Date is not used to gate this, per the build brief: it is
+    evidence, not the definition of "viewed". Worst case (not viewed AND
+    approved within the instant threshold of Approver Received Date) is a
+    separate, always-defined metric -- it is never the exception definition."""
     population = ctx.population(params["population"])
     df = population.df.copy()
 
@@ -74,19 +83,20 @@ def t6_1a_approver_review(ctx: PrimitiveContext, params: dict) -> PrimitiveResul
     minutes_col = params["instant_minutes_column"]
     instant_threshold = ctx.thresholds[params["instant_threshold"]["threshold"]]["value"]
     receipts_viewed_date_col = params["receipts_viewed_date_column"]
-    receipt_was_viewed = df[receipts_viewed_date_col].notna()
-    # [PENDING], spec default: "instant" is assessed only on steps where a receipt
-    # was actually viewed -- Minutes of Approval from Receipt View is undefined
-    # otherwise, so those steps are never counted as instant (never defaulted to
-    # either True or False by inference; simply excluded from the instant mask).
-    instant = receipt_was_viewed & (df[minutes_col] < instant_threshold)
+    # "Instant" is assessed only on steps where a receipt was actually viewed
+    # (the two-column OR above) -- Minutes of Approval from Receipt View is
+    # undefined otherwise, so those steps are never counted as instant (never
+    # defaulted to either True or False by inference; simply excluded).
+    instant = receipt_viewed & (df[minutes_col] < instant_threshold)
 
-    # "Worst case" (spec T6.1a) is not "not viewed AND instant" using the
-    # receipt-view-gated `instant` above -- by construction `instant` can only be
-    # True when a receipt WAS viewed, which can never coincide with "not viewed".
-    # It is its own, always-defined comparison: approved within the same minute
-    # it was received by the approver (Approver Received Date -> Approved
-    # Date/Time), independent of whether a receipt was ever viewed.
+    # The exception: not viewed, or (viewed and instant). Disjoint by
+    # construction, since `instant` can only be True when `receipt_viewed` is.
+    exception = (~receipt_viewed) | instant
+
+    # "Worst case" (spec T6.1a) is a distinct, always-defined comparison:
+    # approved within the same minute it was received by the approver
+    # (Approver Received Date -> Approved Date/Time), independent of whether a
+    # receipt was ever viewed. It stays a separate metric, never the exception.
     received_col = params["approver_received_date_column"]
     approved_col = params["approved_datetime_column"]
     minutes_since_received = (df[approved_col] - df[received_col]).dt.total_seconds() / 60.0
@@ -95,6 +105,7 @@ def t6_1a_approver_review(ctx: PrimitiveContext, params: dict) -> PrimitiveResul
 
     df["__receipt_viewed"] = receipt_viewed
     df["__instant"] = instant
+    df["__exception"] = exception
     df["__worst_case"] = worst_case
 
     total_reports = len(df)
@@ -117,7 +128,7 @@ def t6_1a_approver_review(ctx: PrimitiveContext, params: dict) -> PrimitiveResul
         approver_detail = grouped.sort_values("receipt_viewed_pct", ascending=False).to_dict("records")
 
     flag = params.get("flag", "RF_APR_InsufficientReview")
-    row_df = df[worst_case].copy()
+    row_df = df[exception].copy()
     flags = flags_from_rows(row_df, flag=flag)
     scored_units = row_df["__row_key"].tolist()
 

@@ -83,7 +83,7 @@ threshold · exclusions · expected evidence · primitive · deviation from `com
 - **Entry identity:** `(Employee ID, Report Name, Transaction Date, Vendor, Entry Amount)`. The source has no entry key.
 - **Population:** entries of ExCo claimants (`Employee ID`) in period, with `Expense Type` ∈ {`Staff/Client Function: Offsite Food/Drink`, `Staff/Client Function: Onsite Food/Drink`}.
 - **Per-head spend:** `Entry Amount` / `Number of Attendees` (fixes defect §0.2 `:202`, which compared the whole claim).
-- **Threshold [PENDING — analyst-set]:** $40 per head if every attendee is internal, $80 if any attendee is external. External = `Company` or `External ID` present. **[PENDING]** Confirm the internal/external rule. On this data the rule classifies **every** entry as external: `Company` is null on all 1,394 attendee rows and `External ID` is populated on all of them, so it is probably populated for employees too. A usable rule needs to know what `External ID` holds.
+- **Threshold [PENDING — analyst-set]:** $40 per head if every attendee is internal, $80 if **any** attendee is external (P2 build-brief correction, B5: the first port aggregated the per-row internal/external classification with the FIRST attendee row read for the entry, not `any` — `ratio_per_group`'s `limit_selector_aggregate: any` parameter now implements the "any attendee" rule literally). External = `Company` or `External ID` present. **[PENDING]** Confirm the internal/external rule. On this data the rule classifies **every** entry as external: `Company` is null on all 1,394 attendee rows and `External ID` is populated on all of them, so it is probably populated for employees too. A usable rule needs to know what `External ID` holds. **Consequence for Surface 2:** because `External ID` is non-null on every real row, `any` and `first` never disagree on this data, so the `any` fix cannot be exercised through `tests/fixtures/tne_planted/`; it is covered by a direct primitive-level test instead (`tests/test_p2a_primitives.py::test_ratio_per_group_limit_selector_aggregate_any_vs_first`) against a synthetic population not bound by this contract.
 - **Grain / scoring unit:** an entertainment entry.
 - **Metrics:** `ent_assessed`, `ent_over_internal_count`, `ent_over_external_count`, `ent_over_amount`.
 - **Primitive:** `ratio_per_group`.
@@ -109,7 +109,7 @@ threshold · exclusions · expected evidence · primitive · deviation from `com
 - **P6:** GPT-OSS via `ai_query` over `P_EXP` descriptions, with a confidence score. Rows coded `Personal Expense-Corp Card Only (Non-Reimbursable)` (87) are correctly declared personal and are **not** exceptions.
 
 ### T4.4 — High-value reimbursements
-- **Population:** `P_EXP`, amount > 0.
+- **Population:** `P_EXP`, amount > 0 (N5, P2 build-brief correction: the first port ran this test against unfiltered `P_EXP`; `p_exp_hv` now applies the amount > 0 filter §0 already specified, with the excluded count reported at `p_exp_hv.excluded.*`).
 - **Exception:** amount > $5,000 (strict; catalogue).
 - **Grain / scoring unit:** an expense line.
 - **Metrics:** `hv_count`, `hv_amount`, `hv_employees`.
@@ -121,9 +121,10 @@ threshold · exclusions · expected evidence · primitive · deviation from `com
 - **Same-day group:** `(Employee ID, Vendor, Transaction Date, Expense Type)` with count > 1 **and** sum > $5,000 **and** every line ≤ $5,000. **[PENDING]** The last condition is new: a split is by definition made of parts that are each under the limit. Without it, a single $6,000 line plus a $10 line counts as a "split".
 - **Window group:** within `(Employee ID, Vendor, Expense Type)`, every 3-calendar-day window `[d, d+2]` anchored on each line's date. A window is an exception when it has more than one line, its **lines in the window** sum to > $5,000, and each line is ≤ $5,000. Overlapping windows are merged into one claim group.
 - **Defect fixed:** `computation.py:365` summed the whole employee/vendor/type group once any pair fell within 2 days. The bug at `:390` (`dir()`) disappears with the rewrite.
+- **Claim identity (P2 build-brief correction, B3):** a claim group's identity is its ROW MEMBERSHIP, not a key tuple. Same-day detection and window detection run independently and can each find a group; if a window detection's member rows are the IDENTICAL set to a same-day detection's, they are the same claim and are counted once. Same-day and window detections with DIFFERENT member sets (e.g. a same-day pair that is also, correctly, part of a larger merged window) remain distinct claims. The first port scored every same-day and window detection as its own unit keyed on `(group_keys [+ date])`, which double-counts every case where a same-day pair is also independently found by the window pass over the identical rows — this is the population-inflation defect CLAUDE.md §0.2 describes, reproduced by scoring on key tuples instead of row membership.
 - **Grain:** line flags plus claim groups.
-- **Scoring unit:** the claim group.
-- **Metrics:** `split_same_day_groups`, `split_same_day_lines`, `split_window_groups`, `split_window_lines`, `split_amount`.
+- **Scoring unit:** the claim group (distinct, deduplicated by member row set).
+- **Metrics:** `split_same_day_groups`, `split_window_groups` (kind-specific: how many detections each method made, NOT deduplicated against each other), `split_groups` (the distinct claim-group count findings.yaml cites), `split_lines` (distinct flagged lines), `split_amount` (over the distinct lines).
 - **Primitive:** `split_detection`.
 
 ### T5.2 — Duplicate expense claims
@@ -140,9 +141,10 @@ threshold · exclusions · expected evidence · primitive · deviation from `com
 - **Population:** `approval_aging` rows with `Approver ID` ∈ ExCo and `Approved Date/Time` in period.
 - **Grain / scoring unit:** an approval step `(Report ID, Step, Approver ID)`. A report can have up to 3 steps.
 - **Receipt viewed:** `Report Receipt Viewed` = `Yes` OR `All Entry Receipts Viewed` = `Yes` (the actual column names; `computation.py` referenced non-existent ones and silently set every row to "not viewed").
-- **Instant:** `Minutes of Approval from Receipt View` < 1. **[PENDING]** This column measures time from receipt view; for steps where no receipt was viewed, its meaning is undefined. Default: instant is assessed only on steps where receipts were viewed.
-- **Exception:** not viewed, or instant. Worst case: not viewed and approved the same minute it was received.
+- **Instant:** viewed (the two-column rule above, **not** `Receipts Viewed Date` — a P2 build-brief correction: `Receipts Viewed Date` is evidence of when a receipt was viewed, not a substitute definition of "was it viewed") AND `Minutes of Approval from Receipt View` < `thresholds.instant_approval_minutes` (1). **[PENDING]** For steps where no receipt was viewed, `Minutes of Approval from Receipt View` is undefined; instant is assessed only on steps where receipts were viewed (the two-column rule).
+- **Exception:** not viewed, OR (viewed AND instant). Not viewed is unconditionally an exception — it does not also require worst-case timing. Worst case is a separate, always-defined comparison: not viewed AND approved within the instant threshold of `Approver Received Date` (never the exception definition; reported as `approver_worst_case_n`/`_pct` only).
 - **Metrics:** `approver_total_reports`, `approver_count`, `approver_no_receipt_pct`, `approver_instant_pct`, `approver_worst_case_n`, `approver_worst_case_pct`, plus a per-approver table.
+- **P2 build-brief correction:** the first port of this test used `Receipts Viewed Date` (a date/notna check) to gate "instant", and used `worst_case` (not viewed AND approved within the instant threshold of `Approver Received Date`) as the exception definition itself — which missed every not-viewed step that wasn't ALSO approved within the instant threshold, and missed every viewed-and-instant step entirely (a step can only be `worst_case` when NOT viewed, by construction, so "viewed and instant" was never flagged at all). Both are fixed above; the oracle in `tests/fixtures/tne_planted/plants.yaml` was rebuilt from this corrected text, not from either version of the code.
 
 ### T6.1c — Attendee hierarchy validity
 - **Population:** `attendee_validity` rows of ExCo claimants, in period.
@@ -159,6 +161,7 @@ threshold · exclusions · expected evidence · primitive · deviation from `com
   2. City absent → `Transaction Currency` when the currency belongs to one country (AUD→Australia, SGD→Singapore, NZD→New Zealand, PHP→Philippines, THB→Thailand, INR→India, KRW→Korea, South, MYR→Malaysia, FJD→Fiji, CHF→Switzerland).
   3. Otherwise (USD, EUR) → **unmapped**: excluded and counted (`t61d_unmapped_rows`), never defaulted.
 - **Grain / scoring unit:** employee-day-country `(Employee ID, Transaction Date, country)` (fixes defect `:562`).
+- **Negative and zero amounts (N5, P2 build-brief correction):** excluded from the population before the daily sum, per §0 -- a credit is not a spend event and must not net against same-day positive lines. The first port summed the raw column, which let a same-day credit hide a genuine exceedance. Excluded count reported at `t61d_pop*.excluded.*`.
 - **Limit:** `Rate Per Day (S$)` for the country × monthly RBA A$/S$ factor. A country missing from the per-diem table → the day is `not_testable`, reported.
 - **Exception:** daily total > limit.
 - **Metrics:** `daily_over_count` (employee-days), `daily_over_amount` (excess over limit), `daily_over_employees`, `daily_over_max`, split `_domestic` (Australia) / `_international`.
@@ -196,3 +199,23 @@ Every **[PENDING]** above, plus:
 
 - Policy sources for every threshold. All are currently `provenance: analyst-set`, `pending_policy_confirmation: true`.
 - Preferred-supplier lists (airline, car, hotel).
+
+## 5. Surface 2 gate hardening (P2 build-brief, independent review)
+
+An independent review found that Surface 2's scoring compared the engine's flagged units only to
+the natural ids a test's own `plants.yaml` block declared, so an engine flag on a row/group the
+fixture never mentioned for that test was neither a true nor a false positive -- invisible, not
+scored. Several realistic engine bugs (T3.1b joining on name only; T5.1 summing the whole
+employee/vendor/type group instead of the matching window; T5.1 same-day detection disabled;
+T6.1d aggregating a day with `max()` instead of `sum()`; the ExCo membership filter dropped from
+every population) passed Surface 2 unchanged as a result. `tests/fixtures/tne_planted/plants.yaml`
+now declares targeted plants and negatives for each of these (ExCo background rows the mutation
+would over-flag; non-ExCo rows that would become exceptions if a population filter broke;
+same-day/window claims whose row membership discriminates a correct detection from a buggy one),
+and `tests/test_surface2_mutations.py` applies each mutation in-process and asserts Surface 2
+fails for the affected test -- a permanent regression gate on the scoring gate itself. Not
+addressed: an exhaustive audit of every legitimate cross-test overlap across all 21 tests (several
+tests share one source population, so a row planted for one test can correctly and legitimately
+also satisfy another's exception condition -- see `orchestrator/eval/surface2.py`'s module
+docstring), which would be required before Surface 2 could compare against a test's FULL flagged
+population rather than its own declared scope.

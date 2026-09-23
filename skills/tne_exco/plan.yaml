@@ -127,6 +127,32 @@ populations:
     amount_column: Expense Amount (reimbursement currency)
     date_column: Transaction Date
 
+  # p_exp plus the T4.4 positive-amount filter (spec T4.4 "Population: P_EXP,
+  # amount > 0" -- N5: excluded count reported at p_exp_hv.excluded.*).
+  p_exp_hv:
+    source: expense_report
+    pre_filter_derive:
+      - op: custom
+        name: cross_approver_numeric
+        as: cross_approver_id
+    filters:
+      - all_of:
+          - any_of:
+              - column: Employee ID
+                op: in
+                value: {ref: exco_employee_ids}
+              - column: cross_approver_id
+                op: in
+                value: {ref: exco_employee_ids}
+          - column: Transaction Date
+            op: between
+            value: {ref: audit_period}
+      - column: Expense Amount (reimbursement currency)
+        op: gt
+        value: 0
+    amount_column: Expense Amount (reimbursement currency)
+    date_column: Transaction Date
+
   # p_exp plus the T5.2 positive-amount filter.
   p_exp_dup:
     source: expense_report
@@ -286,6 +312,13 @@ populations:
           - "Meals - International Travel"
           - "Incidentals - Domestic Travel"
           - "Incidentals - International Travel"
+      # N5: negative/zero amounts (credits/reversals) are excluded from the T6.1d
+      # population rather than netted into the daily sum -- a credit is not a
+      # spend event, and summing it against same-day spend hides the true daily
+      # total. Excluded count is reported at t61d_pop.excluded.* (populations.py).
+      - column: Expense Amount (reimbursement currency)
+        op: gt
+        value: 0
     derive:
       - op: custom
         name: country_from_city_or_currency
@@ -339,6 +372,10 @@ populations:
           - "Meals - International Travel"
           - "Incidentals - Domestic Travel"
           - "Incidentals - International Travel"
+      # N5: see t61d_pop above -- credits must not net into the daily sum.
+      - column: Expense Amount (reimbursement currency)
+        op: gt
+        value: 0
     derive:
       - op: custom
         name: country_from_city_or_currency
@@ -389,6 +426,10 @@ populations:
           - "Meals - International Travel"
           - "Incidentals - Domestic Travel"
           - "Incidentals - International Travel"
+      # N5: see t61d_pop above -- credits must not net into the daily sum.
+      - column: Expense Amount (reimbursement currency)
+        op: gt
+        value: 0
     derive:
       - op: custom
         name: country_from_city_or_currency
@@ -674,6 +715,10 @@ tests:
     assertion: operating
     not_testable:
       reason: "no preferred-hotel list supplied (spec T3.2a)"
+      # N11: declared so the engine can emit these as all-null (never 0)
+      # columns in the flags frame -- P4 renders a null RF_* value as "Not
+      # tested", distinct from a real 0/false "No breach".
+      flags: [RF_SP_DomAccom_NotPreferred, RF_SP_IntAccom_NotPreferred]
 
   - test_id: T3.3a_dom
     control_id: CTL-TNE-03
@@ -738,6 +783,11 @@ tests:
       numerator_aggregate: first
       direction: above
       limit_selector_column: external
+      # B5: external limit applies if ANY attendee of the entry is external
+      # (spec T3.3b) -- 'any' picks the highest-precedence declared case
+      # ('external', declared after 'internal') present anywhere in the group,
+      # not just the first attendee row read.
+      limit_selector_aggregate: any
       limit_cases:
         internal: {threshold: entertainment_internal_limit}
         external: {threshold: entertainment_external_limit}
@@ -795,6 +845,7 @@ tests:
     assertion: operating
     not_testable:
       reason: "classification endpoint not yet wired (P6 classify node)"
+      flags: [RF_CS_PersonalExpense]
 
   - test_id: T4.4
     control_id: CTL-TNE-08
@@ -803,7 +854,7 @@ tests:
     flag: RF_CS_Reimbursement_GT_5K
     primitive: threshold_exceedance
     params:
-      population: p_exp
+      population: p_exp_hv
       column: Expense Amount (reimbursement currency)
       limit: {threshold: high_value_limit}
       direction: above
@@ -830,10 +881,15 @@ tests:
       flag_same_day: RF_CS_SplitClaims_SameDay
       flag_window: RF_CS_SplitClaims_Window
       metrics:
+        # B3: split_same_day_groups/split_window_groups are kind-specific
+        # detection counts (not deduplicated against each other); split_groups
+        # is the distinct claim-group population (a window group whose member
+        # set equals a same-day group's counts once) -- the scored unit and
+        # what findings.yaml cites for trigger/severity.
         split_same_day_groups: {kind: value, key: same_day_groups}
-        split_same_day_lines: {kind: value, key: same_day_lines}
         split_window_groups: {kind: value, key: window_groups}
-        split_window_lines: {kind: value, key: window_lines}
+        split_groups: {kind: value, key: split_groups}
+        split_lines: {kind: value, key: split_lines}
         split_amount: {kind: value, key: split_amount, unit: AUD}
 
   - test_id: T5.2
