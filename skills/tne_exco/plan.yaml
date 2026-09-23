@@ -36,6 +36,22 @@ populations:
   raw_per_diem_rates:
     source: per_diem_rates
 
+  # N7 (P2/P3 gate review item 6): CLAUDE.md §11's ExCo identity decision
+  # excludes Employee ID 50040 ("Delacroix, Marie") as a namesake of ExCo ID
+  # 52472 -- an authoring-time judgement (exco.yaml), disclosed here as a
+  # LIVE, run-computed materiality figure rather than the static "27 claims"
+  # comment it was decided from, so a later change in the bound data would
+  # show up rather than staying silently stale. Unfiltered by period,
+  # matching claims_prepared/approved/combined's own scope below.
+  p_exco_excluded_namesakes:
+    source: expense_report
+    filters:
+      - column: Employee ID
+        op: in
+        value: {ref: exco_namesake_excluded_ids}
+    amount_column: Expense Amount (reimbursement currency)
+    date_column: Transaction Date
+
   # --- P_EXP family (spec §0 "Expense population P_EXP") ---
   # role sets, unfiltered by period -- run-level claims_prepared/approved/combined
   # reporting reads these populations' own rows/amount directly, never a hardcoded
@@ -1072,4 +1088,10 @@ run_metrics:
   claims_combined:
     kind: population_union
     populations: [p_exp_prepared_all, p_exp_approved_all]
+    unit: AUD
+  # N7 / P2/P3 gate review item 6: materiality of the excluded namesake
+  # (Employee ID 50040), computed live -- see p_exco_excluded_namesakes above.
+  exco_namesake_excluded_claims:
+    kind: population
+    population: p_exco_excluded_namesakes
     unit: AUD

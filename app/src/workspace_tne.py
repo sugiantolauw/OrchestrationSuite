@@ -1314,6 +1314,30 @@ def _claims_population_panel(payload: dict | None) -> html.Div | None:
     ], className="panel", style={"marginBottom": 12})
 
 
+def _namesake_disclosure_text(payload: dict | None) -> str:
+    # N7 / P2/P3 gate review item 6 (CLAUDE.md §11 ExCo identity decision):
+    # Employee ID 50040 ("Delacroix, Marie") is excluded from the ExCo
+    # population as a likely namesake of ExCo ID 52472 -- an accepted
+    # default, not a policy fact, so it is disclosed on every run rather
+    # than left in a reference-file comment nobody reading a run ever sees.
+    # The count/amount are this run's own live figures
+    # (exco_namesake_excluded_claims_rows/_amount), never the static "27
+    # claims" the decision was originally made from.
+    rows = _metric_value(payload, "exco_namesake_excluded_claims_rows")
+    amount = _metric_value(payload, "exco_namesake_excluded_claims_amount")
+    base = (
+        "Employee ID 50040 (\"Delacroix, Marie\") is excluded from the ExCo population "
+        "as a namesake of ExCo ID 52472 — an accepted default pending auditor confirmation "
+        "(CLAUDE.md §11), not a verified identity match."
+    )
+    if rows is None:
+        return base
+    detail = f"{_fmt_count(rows)} claim(s)"
+    if amount is not None:
+        detail += f" ({_fmt_currency(amount)})"
+    return f"{base} This run's data attributes {detail} to that excluded ID."
+
+
 def _methodology_panel(payload: dict | None) -> html.Details:
     reconciliation = (payload or {}).get("reconciliation")
     return html.Details([
@@ -1337,6 +1361,7 @@ def _methodology_panel(payload: dict | None) -> html.Details:
                 html.Div("Limitations", style={"fontWeight": 700, "fontSize": 11, "color": "#1e2761", "marginBottom": 4}),
                 html.Ul([
                     html.Li("Source data completeness has not been independently verified beyond the G6 row/amount/date reconciliation."),
+                    html.Li(_namesake_disclosure_text(payload)),
                     html.Li("Thresholds carrying provenance 'analyst-set' are pending policy confirmation — flagged wherever they drive a severity."),
                     html.Li("Tests marked 'Not testable' are declared gaps (e.g. no preferred-hotel list, no classification endpoint yet), never a silent zero."),
                     html.Li("Rule-based results indicate exceptions, not confirmed findings — sign-off is a human judgement."),

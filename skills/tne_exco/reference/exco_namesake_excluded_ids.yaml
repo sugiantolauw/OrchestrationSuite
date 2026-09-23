@@ -1,0 +1,8 @@
+# Flat list derived from reference/exco.yaml `excluded_pending_confirmation` --
+# the Employee ID(s) excluded from the ExCo population as a likely namesake of
+# an accepted ExCo ID (CLAUDE.md §11 data decision 1). Used by
+# p_exco_excluded_namesakes (plan.yaml) so the run's own namesake-materiality
+# metric (P2/P3 gate review item 6) is computed from a declared reference
+# value, never a bare numeric literal in plan.yaml
+# (tests/test_no_hardcoded_results.py::test_plan_and_findings_yaml_have_no_numeric_literals_outside_thresholds).
+- 50040

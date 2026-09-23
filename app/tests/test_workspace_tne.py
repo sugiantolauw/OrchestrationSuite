@@ -180,6 +180,36 @@ def test_actions_tab_renders_real_persisted_actions():
     assert "Missing Receipt Documentation" in text
 
 
+def test_namesake_disclosure_base_text_with_no_metric():
+    text = workspace_tne._namesake_disclosure_text({"metrics": {}})
+    assert "50040" in text
+    assert "52472" in text
+    assert "namesake" in text
+    assert "This run's data attributes" not in text  # no live figure to append
+
+
+def test_namesake_disclosure_includes_the_live_run_figure():
+    payload = {
+        "metrics": {
+            "exco_namesake_excluded_claims_rows": {"value": 27, "unit": "count"},
+            "exco_namesake_excluded_claims_amount": {"value": 4087.97, "unit": "AUD"},
+        }
+    }
+    text = workspace_tne._namesake_disclosure_text(payload)
+    assert "50040" in text
+    assert "27 claim" in text
+    assert "$4,088" in text
+
+
+def test_methodology_panel_includes_namesake_disclosure():
+    run_id = _completed_run()
+    bundle = workspace_tne._load_bundle(run_id)
+    panel = workspace_tne._methodology_panel(bundle["payload"])
+    text = str(panel)
+    assert "50040" in text
+    assert "namesake" in text
+
+
 def test_catalogue_tab_shows_reconciliation_panel():
     run_id = _completed_run()
     bundle = workspace_tne._load_bundle(run_id)
