@@ -1607,6 +1607,11 @@ That workspace was abandoned.
 
 The user supplied a second workspace; host and token live only in the gitignored `.env`.
 
+> **Before ANY Databricks call (SDK, SQL, live tests, deploy): `set -a; source .env; set +a`.**
+> The session's own `DATABRICKS_HOST`/`DATABRICKS_TOKEN` may still point at the abandoned first
+> workspace (`Starter Warehouse`, `sts:AssumeRole` errors). If you see those errors, you forgot to
+> source `.env` — it is not a platform outage.
+
 | Check | Result |
 |---|---|
 | Identity / network | OK — PAT authenticates; host reachable through the session proxy |
