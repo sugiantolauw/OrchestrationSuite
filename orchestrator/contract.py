@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import math
 from dataclasses import dataclass
 from pathlib import Path
@@ -224,15 +225,21 @@ class LocalFileDataSource:
     ) -> pd.DataFrame:
         cfg = self._cfg(source)
         path = self._path(source)
-        actual_version = sha256_file(path)
+        # N9: read the file's bytes ONCE, hash that buffer, and parse from the
+        # SAME buffer -- two separate reads (hash the path, then re-open it to
+        # parse) is a TOCTOU gap: the file on disk could change between the two
+        # reads, so the hash recorded as this run's provenance would not
+        # actually describe the bytes that were parsed.
+        data = path.read_bytes()
+        actual_version = hashlib.sha256(data).hexdigest()
         if actual_version != version:
             raise SourceVersionMismatch(source, str(version), actual_version)
 
         fmt = cfg.get("format", "csv")
         if fmt == "xlsx":
-            df = pd.read_excel(path, sheet_name=cfg.get("sheet", 0))
+            df = pd.read_excel(io.BytesIO(data), sheet_name=cfg.get("sheet", 0))
         elif fmt == "csv":
-            df = pd.read_csv(path)
+            df = pd.read_csv(io.BytesIO(data))
         else:
             raise ContractViolation([f"{source}: unsupported format {fmt!r}"])
 
