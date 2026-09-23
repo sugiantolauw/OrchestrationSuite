@@ -290,3 +290,88 @@ def test_restart_survival_across_worker_death(tmp_path):
         assert status == "awaiting_signoff", run.get("status_reason")
     finally:
         ctx_b.executor.stop()
+
+
+# ── queue environment affinity: the UI-facing note (P3 gate review item 4) ──
+
+
+def test_get_run_and_list_runs_surface_a_queue_note_for_a_different_deployment(tmp_path):
+    """A run created under a different deployment's code_revision (an
+    in-place redeploy leaving a stale queued row, or a shared dev database)
+    is never admitted by THIS deployment's executor (tests/test_p3_executor.py
+    covers that side) -- this covers the read path: service.get_run and
+    service.list_runs both surface WHY it is not progressing."""
+    ctx = _build_ctx(tmp_path)  # CODE_REVISION="test-fixed-revision"
+    ctx.executor = None  # isolate the read-path note from any executor's own admission gate
+    from orchestrator import runs as runs_module
+
+    fp = dict(
+        fingerprint_id="FP-FOREIGN-NOTE",
+        source_table_versions="{}", uploaded_file_hashes="{}", reference_data_hashes="{}",
+        skill_content_hash=None, code_revision="rev-a-different-deployment",
+        dependency_lock_hash="dep1", runtime_config_hash="rc-other",
+        endpoint_config="{}", prompt_template_version="none", created_at=ctx.clock(),
+    )
+    run_id = "RUN-FOREIGN-NOTE"
+    runs_module.create_run(
+        ctx.persistence, run_id=run_id, run_kind="fieldwork", engagement_id="ENG-DEFAULT",
+        skill_id=None, skill_version=None, mode="playbook",
+        audit_period=("2026-01-01", "2026-01-31"), objective="t", run_owner="alice",
+        options={}, fingerprint=fp, now=ctx.clock(),
+    )
+
+    run = service.get_run(ctx, run_id)
+    assert run["status"] == "queued"
+    assert run["queue_note"] is not None
+    assert "different deployment" in run["queue_note"]
+    assert "rev-a-differ" in run["queue_note"]  # truncated to 12 chars, service._queue_affinity_note
+
+    rows = service.list_runs(ctx)
+    row = next(r for r in rows if r["run_id"] == run_id)
+    assert row["queue_note"] == run["queue_note"]
+
+
+def test_queue_note_is_none_for_a_run_created_under_this_same_deployment(tmp_path):
+    ctx = _build_ctx(tmp_path)
+    ctx.executor = None  # isolate the read path -- do not let it actually get admitted
+    bindings = service.suggest_bindings(ctx, "SKILL-MINI")
+    run_id = service.start_audit_run(
+        ctx, skill_id="SKILL-MINI", bindings=bindings,
+        audit_period=("2026-01-01", "2026-02-28"), objective="own deployment", run_owner="tester",
+    )
+    run = service.get_run(ctx, run_id)
+    assert run["status"] == "queued"
+    assert run["queue_note"] is None
+
+    rows = service.list_runs(ctx)
+    row = next(r for r in rows if r["run_id"] == run_id)
+    assert row["queue_note"] is None
+
+
+def test_queue_note_is_none_once_the_run_is_no_longer_queued(tmp_path):
+    ctx = _build_ctx(tmp_path)
+    ctx.executor = None
+    from orchestrator import runs as runs_module
+    from orchestrator.status import transition
+
+    fp = dict(
+        fingerprint_id="FP-FOREIGN-BUT-RUNNING",
+        source_table_versions="{}", uploaded_file_hashes="{}", reference_data_hashes="{}",
+        skill_content_hash=None, code_revision="rev-a-different-deployment",
+        dependency_lock_hash="dep1", runtime_config_hash="rc-other",
+        endpoint_config="{}", prompt_template_version="none", created_at=ctx.clock(),
+    )
+    run_id = "RUN-FOREIGN-RUNNING"
+    state = runs_module.create_run(
+        ctx.persistence, run_id=run_id, run_kind="fieldwork", engagement_id="ENG-DEFAULT",
+        skill_id=None, skill_version=None, mode="playbook",
+        audit_period=("2026-01-01", "2026-01-31"), objective="t", run_owner="alice",
+        options={}, fingerprint=fp, now=ctx.clock(),
+    )
+    # Moved on somehow (e.g. admitted before this deployment existed) -- the
+    # note is specifically about a run stuck `queued`, not any run whose
+    # fingerprint happens to differ.
+    ctx.persistence.save_state(transition(state, "running", now=ctx.clock()))
+
+    run = service.get_run(ctx, run_id)
+    assert run["queue_note"] is None

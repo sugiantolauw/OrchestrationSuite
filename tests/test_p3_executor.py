@@ -17,6 +17,7 @@ from pathlib import Path
 
 from orchestrator import runs as runs_module
 from orchestrator import service
+from orchestrator.config import Settings, runtime_config_hash
 from orchestrator.executor import ThreadExecutor
 from orchestrator.timeutil import utc_now
 from tests.conftest import canonical_ts
@@ -626,3 +627,128 @@ def test_lease_lost_stops_further_node_output(local_persistence):
     finally:
         node1_release.set()
         executor.stop()
+
+
+# ── queue environment affinity (P3 gate review item 4) ─────────────────────
+
+
+def _create_with_fingerprint(persistence, run_id: str, now_fn, fingerprint: dict):
+    return runs_module.create_run(
+        persistence, run_id=run_id, run_kind="fieldwork", engagement_id="ENG-DEFAULT", skill_id=None,
+        skill_version=None, mode="playbook", audit_period=("2026-01-01", "2026-01-31"), objective="t",
+        run_owner="alice", options={"auto_confirm_plan": True}, fingerprint=fingerprint, now=now_fn(),
+    )
+
+
+def _fingerprint_for_settings(fp_id: str, settings: Settings) -> dict:
+    fp = _fingerprint(fp_id)
+    fp["code_revision"] = settings.code_revision
+    fp["runtime_config_hash"] = runtime_config_hash(settings)
+    return fp
+
+
+def test_executor_leaves_a_different_deployment_run_queued_and_untouched(local_persistence):
+    """A run whose stored fingerprint's code_revision/runtime_config_hash do
+    not match this worker's own deployment must never be claimed: no lease
+    acquired, no admission-failure bookkeeping, status stays `queued` across
+    several admission (and reap) ticks -- and the mid-session reaper, which
+    only ever acts on `find_runs(['running'])`, structurally cannot touch a
+    run that never left `queued` in the first place."""
+    persistence = local_persistence
+    clock = _make_clock()
+    run_id = "RUN-FOREIGN-REVISION"
+
+    own_settings = dataclasses.replace(Settings(), code_revision="rev-mine")
+    foreign_settings = dataclasses.replace(Settings(), code_revision="rev-theirs")
+    fp = _fingerprint_for_settings(f"FP-{run_id}", foreign_settings)
+    _create_with_fingerprint(persistence, run_id, clock, fp)
+
+    node_entered = threading.Event()
+
+    def node(ctx, state):
+        node_entered.set()
+        return state
+
+    executor = ThreadExecutor(
+        persistence=persistence, settings=own_settings, worker_id="worker-mine",
+        ctx_factory=lambda rid: object(),
+        fingerprint_factory=lambda rid: _fingerprint_for_settings(f"FP-{rid}", own_settings),
+        clock=clock, nodes_for={"fieldwork": {"plan": [("n", node)], "execute": [], "export": []}},
+        poll_interval_s=0.03,
+    )
+    try:
+        executor.start()
+        assert not node_entered.wait(timeout=1), "a different deployment's run was admitted"
+
+        final = persistence.load_state(run_id)
+        assert final.status == "queued"
+        # never even attempted a lease -- expired_leases(FAR_FUTURE) lists every
+        # run_id holding ANY lease row, live or expired (see executor._FAR_FUTURE).
+        assert run_id not in persistence.expired_leases("9999-12-31T23:59:59.999999Z")
+        assert run_id not in executor._admission_failures
+    finally:
+        executor.stop()
+
+
+def test_two_executors_with_different_revisions_each_take_only_their_own_runs(local_persistence):
+    """The scenario item 4 names directly: two executors (different deployments,
+    same shared persistence -- the situation an in-place redeploy leaves for
+    the moment both an old and a new container are polling) each admit only
+    the queued run created under their own code revision, never the other's."""
+    persistence = local_persistence
+    clock = _make_clock()
+
+    settings_a = dataclasses.replace(Settings(), code_revision="rev-A")
+    settings_b = dataclasses.replace(Settings(), code_revision="rev-B")
+
+    fp_a = _fingerprint_for_settings("FP-RUN-A", settings_a)
+    fp_b = _fingerprint_for_settings("FP-RUN-B", settings_b)
+    _create_with_fingerprint(persistence, "RUN-A", clock, fp_a)
+    _create_with_fingerprint(persistence, "RUN-B", clock, fp_b)
+
+    ran: list[tuple[str, str]] = []
+    ran_lock = threading.Lock()
+
+    def make_node(worker_label):
+        def node(ctx, state):
+            with ran_lock:
+                ran.append((worker_label, state.run_id))
+            return state
+        return node
+
+    executor_a = ThreadExecutor(
+        persistence=persistence, settings=settings_a, worker_id="worker-A",
+        ctx_factory=lambda rid: object(),
+        fingerprint_factory=lambda rid: _fingerprint_for_settings(f"FP-{rid}", settings_a),
+        clock=clock, nodes_for={"fieldwork": {"plan": [("n", make_node("A"))], "execute": [], "export": []}},
+        poll_interval_s=0.03,
+    )
+    executor_b = ThreadExecutor(
+        persistence=persistence, settings=settings_b, worker_id="worker-B",
+        ctx_factory=lambda rid: object(),
+        fingerprint_factory=lambda rid: _fingerprint_for_settings(f"FP-{rid}", settings_b),
+        clock=clock, nodes_for={"fieldwork": {"plan": [("n", make_node("B"))], "execute": [], "export": []}},
+        poll_interval_s=0.03,
+    )
+    try:
+        executor_a.start()
+        executor_b.start()
+
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            statuses = {rid: persistence.load_state(rid).status for rid in ("RUN-A", "RUN-B")}
+            if all(s == "awaiting_signoff" for s in statuses.values()):
+                break
+            time.sleep(0.05)
+        final_statuses = {rid: persistence.load_state(rid).status for rid in ("RUN-A", "RUN-B")}
+        assert all(s == "awaiting_signoff" for s in final_statuses.values()), final_statuses
+
+        with ran_lock:
+            outcome = set(ran)
+        assert ("A", "RUN-A") in outcome
+        assert ("B", "RUN-B") in outcome
+        assert ("A", "RUN-B") not in outcome, "worker A admitted worker B's run"
+        assert ("B", "RUN-A") not in outcome, "worker B admitted worker A's run"
+    finally:
+        executor_a.stop()
+        executor_b.stop()

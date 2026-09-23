@@ -123,6 +123,17 @@ def _render_body(run: dict | None, run_id: str) -> html.Div:
                         style={"width": "auto", "padding": "10px 24px"}),
         ], className="panel", style={"marginTop": 16}))
 
+    elif status == "queued":
+        # P3 gate review item 4: run.get("queue_note") is None for an ordinary
+        # queued run (waiting on the concurrency cap, CLAUDE.md §2.3 rule 3) and
+        # set only when this deployment's executor will never claim it (a
+        # different deployment's run, orchestrator.service._queue_affinity_note).
+        blocks.append(html.Div([
+            html.H3("Waiting to start", style={"margin": "0 0 6px"}),
+            html.P(run.get("queue_note") or "Queued — waiting for an available run slot.",
+                   className="sub"),
+        ], className="panel", style={"marginTop": 16}))
+
     elif status == "interrupted":
         blocks.append(html.Div([
             html.H3("This run was interrupted", style={"margin": "0 0 6px"}),

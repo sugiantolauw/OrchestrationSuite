@@ -17,7 +17,11 @@ admission retries that end an unadmittable run `failed` through the normal
 state machine rather than polling forever (§3a); and a lease renewal failure
 marking this worker `not alive` for that run so the pipeline stops writing
 further node output (§3b, consulted by orchestrator.pipeline.run_phase's own
-worker_alive() check)."""
+worker_alive() check).
+
+A third: queue environment affinity, which never even attempts a lease for a
+run created under a different deployment's code_revision/runtime_config_hash,
+leaving it queued for the deployment it actually belongs to (§4)."""
 
 from __future__ import annotations
 
@@ -28,6 +32,7 @@ from datetime import timedelta
 from typing import Callable
 
 from orchestrator.adapters.protocols import NullTracing
+from orchestrator.config import runtime_config_hash
 from orchestrator.errors import InvalidTransition, StaleStateError
 from orchestrator.nodes.fieldwork import NODES_FOR
 from orchestrator.pipeline import run_phase
@@ -165,6 +170,30 @@ class ThreadExecutor:
         # if it is ever re-admitted by this worker.
         self._lease_lost: set[str] = set()
 
+        # Queue environment affinity (P3 gate review item 4): this worker's own
+        # deployment identity, computed once from `settings` -- the same two
+        # fields a queued run's stored run_fingerprints row carries
+        # (orchestrator/fingerprint.py's _HASHED_FIELDS). A run admitted by a
+        # DIFFERENT deployment would otherwise be claimed here and spend a
+        # lease only to fail at pipeline.run_phase's own fingerprint
+        # verification -- this skips it at admission instead, leaving it
+        # `queued` for the deployment that actually matches. `runtime_config_hash`
+        # requires a real `Settings` dataclass; test doubles that are not one
+        # (or that never set `code_revision`) fall back to "unknown", under
+        # which the gate never blocks admission -- CLAUDE.md never assumes a
+        # missing value silently means "matches" for anything that DOES fail
+        # closed, but here the absence is "this worker cannot tell", and the
+        # existing full fingerprint check inside run_phase remains the backstop.
+        own_code_revision = getattr(settings, "code_revision", None)
+        try:
+            own_runtime_config_hash = runtime_config_hash(settings)
+        except Exception:
+            own_runtime_config_hash = None
+        self._own_environment: dict[str, str | None] = {
+            "code_revision": own_code_revision,
+            "runtime_config_hash": own_runtime_config_hash,
+        }
+
     # ── lifecycle ────────────────────────────────────────────────────────────
 
     def start(self, run_id: str | None = None, phase: str | None = None) -> None:
@@ -246,6 +275,11 @@ class ThreadExecutor:
             info = self._admission_failures.get(run_id)
             if info is not None and now < info["next_retry_at"]:
                 return  # backing off after a prior failure -- not due for retry yet
+        if self._has_own_environment_signature() and not self._fingerprint_environment_matches(run_id):
+            # A different deployment's run (P3 gate review item 4) -- never touched:
+            # no lease attempt, no backoff bookkeeping, stays `queued` untouched for
+            # the deployment it actually belongs to. Not a failure of THIS run.
+            return
         if not self._sema.acquire(blocking=False):
             return  # at capacity -- stays `queued` in Delta (CLAUDE.md §2.3 rule 3)
 
@@ -264,6 +298,30 @@ class ThreadExecutor:
             self._active_runs.add(run_id)
         future = self._pool.submit(self._run_one, run_id)
         future.add_done_callback(lambda f, rid=run_id: self._on_done(rid, f))
+
+    def _has_own_environment_signature(self) -> bool:
+        return any(v is not None for v in self._own_environment.values())
+
+    def _fingerprint_environment_matches(self, run_id: str) -> bool:
+        """P3 gate review item 4: compares only `code_revision` and
+        `runtime_config_hash` against the run's STORED run_fingerprints row --
+        never the full fingerprint (source table versions, skill content
+        hash, ...), which is per-run by design and belongs to
+        pipeline.run_phase's own verify_fingerprint call, not an admission
+        gate every queued run would otherwise pay for on every poll tick."""
+        try:
+            state = self._persistence.load_state(run_id)
+            stored_fingerprint = self._persistence.get_fingerprint(state.fingerprint_id)
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("environment-affinity fingerprint lookup failed for run_id=%s", run_id)
+            return True  # fail open -- never block admission on a lookup error
+        for field, own_value in self._own_environment.items():
+            if own_value is None:
+                continue
+            stored_value = (stored_fingerprint or {}).get(field)
+            if stored_value is not None and stored_value != own_value:
+                return False
+        return True
 
     def _record_admission_failure(self, run_id: str, now: str) -> None:
         """CLAUDE.md §2.3 rule 3 / §9C, P3 gate review item 3a: repeated

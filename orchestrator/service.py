@@ -552,10 +552,37 @@ def start_audit_run(
     return state.run_id
 
 
+def _queue_affinity_note(ctx: AppContext, status: str, fingerprint_id: str | None) -> str | None:
+    """P3 gate review item 4: a run created by a different deployment is left
+    `queued` untouched rather than claimed and failed at fingerprint
+    verification (ThreadExecutor's own admission-time check,
+    orchestrator/executor.py -- the SAME code_revision comparison, so a run
+    this note names is exactly one that executor would also skip). Surfaced
+    here, read-only, so the UI can show WHY a queued run is not progressing.
+    Returns None whenever there is nothing to say -- not queued, this
+    deployment's own code_revision is not configured (dev/local, where every
+    run is presumed this deployment's own), or the fingerprint row cannot be
+    read."""
+    if status != "queued":
+        return None
+    own_code_revision = getattr(ctx.settings, "code_revision", None)
+    if own_code_revision is None or not fingerprint_id:
+        return None
+    try:
+        stored_fingerprint = ctx.persistence.get_fingerprint(fingerprint_id)
+    except Exception:
+        return None
+    stored_code_revision = (stored_fingerprint or {}).get("code_revision")
+    if stored_code_revision and stored_code_revision != own_code_revision:
+        return f"queued — created by a different deployment (code revision {stored_code_revision[:12]})"
+    return None
+
+
 def get_run(ctx: AppContext, run_id: str) -> dict:
     state = ctx.persistence.load_state(run_id)
     payload = json.loads(to_json(state))
     payload["status_label"] = state.status.replace("_", " ").title()
+    payload["queue_note"] = _queue_affinity_note(ctx, state.status, state.fingerprint_id)
 
     nodes = NODES_FOR.get(state.run_kind, {}).get(state.phase, [])
     current_stage = None
@@ -613,6 +640,7 @@ def list_runs(ctx: AppContext, filters: dict | None = None) -> list[dict]:
                 "approved_by": approved_by,
                 "self_approved": self_approved,
                 "sod_enforced": SOD_ENFORCED,
+                "queue_note": _queue_affinity_note(ctx, r["status"], r.get("fingerprint_id")),
             }
         )
     return out

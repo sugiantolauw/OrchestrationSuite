@@ -149,6 +149,10 @@ def run_card(run: dict) -> html.Div:
                       style={"fontSize": 10.5, "color": "#6b7283"}),
         ], style={"display": "flex", "justifyContent": "space-between", "marginTop": 8}),
         demo_indicator(SELF_APPROVED_LABEL) if run.get("self_approved") else None,
+        # P3 gate review item 4: a run queued by a different deployment never
+        # progresses under THIS one -- service.list_runs's queue_note says why,
+        # using the same small-label pattern as the self-approved notice above.
+        demo_indicator(run["queue_note"]) if run.get("queue_note") else None,
         html.Div([
             html.Button("View", id={"type": "run-view-btn", "index": run["run_id"]},
                         style={"fontSize": 12, "padding": "4px 12px"}),
