@@ -259,6 +259,6 @@ class LocalFileDataSource:
         # enough that filtering is left to orchestrator.populations after read.
         return df
 
-    def row_count(self, table_fqn: str, *, version: str | None = None) -> int:
-        v = version or self.resolve_version(table_fqn)
-        return len(self.read_population(table_fqn, version=v))
+    def row_count(self, source: str, *, version: str | None = None) -> int:
+        v = version or self.resolve_version(source)
+        return len(self.read_population(source, version=v))

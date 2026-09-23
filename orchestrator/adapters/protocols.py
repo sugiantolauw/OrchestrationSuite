@@ -41,7 +41,9 @@ class DataSourceAdapter(Protocol):
     ) -> Any:
         ...
 
-    def row_count(self, table_fqn: str, *, version: str | None = None) -> int:
+    def row_count(self, source: str, *, version: str | None = None) -> int:
+        """Takes a bound source name, like resolve_version/read_population --
+        not an already-qualified table_fqn. Used for G6's independent row count."""
         ...
 
 

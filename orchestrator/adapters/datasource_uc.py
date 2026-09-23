@@ -348,8 +348,18 @@ class UCTableDataSource:
         arrow_table = cur.fetchall_arrow()
         return _normalise_datetime_dtypes(arrow_table.to_pandas())
 
-    def row_count(self, table_fqn: str, *, version: str | None = None) -> int:
-        quoted = _quoted_fqn(table_fqn)
+    def row_count(self, source: str, *, version: str | None = None) -> int:
+        """Takes a bound source name (contract.yaml key, e.g. 'expense_report'),
+        exactly like resolve_version/read_population -- NOT an already-qualified
+        table_fqn. The G6 reconciliation call site (orchestrator/nodes/fieldwork.py)
+        is the only production caller and always passes a source name; it must get
+        an INDEPENDENT row count at the same pinned version, so this resolves the
+        binding itself rather than trusting an fqn the caller already looked up
+        (this parameter was previously misnamed `table_fqn` and called `_quoted_fqn`
+        directly on the bare source name, raising UCSourceError -- found live during
+        the P3 integration pass, CLAUDE.md §2.3 rule 4)."""
+        fqn = self._fqn(source)
+        quoted = _quoted_fqn(fqn)
         v = int(version) if version is not None else None
         if v is None:
             cur = self._execute(f"DESCRIBE HISTORY {quoted} LIMIT 1")
