@@ -97,6 +97,42 @@ def top_n_bar(
     return _layout(fig, title, height, xaxis_tickprefix=x_prefix, xaxis_tickformat=",.0f")
 
 
+def top_n_bar_by_category(
+    df: pd.DataFrame | None, group_col: str, amount_col: str, category_col: str, title: str,
+    n: int = 10, height: int = 260, x_prefix: str = "$", category_order: list[str] | None = None,
+) -> go.Figure:
+    """Top-N by total amount, each bar split (stacked) by `category_col` --
+    ports reference_app/app.py's 'Spend by Employee' coloured by
+    Source_Population (Prepared/Approved). The category here is a run's real
+    per-row role (a Skill's plan.yaml `frame_tags`, orchestrator/frames.py --
+    for SKILL-001, P_EXP's prepared/approved/both, spec §0) rather than a
+    column the prototype invented at load time. Categorical colour, fixed
+    order (never cycled per employee) -- same PALETTE convention as this
+    module's other multi-series charts (exceptions_by_group_chart)."""
+    required = {group_col, amount_col, category_col}
+    if df is None or df.empty or not required.issubset(df.columns):
+        return empty_figure(f"{title} — no data", height)
+    working = df.dropna(subset=[category_col])
+    if working.empty:
+        return empty_figure(f"{title} — no data", height)
+    totals = working.groupby(group_col)[amount_col].sum().nlargest(n)
+    sub = working[working[group_col].isin(totals.index)]
+    agg = sub.groupby([group_col, category_col], as_index=False)[amount_col].sum()
+    if agg.empty:
+        return empty_figure(f"{title} — no data", height)
+    group_order = totals.sort_values().index.tolist()  # ascending -- largest ends up at the top, horizontal bar
+    categories = category_order or sorted(agg[category_col].unique())
+    fig = px.bar(
+        agg, x=amount_col, y=group_col, color=category_col, orientation="h",
+        category_orders={group_col: group_order, category_col: categories},
+        color_discrete_sequence=PALETTE, title=title,
+    )
+    return _layout(
+        fig, title, height, xaxis_tickprefix=x_prefix, xaxis_tickformat=",.0f",
+        legend=dict(orientation="h", y=-0.3, font_size=11),
+    )
+
+
 # ── Findings ──────────────────────────────────────────────────────────────────
 
 def findings_by_severity_donut(findings: list[dict] | None, title: str = "Findings by risk level", height: int = 260) -> go.Figure:

@@ -32,6 +32,7 @@ from orchestrator.contract import ContractViolation
 from orchestrator.errors import ReconciliationError
 from orchestrator.engine import execute_skill
 from orchestrator.findings import build_findings
+from orchestrator.frames import build_row_snapshots, frame_parquet_bytes, sha256_bytes
 from orchestrator.nodes.context import NodeContext
 from orchestrator.state import RunState
 
@@ -241,15 +242,42 @@ def execute(ctx: NodeContext, state: RunState) -> RunState:
         raise ReconciliationError(state.run_id, differences)
 
     now = ctx.clock()
+
+    # Per-run row snapshots for /workspace/tne (CLAUDE.md build brief P4 perf
+    # fix, orchestrator/frames.py): only the rows the run's populations
+    # actually tested, per contract source, written once here so the
+    # workspace's first callback reads a few small Parquet files from the
+    # Volume instead of re-reading every full bound source (the ~39s/~64s
+    # get_run_frames regression this fixes). Idempotent by construction: the
+    # path is deterministic per (run_id, source) and export_storage.write()
+    # overwrites, and record_export() upserts by (run_id, kind) -- a
+    # re-executed `execute` node replaces its own prior snapshot, never
+    # duplicates it (CLAUDE.md §2.3 rule 1).
+    snapshots = build_row_snapshots(ctx.skill, result, flagged_rows)
+    frame_exports: dict[str, dict] = {}
+    for source in sorted(snapshots):
+        content = frame_parquet_bytes(snapshots[source])
+        sha256 = sha256_bytes(content)
+        rel_path = f"runs/{state.run_id}/frames/{source}.parquet"
+        written_path = ctx.export_storage.write(rel_path, content)
+        kind = f"frames:{source}"
+        ctx.persistence.record_export(
+            state.run_id, kind, path=written_path, sha256=sha256, created_by=state.run_owner, now=now,
+        )
+        frame_exports[source] = {
+            "path": written_path, "sha256": sha256, "row_count": int(len(snapshots[source])), "kind": kind,
+        }
+
     message = (
         f"{len(result.test_results)} test(s) executed, {len(metrics_rows)} metric(s), "
-        f"{len(flagged_rows)} flagged row(s)"
+        f"{len(flagged_rows)} flagged row(s), {len(frame_exports)} row snapshot(s) written"
     )
     return dataclasses.replace(
         state,
         test_results=result.test_results,
         flagged_table=table_ref,
         reconciliation=reconciliation,
+        exports={**(state.exports or {}), "frames": frame_exports},
         events=state.events + [_event("execute", message, now)],
     )
 
@@ -596,7 +624,12 @@ def export(ctx: NodeContext, state: RunState) -> RunState:
     message = f"XLSX workpaper written to {written_path} ({len(content)} bytes)"
     return dataclasses.replace(
         state,
-        exports={"xlsx": {"path": written_path, "sha256": sha256, "kind": "xlsx"}},
+        # Merge, never overwrite -- `execute` already wrote this run's frame
+        # snapshots into state.exports["frames"] (CLAUDE.md build brief P4
+        # perf fix); replacing the whole dict here would silently drop that
+        # entry (both are still recorded independently in the `exports`
+        # table, but state.exports is what get_run_frames reads first).
+        exports={**(state.exports or {}), "xlsx": {"path": written_path, "sha256": sha256, "kind": "xlsx"}},
         events=state.events + [_event("export", message, now)],
     )
 

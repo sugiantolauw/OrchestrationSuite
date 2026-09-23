@@ -1013,7 +1013,19 @@ def _p2_update(bundle: dict, start_date, end_date, members, expense_types, meta:
         kpi_card("High-value claims (>$5K)", f"{hv_count:,}"),
     ]
 
-    f1 = charts.top_n_bar(df, "Employee", _AMOUNT_COL, "Spend by employee", n=15)
+    # Colour by P_EXP role (prepared/approved/both) when this run's snapshot
+    # carries one (orchestrator/frames.py `frame_tags`, CLAUDE.md build brief
+    # P4 perf fix) -- restores reference_app/app.py's Source_Population
+    # colouring on 'Spend by Employee'. A run without a `role` column (an
+    # older, pre-snapshot run, or a Skill that declares no frame_tags) falls
+    # back to the plain, uncoloured bar rather than showing a broken chart.
+    if "role" in df.columns:
+        f1 = charts.top_n_bar_by_category(
+            df, "Employee", _AMOUNT_COL, "role", "Spend by employee (by role)",
+            n=15, category_order=["prepared", "approved", "both"],
+        )
+    else:
+        f1 = charts.top_n_bar(df, "Employee", _AMOUNT_COL, "Spend by employee", n=15)
 
     vendor = pd.DataFrame()
     if "Vendor" in df.columns and _AMOUNT_COL in df.columns:

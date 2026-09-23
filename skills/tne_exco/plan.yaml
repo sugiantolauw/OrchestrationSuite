@@ -608,6 +608,22 @@ populations:
   missing_receipt_pop:
     source: missing_receipt
 
+# /workspace/tne row-snapshot tagging (orchestrator/frames.py, CLAUDE.md build
+# brief P4 perf fix) -- tags each expense_report snapshot row with the P_EXP
+# role it was in (spec §0 "Expense population P_EXP": prepared / approved /
+# both), reusing the same role-set populations run_metrics.claims_prepared/
+# claims_approved/claims_combined already read (unfiltered by period, matching
+# their own scope) rather than re-deriving role from Employee ID/cross_approver_id
+# a second time. Checked in this order -- "both" first, since it is the
+# intersection of the other two and must win over either alone.
+frame_tags:
+  role:
+    source: expense_report
+    from:
+      both: p_exp_both_all
+      prepared: p_exp_prepared_all
+      approved: p_exp_approved_all
+
 tests:
   - test_id: T3.1a
     control_id: CTL-TNE-01

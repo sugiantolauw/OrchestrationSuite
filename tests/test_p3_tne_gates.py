@@ -26,12 +26,14 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import tempfile
 from pathlib import Path
 
 import pandas as pd
 import pytest
 
 from orchestrator import runs as runs_module
+from orchestrator.adapters.export_storage import LocalExportStorage
 from orchestrator.contract import ContractViolation, LocalFileDataSource
 from orchestrator.errors import ReconciliationError
 from orchestrator.nodes.context import NodeContext
@@ -89,9 +91,11 @@ def _make_ctx_and_state(persistence, data_dir: Path, *, run_id: str):
     ]
     state = persistence.save_state(dataclasses.replace(state, data_assets=data_assets))
 
+    export_dir = Path(tempfile.mkdtemp(prefix="tne-gates-exports-"))
     ctx = NodeContext(
         settings=_Settings(), persistence=persistence, data_source=data_source,
         skill=skill, clock=lambda: canonical_ts(2),
+        export_storage=LocalExportStorage(root_dir=export_dir),
     )
     return ctx, state
 
@@ -174,6 +178,17 @@ def test_g9_two_independent_executions_are_byte_identical(local_persistence_db_p
         # them (no LLM calls, CLAUDE.md §3 NN2), so nothing to strip here, but
         # observation/recommendation ARE deterministic template text over
         # metrics_cited and legitimately part of the non-narrative surface.
+        #
+        # Frame snapshots (orchestrator/frames.py, CLAUDE.md build brief P4
+        # perf fix) are non-narrative run output too: the `execute` node just
+        # wrote one Parquet file per contract source into this iteration's own
+        # export_storage. Read every one of THOSE bytes back (never re-derive
+        # them) so a divergence in the snapshot-writing path itself -- not
+        # just in the numbers that feed it -- would fail this gate.
+        frame_exports = state.exports["frames"]
+        frame_bytes = {
+            source: ctx.export_storage.read(meta["path"]) for source, meta in sorted(frame_exports.items())
+        }
         results.append(
             {
                 "metrics": json.dumps(metrics, sort_keys=True),
@@ -182,12 +197,19 @@ def test_g9_two_independent_executions_are_byte_identical(local_persistence_db_p
                     [{k: v for k, v in f.items() if k not in ("created_at", "updated_at")} for f in findings],
                     sort_keys=True,
                 ),
+                "frame_sources": sorted(frame_exports),
+                "frame_sha256": {source: meta["sha256"] for source, meta in sorted(frame_exports.items())},
+                "frame_bytes": frame_bytes,
             }
         )
 
     assert results[0]["metrics"] == results[1]["metrics"]
     assert results[0]["flagged"] == results[1]["flagged"]
     assert results[0]["findings"] == results[1]["findings"]
+    assert results[0]["frame_sources"] == results[1]["frame_sources"]
+    assert len(results[0]["frame_sources"]) == 8  # one snapshot per SKILL-001 contract source
+    assert results[0]["frame_sha256"] == results[1]["frame_sha256"]
+    assert results[0]["frame_bytes"] == results[1]["frame_bytes"]
 
 
 # ── G10 ───────────────────────────────────────────────────────────────────────
@@ -242,9 +264,11 @@ def test_g10_negative_control_zero_findings(local_persistence, tmp_path):
     data_assets = [{"source": n, "table_fqn": n, "version": v} for n, v in source_versions.items()]
     state = local_persistence.save_state(dataclasses.replace(state, data_assets=data_assets))
 
+    export_dir = Path(tempfile.mkdtemp(prefix="tne-gates-g10-exports-"))
     ctx = NodeContext(
         settings=_Settings(), persistence=local_persistence, data_source=data_source,
         skill=skill, clock=lambda: canonical_ts(2),
+        export_storage=LocalExportStorage(root_dir=export_dir),
     )
     state = discover(ctx, state)
     state = execute(ctx, state)

@@ -127,6 +127,17 @@ class ExecutionResult:
     flags_long: pd.DataFrame = field(
         default_factory=lambda: pd.DataFrame(columns=_FLAG_COLUMNS)
     )
+    # The two ingredients orchestrator.frames.build_row_snapshots needs to build
+    # the `execute` node's per-run row snapshot (CLAUDE.md build brief P4 perf
+    # fix) without re-reading source data: raw_frames is each contract source's
+    # own validated/typed dataframe (source -> df, never mutated by population
+    # building -- build_population() copies before deriving/filtering, so this
+    # is exactly what validate_contract produced), and population_objects is
+    # EVERY built population (not just reconciliation_summary()) so a Skill's
+    # tested-population row keys and frame_tags source populations can both be
+    # read back without rebuilding them.
+    raw_frames: dict[str, pd.DataFrame] = field(default_factory=dict)
+    population_objects: dict[str, "PopulationResult"] = field(default_factory=dict)
 
 
 def _run_test_primitive(skill: Skill, name: str, ctx: PrimitiveContext, params: dict):
@@ -295,6 +306,8 @@ def execute_skill(
         scored_units=scored_units,
         findings=findings,
         flags_long=flags_long,
+        raw_frames={name: raw_sources[name]["df"] for name in raw_sources},
+        population_objects=populations,
     )
 
 

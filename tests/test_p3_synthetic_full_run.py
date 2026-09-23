@@ -68,6 +68,20 @@ def test_full_run_against_real_synthetic_data(tmp_path):
         for source, rec in payload["reconciliation"].items():
             assert rec["variance"] == 0, f"{source}: {rec}"  # G6, real data
 
+        # CLAUDE.md build brief P4 perf fix: get_run_frames on a snapshot-
+        # backed run reads a few small Parquet files instead of re-reading
+        # every full bound source (~64s locally for this real 92,798-row
+        # expense_report before this change) -- must be well under a second
+        # on the local backend.
+        frames_started = time.time()
+        frames = service.get_run_frames(ctx, run_id)
+        frames_duration_s = time.time() - frames_started
+        print(f"get_run_frames (snapshot-backed, local) took {frames_duration_s:.3f}s")
+        assert frames_duration_s < 1.0, frames_duration_s
+        assert len(frames) == 8  # one snapshot per SKILL-001 contract source
+        assert len(frames["expense_report"]) < 92798  # the tested population, not the raw source
+        assert "role" in frames["expense_report"].columns
+
         service.sign_off(ctx, run_id, "approver")
         status, _ = _wait_for_status(ctx, run_id, {"completed", "failed"}, timeout=120)
         run = service.get_run(ctx, run_id)

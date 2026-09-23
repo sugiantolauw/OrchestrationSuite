@@ -292,6 +292,11 @@ def get_run_frames(ctx, run_id) -> dict:
         "RF_CS_MissingReceipt": [1, 0, 1, 0, 0, 1],
         "RF_CS_Reimbursement_GT_5K": [0, 0, 0, 1, 0, 0],
         "RF_ATT_Missing": [0, 0, 0, 1, 0, 0],
+        # P_EXP role (orchestrator/frames.py `frame_tags`, CLAUDE.md build
+        # brief P4 perf fix) -- a real snapshot's `role` column, so app/'s own
+        # colour-by-role chart (charts.top_n_bar_by_category) exercises the
+        # same shape it gets against a live backend.
+        "role": ["prepared", "approved", "both", "prepared", "prepared", "approved"],
     })
     approval = pd.DataFrame({
         "Report ID": ["R-1", "R-2", "R-3", "R-4"],

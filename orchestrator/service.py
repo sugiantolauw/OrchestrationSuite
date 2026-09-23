@@ -40,6 +40,7 @@ owned by the Unity Catalog work) against Unity Catalog, surfaced as
 from __future__ import annotations
 
 import json
+import logging
 import os
 import uuid
 from dataclasses import dataclass, field
@@ -57,6 +58,7 @@ from orchestrator.config import Settings, load_settings
 from orchestrator.contract import ContractViolation, LocalFileDataSource
 from orchestrator.executor import ThreadExecutor
 from orchestrator.fingerprint import compute_fingerprint
+from orchestrator.frames import not_testable_flags, read_frame_parquet
 from orchestrator.nodes.context import NodeContext
 from orchestrator.nodes.fieldwork import NODES_FOR
 from orchestrator.pipeline import NODE_STAGE_LABELS
@@ -66,6 +68,8 @@ from orchestrator.state import RunState, to_json
 from orchestrator.timeutil import utc_now
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+
+_LOG = logging.getLogger(__name__)
 
 # get_run_frames' column contract, per contract source (CLAUDE.md build brief
 # P3 §4): every declared contract column (already type-coerced by
@@ -639,14 +643,6 @@ def get_run_payload(ctx: AppContext, run_id: str) -> dict:
     }
 
 
-def _not_testable_flags(skill) -> set[str]:
-    flags: set[str] = set()
-    for t in skill.plan.get("tests", []):
-        if "not_testable" in t:
-            flags.update(t["not_testable"].get("flags", []))
-    return flags
-
-
 def get_run_frames(ctx: AppContext, run_id: str) -> dict[str, pd.DataFrame]:
     """Row-level frames for /workspace/tne: one DataFrame per contract source
     this run bound, holding that source's own contract-typed columns
@@ -655,24 +651,58 @@ def get_run_frames(ctx: AppContext, run_id: str) -> dict[str, pd.DataFrame]:
     not_testable test's declared flag, never a guessed 0. See FRAME_COLUMNS
     (populated per Skill on first call) for the exact column list.
 
-    Built from the bound sources at the PINNED versions recorded in
-    state.data_assets, plus flagged_rows pivoted into RF_* columns -- never
-    from a live re-resolve, and never a placeholder default for a missing
-    value (CLAUDE.md NN14)."""
+    Reads the per-run row snapshots the `execute` node wrote
+    (state.exports["frames"], orchestrator/frames.py, CLAUDE.md build brief P4
+    perf fix) -- a few small Parquet files already restricted to the rows
+    this run's populations actually tested, with their RF_* flag columns
+    already baked in -- instead of re-reading every full bound source (the
+    ~39s deployed / ~64s local callback this replaces). Every snapshot's
+    bytes are verified against its recorded sha256 before use; a mismatch
+    raises rather than silently re-reading the source (CLAUDE.md NN14).
+
+    A run completed BEFORE this change recorded no snapshot (state.exports
+    has no "frames" key), so this falls back to the old path: read every
+    bound source at its PINNED version (state.data_assets) and pivot
+    flagged_rows into RF_* columns live. That fallback is logged -- it is the
+    slow path this function exists to avoid, kept only for runs that predate
+    the fix."""
     state = ctx.persistence.load_state(run_id)
     skill_dir = _skill_dir_for(ctx, state.skill_id)
     skill = load_skill(skill_dir)
 
+    frame_exports = (state.exports or {}).get("frames")
+    if frame_exports:
+        frames: dict[str, pd.DataFrame] = {}
+        for source, meta in frame_exports.items():
+            df = read_frame_parquet(
+                ctx.export_storage, source=source, path=meta["path"], expected_sha256=meta["sha256"],
+            )
+            frames[source] = df
+            FRAME_COLUMNS[source] = tuple(df.columns)
+        return frames
+
+    _LOG.warning(
+        "get_run_frames(%s): no frame snapshot recorded (a pre-snapshot run) -- "
+        "falling back to a full re-read of every bound source",
+        run_id,
+    )
+    return _get_run_frames_from_sources(ctx, state, skill)
+
+
+def _get_run_frames_from_sources(ctx: AppContext, state: RunState, skill) -> dict[str, pd.DataFrame]:
+    """The pre-snapshot get_run_frames path, kept only as the fallback for a
+    run that completed before frame snapshots existed (see get_run_frames'
+    own docstring)."""
     bindings = {b["source"]: b["table_fqn"] for b in state.data_assets}
     versions = {b["source"]: b["version"] for b in state.data_assets}
     data_source = ctx.data_source_factory(bindings)
 
-    flagged_rows = ctx.persistence.list_flagged_rows(run_id)
+    flagged_rows = ctx.persistence.list_flagged_rows(state.run_id)
     by_source: dict[str, list[dict]] = {}
     for r in flagged_rows:
         by_source.setdefault(r["source"], []).append(r)
 
-    not_testable_flags = _not_testable_flags(skill)
+    nt_flags = not_testable_flags(skill)
 
     frames: dict[str, pd.DataFrame] = {}
     for source in skill.contract.get("sources", {}):
@@ -686,7 +716,7 @@ def get_run_frames(ctx: AppContext, run_id: str) -> dict[str, pd.DataFrame]:
         for flag in flags_present:
             keys = {r["row_key"] for r in rows if r["flag"] == flag}
             df[flag] = df["__row_key"].isin(keys).astype("Int64")
-        for flag in not_testable_flags:
+        for flag in nt_flags:
             if flag not in df.columns:
                 df[flag] = pd.array([pd.NA] * len(df), dtype="Int64")
 

@@ -349,10 +349,19 @@ def test_export_writes_xlsx_and_records_it(local_persistence, tmp_path):
     assert path.is_file()
     assert path.stat().st_size > 0
 
+    # `execute` (earlier in _run_through_prioritise) already recorded one
+    # "frames:<source>" export per contract source (orchestrator/frames.py,
+    # CLAUDE.md build brief P4 perf fix) -- `export` merges its own "xlsx"
+    # entry into state.exports rather than replacing it (see export()'s own
+    # docstring), so both kinds of export are recorded here, never just one.
     recorded = h.persistence.list_exports(state.run_id)
-    assert len(recorded) == 1
-    assert recorded[0]["sha256"] == state.exports["xlsx"]["sha256"]
+    xlsx_recorded = [e for e in recorded if e["kind"] == "xlsx"]
+    frame_recorded = [e for e in recorded if e["kind"].startswith("frames:")]
+    assert len(xlsx_recorded) == 1
+    assert xlsx_recorded[0]["sha256"] == state.exports["xlsx"]["sha256"]
+    assert {e["kind"] for e in frame_recorded} == {"frames:claims", "frames:register"}
+    assert set(state.exports["frames"]) == {"claims", "register"}
 
     import hashlib
 
-    assert hashlib.sha256(path.read_bytes()).hexdigest() == recorded[0]["sha256"]
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == xlsx_recorded[0]["sha256"]

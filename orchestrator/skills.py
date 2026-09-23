@@ -222,6 +222,20 @@ def validate_skill(skill: Skill) -> None:
         if ref not in skill.references:
             violations.append(f"plan.yaml: unknown reference {ref!r}")
 
+    # frame_tags (orchestrator/frames.py, CLAUDE.md build brief P4 perf fix): an
+    # optional, declarative row-tagging block for /workspace/tne's snapshots --
+    # every `source` must be a real contract source and every `from` value a
+    # real population, exactly like a test's own population references above.
+    for tag_name, tag_cfg in skill.plan.get("frame_tags", {}).items():
+        tag_source = tag_cfg.get("source")
+        if tag_source not in skill.contract.get("sources", {}):
+            violations.append(f"frame_tags.{tag_name}: unknown source {tag_source!r}")
+        for label, pop_name in tag_cfg.get("from", {}).items():
+            if pop_name not in populations:
+                violations.append(
+                    f"frame_tags.{tag_name}.from.{label}: unknown population {pop_name!r}"
+                )
+
     for i, test in enumerate(tests):
         test_id = test.get("test_id", f"tests[{i}]")
         if test_id in seen_test_ids:

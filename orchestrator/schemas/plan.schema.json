@@ -49,6 +49,22 @@
         "additionalProperties": false
       }
     },
+    "frame_tags": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "source": {"type": "string"},
+          "from": {
+            "type": "object",
+            "additionalProperties": {"type": "string"},
+            "minProperties": 1
+          }
+        },
+        "required": ["source", "from"],
+        "additionalProperties": false
+      }
+    },
     "run_metrics": {
       "type": "object",
       "additionalProperties": {

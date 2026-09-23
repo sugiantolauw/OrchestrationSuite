@@ -30,6 +30,10 @@ xlsxwriter>=3.2.9
 openpyxl>=3.1
 pillow>=12.2.0
 lxml>=6.1.1
+# Per-run row snapshots for /workspace/tne (orchestrator/frames.py, P4 perf
+# fix) -- was already resolved transitively via databricks-sql-connector, now
+# depended on directly for DataFrame.to_parquet/read_parquet.
+pyarrow>=17.0
 
 # Dev / test
 pytest>=8.0

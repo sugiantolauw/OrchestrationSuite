@@ -99,6 +99,21 @@ def test_p1_layout_and_update_build_charts_from_real_frames():
     assert len(kpis) == 4
 
 
+def test_p2_spend_by_employee_is_coloured_by_role():
+    # orchestrator/frames.py `frame_tags` (CLAUDE.md build brief P4 perf fix)
+    # -- restores reference_app/app.py's Source_Population colouring on
+    # 'Spend by Employee' now that a real per-row P_EXP role is available.
+    run_id = _completed_run()
+    bundle = workspace_tne._load_bundle(run_id)
+    tests = bundle["skill"].get("tests", [])
+    meta = workspace_tne._skill_flag_meta(bundle["run"].get("skill_id"), tests)
+    result = workspace_tne._p2_update(bundle, None, None, None, None, meta)
+    fig = result[1]
+    trace_names = {trace.name for trace in fig.data}
+    assert trace_names and trace_names <= {"prepared", "approved", "both"}
+    assert len(fig.data) > 1  # more than one role present in the fake frame
+
+
 def test_p3_update_derives_receipt_status_from_real_columns():
     run_id = _completed_run()
     bundle = workspace_tne._load_bundle(run_id)
