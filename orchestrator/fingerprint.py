@@ -11,7 +11,19 @@ from orchestrator.errors import ConfigError, FingerprintMismatch
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
-_SKILL_FILES = ("manifest.yaml", "contract.yaml", "plan.yaml", "thresholds.yaml", "findings.yaml")
+_SKILL_FILES = (
+    "manifest.yaml",
+    "contract.yaml",
+    "plan.yaml",
+    "thresholds.yaml",
+    "findings.yaml",
+    # N10: risk_control.yaml (the risk/control register plan.yaml's control_id/
+    # risk_id reference) and catalogue.yaml (the UI's Test Catalogue / PPTX
+    # methodology appendix text, G8-checked against thresholds.yaml) are both
+    # Skill content -- a change to either must change the run fingerprint.
+    "risk_control.yaml",
+    "catalogue.yaml",
+)
 
 # Every field of run_fingerprints except fingerprint_id (computed) and created_at
 # (recorded but excluded from the hash, so identical setups share a fingerprint_id).

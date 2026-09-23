@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 import pytest
+import yaml
 
 from orchestrator.skill_registry import register_skill
-from orchestrator.skills import load_skill
+from orchestrator.skills import SkillValidationError, load_skill
 from tests.conftest import canonical_ts
 
 SKILL_DIR = Path(__file__).parent.parent / "skills" / "tne_exco"
@@ -83,3 +85,61 @@ def test_register_skill_every_control_risk_id_matches_a_registered_risk(persiste
     for control in persistence.list_controls():
         if control["control_id"].startswith("CTL-TNE-"):
             assert control["risk_id"] in risk_ids
+
+
+def test_every_control_title_equals_the_catalogue_control_objective_it_was_seeded_from(tne_skill):
+    # N10: risk_control.yaml's controls are seeded FROM
+    # reference_app/src/test_catalogue.py's control_objective (CLAUDE.md §4.9,
+    # P2 DoD) -- pinned here so the two can never drift silently. A control's
+    # `tests` list names every test_id sharing that control_objective in
+    # catalogue.yaml; every one of them must agree with the control's title.
+    risk_control = yaml.safe_load((SKILL_DIR / "risk_control.yaml").read_text())
+    catalogue = yaml.safe_load((SKILL_DIR / "catalogue.yaml").read_text())
+    catalogue_objective = {t["test_id"]: t["control_objective"] for t in catalogue["tests"]}
+
+    def _catalogue_objective_for(plan_test_id: str) -> str:
+        # plan.yaml/risk_control.yaml split some catalogue tests into
+        # per-class/per-region sub-tests (e.g. catalogue T3.2a -> plan
+        # T3.2a_air_dom, T3.2a_air_int, ...) -- match on the catalogue test_id
+        # itself, or as the prefix before the first '_'.
+        if plan_test_id in catalogue_objective:
+            return catalogue_objective[plan_test_id]
+        base = plan_test_id.split("_", 1)[0]
+        assert base in catalogue_objective, f"{plan_test_id}: neither it nor {base!r} is in catalogue.yaml"
+        return catalogue_objective[base]
+
+    assert risk_control["controls"], "risk_control.yaml declared no controls"
+    for control in risk_control["controls"]:
+        for test_id in control["tests"]:
+            assert control["title"] == _catalogue_objective_for(test_id), (
+                f"{control['control_id']} title != catalogue.yaml control_objective for {test_id}"
+            )
+
+
+def test_skill_content_hash_changes_when_risk_control_yaml_changes(tne_skill, tmp_path):
+    # N10: risk_control.yaml is part of the Skill's content hash.
+    skill_copy = tmp_path / "tne_exco"
+    shutil.copytree(SKILL_DIR, skill_copy, ignore=shutil.ignore_patterns("__pycache__"))
+    mutated = yaml.safe_load((skill_copy / "risk_control.yaml").read_text())
+    mutated["controls"][0]["title"] = mutated["controls"][0]["title"] + " (mutated)"
+    (skill_copy / "risk_control.yaml").write_text(yaml.safe_dump(mutated))
+    mutated_skill = load_skill(skill_copy)
+    assert mutated_skill.content_hash != tne_skill.content_hash
+
+
+def test_skill_content_hash_changes_when_catalogue_yaml_changes(tne_skill, tmp_path):
+    skill_copy = tmp_path / "tne_exco"
+    shutil.copytree(SKILL_DIR, skill_copy, ignore=shutil.ignore_patterns("__pycache__"))
+    mutated = yaml.safe_load((skill_copy / "catalogue.yaml").read_text())
+    mutated["tests"][0]["rule"] = mutated["tests"][0]["rule"] + " (mutated)"
+    (skill_copy / "catalogue.yaml").write_text(yaml.safe_dump(mutated))
+    mutated_skill = load_skill(skill_copy)
+    assert mutated_skill.content_hash != tne_skill.content_hash
+
+
+def test_missing_risk_control_yaml_is_a_validation_error(tmp_path):
+    skill_copy = tmp_path / "tne_exco"
+    shutil.copytree(SKILL_DIR, skill_copy, ignore=shutil.ignore_patterns("__pycache__"))
+    (skill_copy / "risk_control.yaml").unlink()
+    with pytest.raises(SkillValidationError):
+        load_skill(skill_copy)

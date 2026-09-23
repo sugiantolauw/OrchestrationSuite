@@ -23,6 +23,10 @@ _REQUIRED_FILES = (
     "plan.yaml",
     "findings.yaml",
     "thresholds.yaml",
+    # N10: a Skill's risk/control register is not optional -- plan.yaml's
+    # control_id/risk_id fields (CLAUDE.md §4.9) reference it, and a Skill
+    # published without one has no risk-and-control matrix behind its tests.
+    "risk_control.yaml",
 )
 
 
