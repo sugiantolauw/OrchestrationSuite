@@ -1696,6 +1696,19 @@ Source files are in `synthetic_data/`; row counts match `FILE_REGISTRY` exactly.
 - **Still outstanding (user-held):** the auditor-confirmed exception list for Surface 1, and a named
   reviewer to publish SKILL-001.
 
+### Further decisions from the user (2026-09-23)
+
+- **UI is the prototype's, exactly.** Every page matches `reference_app/src/platform/pages.py` and
+  `components.py`: same elements, text, ids and layout. Wire the existing UI to the real backend;
+  never add, remove, relabel or restyle anything without asking the user first. A layout-parity test
+  enforces this. The one approved deviation: a self-approved sign-off is stated in the UI, as text
+  appended where the prototype already shows who signed off.
+- **Deferred to the Optus port:** the Surface 1 auditor-confirmed exception list (it is real data and
+  never enters this environment), threshold policy references, and the preferred-supplier lists
+  (including hotels). Build the Surface 1 harness so the list can be dropped in there.
+- **LLM calls in this development workspace are approved** for schemas, counts, null rates and other
+  aggregates (never rows). Model region and governance are re-decided at the Optus port.
+
 ---
 
 ## 12. What to do first
