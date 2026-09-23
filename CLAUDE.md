@@ -1591,8 +1591,12 @@ Root cause for all three failures: the workspace's AWS IAM roles no longer trust
 Source files are in `synthetic_data/`; row counts match `FILE_REGISTRY` exactly.
 
 1. **ExCo population** — the prototype's 11 `EXCO_MEMBERS` names do not occur in the synthetic data.
-   The user supplies the 11 synthetic ExCo names; resolve them to `Employee ID` once, have the user
-   confirm, and key the contract on the ID (§0.5). Two names map to multiple IDs in this data.
+   The user supplied the synthetic ExCo list; resolved to `Employee ID` from `Expense_Report_Combined`
+   (prepared and cross-charge-approver IDs agree). The contract keys on these IDs (§0.5):
+   Chen, Alex `52725` · Nakamura, Yuki `52394` · Okonkwo, Emeka `52622` · Johansson, Erik `52424` ·
+   Mendes, Sofia `51867` · Kowalski, Jan `52660` · Thompson, Sarah `51606` ·
+   Delacroix, Marie `52472` (443 claims) **and** `50040` (27 claims) — *which is ExCo is pending the
+   user's decision* · van den Berg, Lucas `52674` · Ramirez, Carlos `52703` · Fitzgerald, Aoife `50079`.
 2. **Column names** — use the names actually present in the files, not those referenced in
    `computation.py` (e.g. `Report Receipt Viewed` / `All Entry Receipts Viewed`).
 3. **Whitespace** — trim header whitespace (`Advance Purchase Days `, `Currency `) as an explicit,
@@ -1603,10 +1607,33 @@ Source files are in `synthetic_data/`; row counts match `FILE_REGISTRY` exactly.
 5. **Country for T6.1d** — expense rows have no country. Derive it from
    **`City/Location` + `Transaction Currency`** via a declared lookup; unmapped rows are reported, never defaulted.
 6. **Currency** — `Reimbursement Currency` is AUD on 100% of rows in every file. The contract requires
-   AUD and fails the run otherwise. Per-diem rates are **SGD**: convert at a fixed SGD→AUD rate held in
-   `thresholds.yaml` with source and effective date (rate still to be supplied).
+   AUD and fails the run otherwise. Per-diem rates are **SGD**. The user delegated the rate source.
+   Decision: convert with the **RBA F11.1 monthly-average A$/S$ rate for the transaction's month**, read
+   from the pinned snapshot `synthetic_data/reference/RBA_F11.1_exchange_rates_published_2026-09-22.csv`
+   (sha256 `ab6fa92d…4cec9cec7`), whose hash goes into the run fingerprint. A single fixed rate was
+   rejected: A$1 ranged S$0.806–0.915 over the audit period (period mean S$1 = A$1.1703, period-end
+   S$1 = A$1.0965), a spread large enough to move per-diem exceptions near the limit.
 7. **Oracle** — the user holds an auditor-confirmed exception list for this data; it is the Surface 1
    comparison set (§9).
+
+### Operating directives from the user (2026-09-23) — these override §8 and §10 where they conflict
+
+- **Run continuously** from phase to phase until the target end state (all phases, Tier A gates,
+  deployed and working App, portable to the corporate workspace). Report at each phase gate but do
+  not wait for approval. Still stop for: platform blockers, inputs only the user holds, and human
+  sign-offs (audit-approved specs, named Skill reviewers) — mark those `pending approval` and continue.
+- **Model allocation per §10** via the pinned subagents: design and gate reviews on Opus (`review`),
+  implementation on Sonnet (`implement`), exact-spec mechanical work on Haiku (`mechanical`).
+- **Push** to `claude/bold-faraday-w9gb8y` at every phase checkpoint. Never force-push, never `main`,
+  no PRs unless asked.
+- **`requirements.txt`**: add `openpyxl` and `databricks-sql-connector`; remove `langgraph` and
+  `langchain-core` (NN1). Further dependencies may be added when a phase needs them — name each one in
+  the phase report.
+- **Workspace resources** may be created in `test_workspace` once it works: a small serverless SQL
+  warehouse with auto-stop, the App, a Volume for uploads, tables in `audit_ledger`.
+- **§9A defaults (revisit before corporate migration):** the App runs as its service principal and
+  records the signed-in user from the forwarded identity as `run_owner` (Q1); CI runs Tier A against
+  `LocalPersistence`, Delta-backed tests run inside the workspace (Q3).
 
 ---
 
