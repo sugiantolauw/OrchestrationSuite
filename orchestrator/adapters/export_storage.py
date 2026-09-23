@@ -6,8 +6,9 @@ through the Files API; DBX_VOLUME comes from config, never a hardcoded path,
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any, Callable
 
 
 @dataclass
@@ -35,17 +36,29 @@ class VolumeExportStorage:
     """Writes/reads under `<DBX_VOLUME>/<path>` via
     WorkspaceClient().files.upload/download (CLAUDE.md §7). `volume_root` is a
     Unity Catalog Volume path (e.g. /Volumes/<catalog>/<schema>/<volume>),
-    supplied by orchestrator.config -- never a literal in this file."""
+    supplied by orchestrator.config -- never a literal in this file.
+
+    One `AppContext`/`NodeContext` shares a single instance of this adapter
+    for a whole run (orchestrator/service.py's build_app_context), so
+    `_client()` builds its WorkspaceClient once and reuses it for every
+    write/read/exists call on this instance -- constructing a fresh one per
+    call (the shape this had until get_run_frames started reading several
+    snapshot files per run, orchestrator/frames.py, CLAUDE.md build brief P4
+    perf fix) re-pays SDK auth/config resolution on every single file."""
 
     volume_root: str
-    workspace_client_factory: object = None  # Callable[[], WorkspaceClient] | None
+    workspace_client_factory: Callable[[], Any] | None = None
+    _cached_client: Any = field(default=None, init=False, repr=False, compare=False)
 
     def _client(self):
-        if self.workspace_client_factory is not None:
-            return self.workspace_client_factory()
-        from databricks.sdk import WorkspaceClient
+        if self._cached_client is None:
+            if self.workspace_client_factory is not None:
+                self._cached_client = self.workspace_client_factory()
+            else:
+                from databricks.sdk import WorkspaceClient
 
-        return WorkspaceClient()
+                self._cached_client = WorkspaceClient()
+        return self._cached_client
 
     def _full_path(self, path: str) -> str:
         return f"{self.volume_root.rstrip('/')}/{path.lstrip('/')}"
