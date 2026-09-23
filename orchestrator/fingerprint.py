@@ -160,15 +160,34 @@ def compute_fingerprint(
     prompts_dirs: list[Path],
     reference_files: list[Path] | None = None,
     code_revision: str | None = None,
+    dependency_lock_path: Path | None = None,
 ) -> dict:
     requirements_path = Path(requirements_path)
+    # P2/P3 gate review item 8: `dependency_lock_hash` hashes a REAL lock --
+    # the transitive closure of requirements.txt, pinned exactly
+    # (scripts/generate_requirements_lock.py) -- never requirements.txt
+    # itself, which pins only a handful of top-level packages and says
+    # nothing about the transitive versions that actually determine
+    # behaviour. Defaults to the sibling `<requirements_path stem>.lock`
+    # (requirements.txt -> requirements.lock) so every real call site needs
+    # no change; a caller may still pass an explicit path (tests using a
+    # synthetic requirements file under tmp_path). Missing is a loud
+    # ConfigError, never a silent fall-back to hashing requirements.txt
+    # (CLAUDE.md NN14).
+    lock_path = Path(dependency_lock_path) if dependency_lock_path is not None else requirements_path.with_suffix(".lock")
+    if not lock_path.is_file():
+        raise ConfigError(
+            f"dependency_lock_hash requires a real lock file at {lock_path!s} -- generate one with "
+            f"scripts/generate_requirements_lock.py (CLAUDE.md P2/P3 gate review item 8; "
+            f"requirements.txt alone is not a lock)"
+        )
     fields = {
         "source_table_versions": _canonical_json(source_table_versions),
         "uploaded_file_hashes": _canonical_json(uploaded_file_hashes),
         "reference_data_hashes": _canonical_json(_reference_data_hashes(reference_files)),
         "skill_content_hash": _skill_content_hash(skill_dir),
         "code_revision": _resolve_code_revision(code_revision, settings.code_revision),
-        "dependency_lock_hash": sha256_bytes(requirements_path.read_bytes()),
+        "dependency_lock_hash": sha256_bytes(lock_path.read_bytes()),
         "runtime_config_hash": runtime_config_hash(settings),
         "endpoint_config": _canonical_json(endpoint_config(settings)),
         "prompt_template_version": _prompt_template_version(prompts_dirs),

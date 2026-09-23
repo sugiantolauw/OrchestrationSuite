@@ -6,7 +6,7 @@ anywhere in this file.
 
 What it does, in order (safe to re-run):
   1. Builds a deploy bundle in a temp dir: app/, orchestrator/, skills/,
-     requirements.txt, and a generated app.yaml.
+     requirements.txt, requirements.lock, and a generated app.yaml.
   2. Resolves the SQL warehouse (DBX_WAREHOUSE_HTTP_PATH, or the first
      available warehouse) and writes its http_path into app.yaml so
      orchestrator.config never has to derive it at runtime.
@@ -78,6 +78,24 @@ def _build_bundle(tmp_dir: Path, app_yaml_text: str) -> None:
     for name in ("app", "orchestrator", "skills"):
         shutil.copytree(REPO_ROOT / name, tmp_dir / name, ignore=ignore)
     shutil.copy(REPO_ROOT / "requirements.txt", tmp_dir / "requirements.txt")
+    # P2/P3 gate review item 8: orchestrator.fingerprint.compute_fingerprint
+    # hashes requirements.lock (the sibling of requirements.txt), not
+    # requirements.txt itself -- the deployed app resolves REPO_ROOT from its
+    # OWN copy of orchestrator/ (tmp_dir here), so the lock file must travel
+    # in the bundle too, or every run fails loudly with a missing-lock
+    # ConfigError the moment it tries to compute its fingerprint. Regenerate
+    # it first (scripts/generate_requirements_lock.py) if requirements.txt
+    # changed since the committed requirements.lock was last generated --
+    # this script does not regenerate it silently, since that would pin
+    # THIS deploy machine's installed versions rather than the ones actually
+    # tested.
+    lock_path = REPO_ROOT / "requirements.lock"
+    if not lock_path.is_file():
+        raise SystemExit(
+            f"{lock_path} is missing -- run scripts/generate_requirements_lock.py first "
+            f"(CLAUDE.md P2/P3 gate review item 8)"
+        )
+    shutil.copy(lock_path, tmp_dir / "requirements.lock")
     (tmp_dir / "app.yaml").write_text(app_yaml_text)
 
 
@@ -285,7 +303,7 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="ai-audit-analyst-deploy-") as tmp:
         tmp_dir = Path(tmp)
         _build_bundle(tmp_dir, app_yaml_text)
-        print(f"Bundle built at {tmp_dir} (app/, orchestrator/, skills/, requirements.txt, app.yaml).")
+        print(f"Bundle built at {tmp_dir} (app/, orchestrator/, skills/, requirements.txt, requirements.lock, app.yaml).")
 
         if args.dry_run:
             print("\n--dry-run: not touching the workspace. Grants that would be issued:")

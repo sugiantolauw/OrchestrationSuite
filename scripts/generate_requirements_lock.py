@@ -1,0 +1,138 @@
+"""Generates requirements.lock: the pinned, transitive closure of
+requirements.txt's own top-level packages, as installed in THIS environment
+-- `name==version` per line, sorted, one line per package (CLAUDE.md P2/P3
+gate review item 8: `run_fingerprints.dependency_lock_hash` must hash a real
+lock, not requirements.txt itself, which pins only a handful of top-level
+packages and says nothing about the transitive versions that actually
+determine behaviour).
+
+Not `pip freeze`: that dumps every package installed in this environment,
+including ones with nothing to do with this project (the harness's own
+tooling, etc). This resolves only the closure REACHABLE from requirements.txt
+by walking each package's own declared Requires-Dist via importlib.metadata
+-- stdlib only, no pip-tools / pipdeptree dependency (CLAUDE.md working
+rules: ask before adding a dependency; requirements.txt is untouched).
+
+Best-effort, not a strict PEP 508 resolver: extras and environment markers on
+a dependency edge are ignored (the package NAME is still walked either way),
+so this can include a platform-specific or extra-gated dependency that would
+not actually install everywhere -- acceptable for a provenance/reproducibility
+record; unacceptable would be silently resolving to the WRONG version of a
+package that does install, which this does not do (every version here is the
+one importlib.metadata reports as actually installed and imported in this
+environment).
+
+Usage: python scripts/generate_requirements_lock.py
+   Writes requirements.lock at the repo root, from requirements.txt in the
+   CURRENT Python environment (run it in the same env the app deploys with).
+"""
+
+from __future__ import annotations
+
+import re
+import sys
+from importlib import metadata
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+_NAME_RE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)")
+
+
+def _top_level_names(requirements_path: Path) -> list[str]:
+    names = []
+    for line in requirements_path.read_text().splitlines():
+        line = line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        m = _NAME_RE.match(line)
+        if m:
+            names.append(m.group(1))
+    return names
+
+
+def _requires_names(dist_name: str) -> list[str]:
+    try:
+        requires = metadata.requires(dist_name) or []
+    except metadata.PackageNotFoundError:
+        return []
+    names = []
+    for req in requires:
+        # Skip an optional-extra-gated requirement (`...; extra == "sql"`):
+        # nothing here requests any extra, so pip never installed it, and
+        # walking it anyway is exactly what produced hundreds of packages
+        # that are declared but not actually present in this environment.
+        if "extra ==" in req or "extra==" in req:
+            continue
+        m = _NAME_RE.match(req)
+        if m:
+            names.append(m.group(1))
+    return names
+
+
+def _is_installed(name: str) -> bool:
+    try:
+        metadata.version(name)
+        return True
+    except metadata.PackageNotFoundError:
+        return False
+
+
+def resolve_closure(top_level: list[str]) -> dict[str, str]:
+    resolved: dict[str, str] = {}
+    missing: list[str] = []
+    stack = list(top_level)
+    seen: set[str] = set()
+    while stack:
+        name = stack.pop()
+        key = name.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            version = metadata.version(name)
+        except metadata.PackageNotFoundError:
+            missing.append(name)
+            continue
+        resolved[metadata.metadata(name)["Name"]] = version
+        stack.extend(_requires_names(name))
+    if missing:
+        # A non-extra dependency this environment does not have installed --
+        # a platform- or python-version-gated marker most likely (e.g.
+        # `pywin32 ; sys_platform == "win32"`). Reported, never silently
+        # dropped (CLAUDE.md NN14), but not fatal: requirements.txt's own
+        # TOP-LEVEL packages failing to resolve would be fatal (checked
+        # separately, in main()); a transitive package a top-level package
+        # merely CAN depend on, on some other platform, is not.
+        print(f"note: not installed in this environment, skipped: {sorted(set(missing))}", file=sys.stderr)
+    return resolved
+
+
+def main() -> None:
+    requirements_path = REPO_ROOT / "requirements.txt"
+    lock_path = REPO_ROOT / "requirements.lock"
+    top_level = _top_level_names(requirements_path)
+
+    not_installed = [n for n in top_level if not _is_installed(n)]
+    if not_installed:
+        raise SystemExit(
+            f"requirements.txt names package(s) not installed in this environment: {not_installed} "
+            f"-- run this from the same environment the app deploys with (pip install -r requirements.txt first)"
+        )
+
+    resolved = resolve_closure(top_level)
+
+    lines = [f"{name}=={version}" for name, version in sorted(resolved.items(), key=lambda kv: kv[0].lower())]
+    header = (
+        "# Generated by scripts/generate_requirements_lock.py -- do not hand-edit.\n"
+        "# The transitive closure of requirements.txt, pinned exactly, as resolved in\n"
+        "# the environment this was generated from. Hashed into run_fingerprints.\n"
+        "# dependency_lock_hash (orchestrator/fingerprint.py) -- CLAUDE.md P2/P3 gate\n"
+        "# review item 8. Regenerate whenever requirements.txt changes.\n"
+    )
+    lock_path.write_text(header + "\n".join(lines) + "\n")
+    print(f"wrote {lock_path} ({len(lines)} packages, {len(top_level)} top-level)")
+
+
+if __name__ == "__main__":
+    main()

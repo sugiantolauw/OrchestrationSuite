@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import sys
@@ -95,15 +96,55 @@ def test_skill_content_hash_none_for_explorer():
     assert fp["skill_content_hash"] is None
 
 
-def test_changes_when_requirements_change(tmp_path):
+def test_changes_when_the_lock_file_changes(tmp_path):
+    # P2/P3 gate review item 8: dependency_lock_hash hashes the LOCK
+    # (requirements.txt's sibling .lock, the transitive closure pinned
+    # exactly), not requirements.txt itself -- two runs with an IDENTICAL
+    # requirements.txt but a DIFFERENT lock (e.g. a transitive package
+    # bumped without requirements.txt itself changing) must get different
+    # fingerprints.
     req1 = tmp_path / "requirements1.txt"
     req1.write_text("pandas>=2.1\n")
+    (tmp_path / "requirements1.lock").write_text("pandas==2.1.0\nnumpy==1.26.0\n")
     req2 = tmp_path / "requirements2.txt"
-    req2.write_text("pandas>=2.2\n")
+    req2.write_text("pandas>=2.1\n")
+    (tmp_path / "requirements2.lock").write_text("pandas==2.2.0\nnumpy==1.26.0\n")
     fp1 = _fp(requirements_path=req1)
     fp2 = _fp(requirements_path=req2)
     assert fp1["fingerprint_id"] != fp2["fingerprint_id"]
     assert fp1["dependency_lock_hash"] != fp2["dependency_lock_hash"]
+
+
+def test_lock_hash_unaffected_by_requirements_txt_alone(tmp_path):
+    # The converse of the above: requirements.txt DIFFERING with the SAME
+    # lock content produces the SAME dependency_lock_hash -- proves the lock
+    # file, not requirements.txt, is what is actually hashed.
+    req1 = tmp_path / "requirements1.txt"
+    req1.write_text("pandas>=2.1\n")
+    (tmp_path / "requirements1.lock").write_text("pandas==2.1.0\n")
+    req2 = tmp_path / "requirements2.txt"
+    req2.write_text("pandas>=2.1\nnumpy>=1.26\n")  # requirements.txt differs
+    (tmp_path / "requirements2.lock").write_text("pandas==2.1.0\n")  # lock does not
+    fp1 = _fp(requirements_path=req1)
+    fp2 = _fp(requirements_path=req2)
+    assert fp1["dependency_lock_hash"] == fp2["dependency_lock_hash"]
+
+
+def test_missing_lock_file_raises_never_falls_back_to_requirements_txt(tmp_path):
+    req = tmp_path / "requirements.txt"
+    req.write_text("pandas>=2.1\n")  # no sibling requirements.lock written
+    with pytest.raises(ConfigError, match="dependency_lock_hash"):
+        _fp(requirements_path=req)
+
+
+def test_explicit_dependency_lock_path_overrides_the_sibling_convention(tmp_path):
+    req = tmp_path / "requirements.txt"
+    req.write_text("pandas>=2.1\n")
+    lock = tmp_path / "elsewhere" / "the.lock"
+    lock.parent.mkdir()
+    lock.write_text("pandas==2.1.0\n")
+    fp = _fp(requirements_path=req, dependency_lock_path=lock)
+    assert fp["dependency_lock_hash"] == hashlib.sha256(lock.read_bytes()).hexdigest()
 
 
 def test_changes_when_config_value_changes():
