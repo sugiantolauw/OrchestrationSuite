@@ -15,6 +15,8 @@ row-level upsert/prune outcome is)."""
 
 from __future__ import annotations
 
+import numpy as np
+
 from tests.conftest import canonical_ts
 
 # ── flagged_rows ──────────────────────────────────────────────────────────────
@@ -79,6 +81,38 @@ def test_write_run_metrics_upserts_and_prunes(persistence, uid):
     metrics = persistence.get_run_metrics(run_id)
     assert metrics["hv_count"]["value"] == 5
     assert "hv_amount" not in metrics  # pruned, not merely left stale
+
+
+def test_write_run_metrics_amounts_round_trip_exactly_no_float32_loss(persistence, uid):
+    """CLAUDE.md P2/P3 gate review item 1: live Delta values were observed equal
+    to float(np.float32(x)) for monetary metrics -- e.g. 467063.71875 instead of
+    467063.73. Every value here is a real double that is NOT exactly representable
+    as float32, so any float32 rounding on the write path (implicit driver
+    inference, a FLOAT-typed bind, or a stray numpy float32 upstream) would make
+    at least one of these fail `== ` on read-back. Runs against every backend via
+    the `persistence` fixture; against `delta` it is the live proof (RUN_DELTA_TESTS=1)
+    that persistence_delta.py's explicit DoubleParameter binding (_execute_typed)
+    round-trips bit-exactly through the real SQL warehouse, not a synthetic probe."""
+    run_id = f"RUN-PRECISION-{uid}"
+    cases = {
+        "claims_approved_amount": 467063.73,
+        "float_add_precision": 0.1 + 0.2,
+        "tiny_amount": 1e-7,
+        "large_amount": 123456789.01,
+    }
+    persistence.write_run_metrics(
+        run_id,
+        [
+            {"metric_name": name, "value": value, "unit": "AUD", "source_ref": {"sources": []}, "test_id": "T1"}
+            for name, value in cases.items()
+        ],
+    )
+    metrics = persistence.get_run_metrics(run_id)
+    for name, expected in cases.items():
+        got = metrics[name]["value"]
+        float32_rounded = float(np.float32(expected))
+        assert expected != float32_rounded, f"{name}: fixture value must not already be float32-exact"
+        assert got == expected, f"{name}: wrote {expected!r}, read back {got!r} (float32 precision loss)"
 
 
 # ── management_actions ───────────────────────────────────────────────────────

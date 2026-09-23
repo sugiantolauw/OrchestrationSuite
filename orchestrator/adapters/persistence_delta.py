@@ -116,6 +116,34 @@ def _canonical_json(value) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
 
 
+def _typed_params(params: dict | None):
+    # databricks-sql-connector's default dict-param path (cur.execute(sql, {...}))
+    # already infers a Python float as its DoubleParameter (CAST_EXPR "DOUBLE"),
+    # verified live to round-trip exactly for every value this adapter writes
+    # (467063.73, 0.1+0.2, 1e-7, 123456789.01 all come back bit-identical). But
+    # that inference is implicit and version-dependent -- the P2/P3 gate review
+    # found monetary values already corrupted to float32 precision in Delta,
+    # which this driver version does not reproduce but an earlier or future one
+    # could. Bind every float explicitly as DoubleParameter (never the driver's
+    # default inference, and never FloatParameter/32-bit) so the DOUBLE cast is
+    # asserted in code, not assumed from the installed driver's behaviour.
+    # Every dict entry must carry an explicit name in the list form (the
+    # connector requires ALL parameters named to use `:name` markers, not `?`),
+    # so non-float values are also wrapped via the driver's own primitive
+    # inference rather than left bare.
+    if not params:
+        return {}
+    from databricks.sql.parameters.native import DoubleParameter, dbsql_parameter_from_primitive
+
+    out = []
+    for name, value in params.items():
+        if isinstance(value, float):
+            out.append(DoubleParameter(value=value, name=name))
+        else:
+            out.append(dbsql_parameter_from_primitive(value=value, name=name))
+    return out
+
+
 def _metric_value_columns(value) -> tuple[float | None, str | None]:
     if isinstance(value, bool):
         return None, _canonical_json(value)
@@ -350,6 +378,34 @@ class DeltaPersistence:
                 conn = self._get_connection_locked()
                 cur = conn.cursor()
                 cur.execute(sql_text, params or {})
+                return cur
+            raise
+
+    # Every read/write above passes a plain dict, which the driver's own
+    # dbsql_parameter_from_primitive infers per-value (a Python float already
+    # infers as DoubleParameter -- CAST_EXPR "DOUBLE" -- verified live to
+    # round-trip 467063.73, 0.1+0.2, 1e-7 and 123456789.01 bit-exactly with the
+    # pinned driver version). _execute_typed is used only for the monetary/
+    # metric write paths the P2/P3 gate review flagged, so every float there is
+    # bound via an EXPLICIT DoubleParameter in code rather than relying on that
+    # implicit, driver-version-dependent inference (never FloatParameter/
+    # 32-bit). It cannot replace `_execute` everywhere: the connector's named-
+    # parameter list form requires every entry to carry `.name`, and the
+    # FakeConnection test harness for CAS/state-machine paths (tests/
+    # test_delta_sql.py) asserts on a plain params dict, so those call sites
+    # keep using `_execute` unchanged.
+    def _execute_typed(self, conn, sql_text: str, params: dict | None = None):
+        prepared = _typed_params(params)
+        try:
+            cur = conn.cursor()
+            cur.execute(sql_text, prepared)
+            return cur
+        except Exception as exc:
+            if _is_connection_error(exc):
+                self._conn = None
+                conn = self._get_connection_locked()
+                cur = conn.cursor()
+                cur.execute(sql_text, prepared)
                 return cur
             raise
 
@@ -890,7 +946,9 @@ class DeltaPersistence:
                     run_id, finding, engagement_id=engagement_id, skill_id=skill_id,
                     skill_version=skill_version, now=now,
                 )
-                self._execute(conn, merge_sql, values)
+                # exposure_amount is money (CLAUDE.md P2/P3 gate review item 1) -- bind
+                # it as an explicit DOUBLE rather than the driver's implicit inference.
+                self._execute_typed(conn, merge_sql, values)
 
             to_delete = [o["finding_id"] for o in orphans]
             if to_delete:
@@ -1272,7 +1330,9 @@ class DeltaPersistence:
                     "source_ref_json, test_id) VALUES (s.run_id, s.metric_name, s.value, "
                     "s.value_text, s.unit, s.source_ref_json, s.test_id)"
                 )
-                self._execute(conn, merge_sql, params)
+                # metric value is money/count data (CLAUDE.md P2/P3 gate review item 1)
+                # -- bind it as an explicit DOUBLE rather than the driver's inference.
+                self._execute_typed(conn, merge_sql, params)
 
             orphans = existing_names - new_names
             if orphans:
@@ -1366,7 +1426,9 @@ class DeltaPersistence:
                 ":created_at, :last_updated)"
             )
             for a in actions:
-                self._execute(
+                # potential_exposure is money (CLAUDE.md P2/P3 gate review item 1) --
+                # bind it as an explicit DOUBLE rather than the driver's inference.
+                self._execute_typed(
                     conn,
                     merge_sql,
                     {

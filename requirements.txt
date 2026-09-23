@@ -19,7 +19,16 @@ openai>=1.40.0
 
 # Databricks
 databricks-sdk>=0.30.0
-databricks-sql-connector>=3.0
+# Pinned exactly, not >=: the P2/P3 gate review found live monetary values
+# corrupted to float32 precision in Delta. persistence_delta.py now binds
+# every monetary/metric parameter as an explicit DoubleParameter (never
+# relying on the driver's implicit float->DOUBLE inference), and that
+# inference behaviour -- and the DoubleParameter/dbsql_parameter_from_primitive
+# API itself -- is exactly what CLAUDE.md warns pinning protects: an
+# unpinned `>=3.0` install can silently resolve to a version whose default
+# float handling or parameter API differs from what was verified live
+# (tests/test_delta_sql.py::test_float_precision_round_trips_live).
+databricks-sql-connector==4.5.0
 
 # Observability + evaluation
 mlflow>=2.16.0
