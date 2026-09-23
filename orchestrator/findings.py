@@ -18,8 +18,11 @@ def format_metric_value(value: Any, unit: str) -> str:
     return str(value)
 
 
-def _format_template(template: str, metrics_cited: dict[str, dict]) -> str:
+def _format_template(
+    template: str, metrics_cited: dict[str, dict], threshold_kwargs: dict[str, str] | None = None
+) -> str:
     kwargs = {name: format_metric_value(m["value"], m["unit"]) for name, m in metrics_cited.items()}
+    kwargs.update(threshold_kwargs or {})
     return template.format(**kwargs)
 
 
@@ -71,7 +74,18 @@ def build_findings(
 
         metrics_cited = {name: metrics[name] for name in rule.get("metrics_cited", []) if name in metrics}
 
-        ref_ids = sorted(set(trigger.threshold_ids) | severity_threshold_ids)
+        # thresholds_cited (item 7, CLAUDE.md P2/P3 gate review): a finding's
+        # prose may quote a threshold's own value (e.g. "$50 without
+        # supporting documentation") -- rendered from thresholds.yaml, never
+        # a bare number written into the template text, so the figure can
+        # never silently drift from what the run actually enforces.
+        thresholds_cited_ids = list(rule.get("thresholds_cited", []))
+        threshold_kwargs = {
+            tid: format_metric_value(thresholds[tid]["value"], thresholds[tid]["unit"])
+            for tid in thresholds_cited_ids
+        }
+
+        ref_ids = sorted(set(trigger.threshold_ids) | severity_threshold_ids | set(thresholds_cited_ids))
         threshold_refs = []
         for tid in ref_ids:
             spec = thresholds[tid]
@@ -114,8 +128,8 @@ def build_findings(
                 "threshold_refs": threshold_refs,
                 "analyst_set_severity": analyst_set_severity,
                 "metrics_cited": metrics_cited,
-                "observation": _format_template(rule["observation"], metrics_cited),
-                "recommendation": _format_template(rule.get("recommendation", ""), metrics_cited),
+                "observation": _format_template(rule["observation"], metrics_cited, threshold_kwargs),
+                "recommendation": _format_template(rule.get("recommendation", ""), metrics_cited, threshold_kwargs),
                 "management_questions": list(rule.get("management_questions", [])),
                 "control_id": test.get("control_id"),
                 "risk_id": test.get("risk_id"),

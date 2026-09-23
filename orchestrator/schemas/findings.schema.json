@@ -24,6 +24,7 @@
             }
           },
           "metrics_cited": {"type": "array", "items": {"type": "string"}},
+          "thresholds_cited": {"type": "array", "items": {"type": "string"}},
           "observation": {"type": "string"},
           "recommendation": {"type": "string"},
           "management_questions": {"type": "array", "items": {"type": "string"}}

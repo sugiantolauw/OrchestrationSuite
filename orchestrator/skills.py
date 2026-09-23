@@ -413,6 +413,18 @@ def validate_skill(skill: Skill) -> None:
                 f"findings.{fid}: metrics_cited {sorted(unknown_cited)} not produced by any test"
             )
 
+        # thresholds_cited (item 7, CLAUDE.md P2/P3 gate review): a finding's
+        # prose may quote a threshold's own VALUE (e.g. "$50") -- every id
+        # must be a real thresholds.yaml entry, exactly like a threshold
+        # referenced from `trigger`/`severity.when`, so a number in prose can
+        # never silently drift from what the run actually enforces.
+        cited_thresholds = set(finding.get("thresholds_cited", []))
+        unknown_cited_thresholds = cited_thresholds - known_threshold_ids
+        if unknown_cited_thresholds:
+            violations.append(
+                f"findings.{fid}: thresholds_cited {sorted(unknown_cited_thresholds)} not in thresholds.yaml"
+            )
+
         try:
             trigger_expr = compile_expr(
                 finding["trigger"], known_metrics=known_metric_names, known_thresholds=known_threshold_ids
@@ -434,11 +446,11 @@ def validate_skill(skill: Skill) -> None:
 
         for template_field in ("observation", "recommendation"):
             placeholders = _template_placeholders(finding.get(template_field, ""))
-            unknown_placeholders = placeholders - cited
+            unknown_placeholders = placeholders - cited - cited_thresholds
             if unknown_placeholders:
                 violations.append(
                     f"findings.{fid}: {template_field} references {sorted(unknown_placeholders)} "
-                    f"not in metrics_cited"
+                    f"not in metrics_cited or thresholds_cited"
                 )
 
         del trigger_expr  # compiled only to validate; findings.py recompiles per-run

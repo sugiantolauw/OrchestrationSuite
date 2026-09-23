@@ -42,11 +42,15 @@ findings:
         then: Medium
       - else: Low
     metrics_cited: [no_preapproval_bookings, no_preapproval_employees, t31b_name_match_rate]
+    # Item 7 (CLAUDE.md P2/P3 gate review): reworded from an unattributed
+    # "Policy requires" to cite the catalogue's own control objective
+    # (catalogue.yaml T3.1b) instead of asserting an uncited policy.
     observation: >
       {no_preapproval_bookings} bookings ({no_preapproval_employees} employees) have
       no matching travel request on file (name match rate {t31b_name_match_rate}).
-      Policy requires travel pre-approval before incurring expenses to ensure
-      budgetary control and management oversight.
+      The control objective is that all travel should be pre-approved before
+      expenses are incurred, to support budgetary control and management
+      oversight.
     recommendation: >
       Enforce pre-approval requirements in the expense system by blocking
       submission without a linked travel request. Review non-compliant claims for
@@ -146,6 +150,11 @@ findings:
         then: Medium
       - else: Low
     metrics_cited: [missing_receipt_count, missing_receipt_pct, missing_receipt_amount, missing_receipt_no_affidavit_count]
+    # Item 7 (CLAUDE.md P2/P3 gate review): the recommendation's dollar
+    # figure is rendered from thresholds.yaml's t41_auto_reject_amount
+    # (analyst-set, pending policy confirmation), never a bare number written
+    # into this template.
+    thresholds_cited: [t41_auto_reject_amount]
     observation: >
       {missing_receipt_count} claims ({missing_receipt_pct} of total) are missing
       receipt documentation, representing {missing_receipt_amount} in unsupported
@@ -154,8 +163,8 @@ findings:
       expenses cannot be independently verified.
     recommendation: >
       Enforce mandatory receipt attachment before expense report submission.
-      Implement automated rejection for claims exceeding $50 without supporting
-      documentation.
+      Implement automated rejection for claims exceeding {t41_auto_reject_amount}
+      without supporting documentation.
     management_questions:
       - What is the current policy for handling claims without receipts?
       - Are there legitimate reasons for the volume of missing receipts (e.g., system issues)?
@@ -169,11 +178,14 @@ findings:
         then: High
       - else: Medium
     metrics_cited: [att_missing_count, att_total, att_missing_pct]
+    # Item 7 (CLAUDE.md P2/P3 gate review): reworded from an unattributed
+    # "Policy requires" to cite the catalogue's own control objective
+    # (catalogue.yaml T4.2) instead of asserting an uncited policy.
     observation: >
       {att_missing_count} of {att_total} entertainment-related claims
-      ({att_missing_pct}) are missing attendee information. Policy requires
-      attendee names and business purpose for all entertainment and hospitality
-      expenses to demonstrate legitimate business use.
+      ({att_missing_pct}) are missing attendee information. The control
+      objective is that entertainment claims must list attendees and business
+      purpose, to demonstrate legitimate business use.
     recommendation: >
       Mandate attendee fields as required for entertainment expense types in the
       expense system. Reject submissions without completed attendee details.
@@ -286,15 +298,21 @@ findings:
     severity:
       - else: Medium
     metrics_cited: [att_hierarchy_invalid, att_hierarchy_total]
+    # Item 7 (CLAUDE.md P2/P3 gate review): the test evaluates "Is Attendee
+    # also in Hierarchy?" = Yes, which is the claimant's whole reporting
+    # hierarchy, not specifically a direct report -- reworded to match, and
+    # from an unattributed "Policy requires" to the catalogue's own control
+    # objective (catalogue.yaml T6.1c).
     observation: >
       {att_hierarchy_invalid} of {att_hierarchy_total} entertainment-entry
-      attendee records have attendees who are direct reports of the claimant.
-      Policy requires that entertainment of direct reports be approved by the
-      claimant's own manager to prevent self-serving approvals.
+      attendee records have attendees within the claimant's reporting
+      hierarchy. The control objective is that entertainment attendees should
+      not be within the claimant's reporting hierarchy, to prevent
+      self-serving approvals.
     recommendation: >
       Implement hierarchical validation in the expense system to flag claims
-      where attendees report directly to the claimant. Require next-level-up
-      approval for such claims.
+      where attendees are within the claimant's reporting hierarchy. Require
+      next-level-up approval for such claims.
     management_questions:
       - Is team entertainment (e.g., team lunches) a legitimate and expected expense for ExCo?
       - Should direct-report entertainment require separate approval from the next level?

@@ -61,6 +61,10 @@ def test_every_threshold_referenced_by_plan_or_findings_exists(tne_skill):
         for rule in finding["severity"]:
             if "when" in rule:
                 findings_refs |= compile_expr(rule["when"]).threshold_ids
+        # Item 7 (CLAUDE.md P2/P3 gate review): thresholds_cited is a prose
+        # reference (a finding quoting a threshold's own value), as real a
+        # reference as trigger/severity's.
+        findings_refs |= set(finding.get("thresholds_cited", []))
 
     all_refs = plan_refs | findings_refs
     unknown = all_refs - set(tne_skill.thresholds)
@@ -75,6 +79,7 @@ def test_every_thresholds_yaml_entry_is_referenced_somewhere(tne_skill, catalogu
         for rule in finding["severity"]:
             if "when" in rule:
                 findings_refs |= compile_expr(rule["when"]).threshold_ids
+        findings_refs |= set(finding.get("thresholds_cited", []))
 
     catalogue_refs: set[str] = set()
     fmt = string.Formatter()

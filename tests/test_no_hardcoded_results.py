@@ -113,6 +113,38 @@ def test_plan_and_findings_yaml_have_no_numeric_literals_outside_thresholds():
     assert not violations, "numeric literals outside thresholds.yaml:\n" + "\n".join(violations)
 
 
+def test_findings_yaml_prose_has_no_bare_currency_or_number_literals():
+    """Item 7 (CLAUDE.md P2/P3 gate review): the existing numeric-literal
+    scan above only walks YAML's own numeric SCALARS (plan.yaml/findings.yaml
+    keys whose value is a number) -- it never looked inside a STRING field's
+    text, so a bare "$50" written directly into findings.yaml's
+    `recommendation` prose (a real regression this test would have caught)
+    passed undetected. Title/observation/recommendation/management_questions
+    are auditor- and executive-facing prose: every number in them must come
+    from a `{metric_or_threshold}` template placeholder (rendered from
+    run_metrics or thresholds.yaml with recorded provenance), never a digit
+    written directly into the template text."""
+    findings = yaml.safe_load((SKILLS_DIR / "tne_exco" / "findings.yaml").read_text())
+
+    violations = []
+    for finding in findings["findings"]:
+        fid = finding.get("id", "?")
+        texts = {
+            "title": finding.get("title", ""),
+            "observation": finding.get("observation", ""),
+            "recommendation": finding.get("recommendation", ""),
+        }
+        for i, q in enumerate(finding.get("management_questions", [])):
+            texts[f"management_questions[{i}]"] = q
+        for field, text in texts.items():
+            without_placeholders = re.sub(r"\{[^}]*\}", "", text)
+            digits = re.findall(r"\d+", without_placeholders)
+            if digits:
+                violations.append(f"findings.{fid}.{field}: bare digit(s) {digits} outside a template placeholder")
+
+    assert not violations, "bare numeric/currency literals in findings.yaml prose:\n" + "\n".join(violations)
+
+
 def test_allow_listed_numeric_literal_paths_still_exist():
     # Guards the allow-list itself against drift: every entry must correspond
     # to a real path in the current plan.yaml, or it is dead and should be
