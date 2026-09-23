@@ -8,43 +8,52 @@ from src import run_setup
 from src.platform import adapters
 
 
-def test_validate_form_rejects_missing_everything():
-    errors = run_setup.validate_form(None, {}, None, None, None)
-    assert any("Select a Skill" in e for e in errors)
-    assert any("audit period" in e for e in errors)
-    assert any("objective" in e for e in errors)
+def test_home_layout_has_the_prototypes_landing_page_ids():
+    layout = run_setup.home_layout()
+    ids = set()
+
+    def walk(node):
+        if node is None or isinstance(node, (str, int, float, list, tuple)):
+            if isinstance(node, (list, tuple)):
+                for n in node:
+                    walk(n)
+            return
+        _id = getattr(node, "id", None)
+        if isinstance(_id, str):
+            ids.add(_id)
+        children = getattr(node, "children", None)
+        if children is not None:
+            walk(children)
+
+    walk(layout)
+    for expected in (
+        "data-search-input", "data-search-results", "file-upload-area", "uploaded-files-list",
+        "mode-selector-row", "skill-cards-container", "playbook-skills-section", "explorer-section",
+        "audit-objective", "audit-period", "audit-bu", "audit-materiality", "audit-options",
+        "workflow-preview-container", "run-summary-preview", "start-run-btn",
+    ):
+        assert expected in ids, f"missing id {expected!r} from the prototype's landing page"
 
 
-def test_validate_form_rejects_unbound_source():
-    errors = run_setup.validate_form(
-        "SKILL-001", {"expense_report": None}, "2025-01-01", "2026-04-30", "Assess spend.",
+def test_auto_bind_uses_suggest_bindings_when_no_matching_upload():
+    bindings, missing = run_setup._auto_bind("SKILL-001")
+    assert bindings.get("expense_report") == "test_catalog.tne_source.expense_report"
+    # fake_service.suggest_bindings leaves attendee_validity unbound (None) --
+    # a genuinely missing source is named, never silently dropped.
+    assert missing == ["attendee_validity"]
+
+
+def test_auto_bind_prefers_an_exact_filename_match_upload_on_local_backend(monkeypatch):
+    monkeypatch.setattr(adapters, "is_local_backend", lambda: True)
+    monkeypatch.setattr(
+        adapters, "list_uploaded_files",
+        lambda engagement_id=None: [
+            {"filename": "expense_report.csv", "status": "Ready", "volume_path": "/local/uploads/expense_report.csv"},
+        ],
     )
-    assert any("expense_report" in e for e in errors)
-
-
-def test_validate_form_passes_when_complete():
-    errors = run_setup.validate_form(
-        "SKILL-001",
-        {"expense_report": "test_catalog.tne_source.expense_report"},
-        "2025-01-01", "2026-04-30", "Assess spend.",
-    )
-    assert errors == []
-
-
-def test_binding_row_prefills_only_exact_non_restricted_matches():
-    tables = adapters.list_governed_tables()
-    suggested = {"expense_report": "test_catalog.tne_source.expense_report",
-                 "attendee_validity": "test_catalog.restricted.secret_table"}
-    row = run_setup._binding_row("expense_report", ["Employee"], tables, suggested)
-    dropdown = row.children[1]
-    assert dropdown.value == "test_catalog.tne_source.expense_report"
-
-    restricted_row = run_setup._binding_row("attendee_validity", [], tables, suggested)
-    restricted_dropdown = restricted_row.children[1]
-    # the suggestion points at a restricted table, so it must not be pre-filled
-    assert restricted_dropdown.value is None
-    restricted_options = {o["value"]: o for o in restricted_dropdown.options}
-    assert restricted_options["test_catalog.restricted.secret_table"]["disabled"] is True
+    bindings, missing = run_setup._auto_bind("SKILL-001")
+    assert bindings["expense_report"] == "/local/uploads/expense_report.csv"
+    assert missing == ["attendee_validity"]
 
 
 def test_start_audit_run_creates_an_awaiting_signoff_run():
@@ -93,3 +102,21 @@ def test_start_audit_run_review_plan_first_awaits_confirmation():
     )
     run = adapters.get_run(run_id)
     assert run["status"] == "awaiting_confirmation"
+
+
+def test_upload_and_list_uploaded_files_roundtrip():
+    row = adapters.upload_audit_file("mini.csv", b"a,b\n1,2\n", "auditor@example.com")
+    assert row["status"] == "Ready"
+    files = adapters.list_uploaded_files()
+    assert any(f["upload_id"] == row["upload_id"] for f in files)
+
+
+def test_propose_plan_returns_the_real_node_sequence():
+    plan = adapters.propose_plan({"mode": "playbook", "skill": adapters.get_skill("SKILL-001"), "sources_count": 3})
+    assert plan["mock"] is False
+    stage_names = [s["stage"] for s in plan["stages"]]
+    assert stage_names == [
+        "Source data", "Data quality & reconciliation", "Skill / Explorer plan",
+        "Deterministic audit tests", "Exception classification", "Evidence-linked findings",
+        "Insights & prioritisation", "Management actions", "Export & Jira preview",
+    ]

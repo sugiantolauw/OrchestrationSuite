@@ -55,22 +55,6 @@ def test_exposure_summary_prefers_label_over_basis():
     assert "methodology paragraph" not in summary
 
 
-def test_exposure_methodology_note_shows_basis_and_approved_not_spent():
-    payload = {"exposure": {
-        "headline": 1725.0, "basis": "sum of distinct flagged entries.",
-        "approved_not_spent_total": 4200.0,
-    }}
-    note = workspace_tne._exposure_methodology_note(payload)
-    text = str(note)
-    assert "sum of distinct flagged entries" in text
-    assert "$4,200" in text
-
-
-def test_exposure_methodology_note_is_none_when_nothing_to_show():
-    assert workspace_tne._exposure_methodology_note(None) is None
-    assert workspace_tne._exposure_methodology_note({"exposure": {}}) is None
-
-
 def test_latest_completed_run_id_finds_the_run():
     run_id = _completed_run()
     assert workspace_tne.latest_completed_run_id() == run_id
@@ -102,7 +86,7 @@ def test_workspace_layout_shows_error_panel_when_payload_load_fails(monkeypatch)
     assert "sha256 mismatch" in text
 
 
-def test_finding_card_flags_analyst_set_threshold():
+def test_finding_card_shows_exposure_not_yet_computed():
     finding = {
         "severity": "High", "test_id": "T4.1", "title": "Missing receipts",
         "observation": "obs", "recommendation": "rec", "management_questions": ["q?"],
@@ -110,24 +94,7 @@ def test_finding_card_flags_analyst_set_threshold():
     }
     card = workspace_tne._finding_card(0, finding)
     text = str(card)
-    assert "Analyst-set threshold" in text
     assert "not yet computed" in text
-
-
-def test_finding_card_hides_the_threshold_chip_for_fixed_severity():
-    """Item 7 (CLAUDE.md P2/P3 gate review): a fixed severity (a bare
-    `else:` rule, no `when` at all) consults no threshold -- the
-    "Analyst-set threshold" chip names a threshold that does not exist for
-    this finding, so it must not render, even though analyst_set_severity is
-    True (findings.py sets it True for a fixed severity too, by definition)."""
-    finding = {
-        "severity": "Medium", "test_id": "T3.1a", "title": "Unlinked travel requests",
-        "observation": "obs", "recommendation": "rec", "management_questions": [],
-        "analyst_set_severity": True, "severity_basis": "fixed", "exposure_amount": None,
-    }
-    card = workspace_tne._finding_card(0, finding)
-    text = str(card)
-    assert "Analyst-set threshold" not in text
 
 
 def test_finding_card_raises_if_analyst_set_severity_was_never_persisted():

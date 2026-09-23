@@ -127,6 +127,56 @@ def suggest_bindings(ctx, skill_id: str) -> dict:
     return {"expense_report": "test_catalog.tne_source.expense_report", "attendee_validity": None}
 
 
+def get_upload_base_path(ctx) -> str:
+    return "/tmp/fake-uploads"
+
+
+_UPLOADED_FILES: list = []
+
+
+def upload_file(ctx, *, filename, content, uploaded_by, engagement_id="ENG-DEFAULT") -> dict:
+    row = {
+        "upload_id": f"UP-{uuid.uuid4().hex[:8]}",
+        "engagement_id": engagement_id,
+        "filename": filename,
+        "volume_path": f"/tmp/fake-uploads/{filename}",
+        "size_bytes": len(content),
+        "sha256": "fake",
+        "uploaded_by": uploaded_by,
+        "uploaded_at": "2026-09-23T00:00:00Z",
+        "status": "Ready",
+        "row_count": 1,
+        "columns_json": "[]",
+        "error": None,
+    }
+    _UPLOADED_FILES.append(row)
+    return row
+
+
+def list_uploaded_files(ctx, engagement_id=None) -> list:
+    if engagement_id:
+        return [r for r in _UPLOADED_FILES if r.get("engagement_id") == engagement_id]
+    return list(_UPLOADED_FILES)
+
+
+def propose_plan(ctx, *, skill_id, mode="playbook") -> dict:
+    skill = get_skill(ctx, skill_id) if skill_id else None
+    stages = [
+        {"stage": "Source data", "status": "ready", "detail": "2 of 2 sources bound"},
+        {"stage": "Data quality & reconciliation", "status": "pending"},
+        {"stage": "Skill / Explorer plan", "status": "ready" if mode == "playbook" else "needs_confirmation",
+         "detail": skill["name"] if skill and mode == "playbook" else "Auditor confirmation required"},
+        {"stage": "Deterministic audit tests", "status": "pending",
+         "detail": f"{len(skill['tests'])} tests defined" if skill else "? tests defined"},
+        {"stage": "Exception classification", "status": "pending"},
+        {"stage": "Evidence-linked findings", "status": "pending"},
+        {"stage": "Insights & prioritisation", "status": "pending"},
+        {"stage": "Management actions", "status": "pending"},
+        {"stage": "Export & Jira preview", "status": "pending"},
+    ]
+    return {"stages": stages, "mode": mode, "mock": False}
+
+
 # CLAUDE.md P2/P3 gate review item 2: the real service's get_run() returns
 # RunState.findings -- the COMPACT node-output projection the find/prioritise
 # nodes write (orchestrator/nodes/fieldwork.py's `compact` list: finding_id,
@@ -200,6 +250,10 @@ def start_audit_run(
     mode="playbook",
     review_plan_first=False,
     engagement_id="ENG-DEFAULT",
+    business_unit=None,
+    materiality=None,
+    generate_management_actions=True,
+    jira_preview_requested=False,
 ) -> str:
     run_id = f"RUN-{uuid.uuid4().hex[:8].upper()}"
     status = "awaiting_confirmation" if review_plan_first else "awaiting_signoff"

@@ -162,7 +162,7 @@ def _poll_until(page, predicate, *, timeout_s: float, interval_ms: int = 3000, o
         "docstring; that defect is fixed and independently verified)."
     ),
 )
-def test_full_playbook_run_via_home_to_signoff_to_workspace(watched_page, connected_app_url):
+def test_full_playbook_run_via_home_to_signoff_to_workspace(watched_page, connected_app_url, tmp_path):
     page, watcher = watched_page
     # dcc.ConfirmDialog's sign-off confirmation is a native browser confirm()
     # popup; Playwright auto-dismisses (cancels) any dialog with no handler
@@ -171,22 +171,34 @@ def test_full_playbook_run_via_home_to_signoff_to_workspace(watched_page, connec
     page.on("dialog", lambda d: d.accept())
     goto(page, connected_app_url, "/")
 
-    # Skill defaults to SKILL-001 (Home's only real Skill with a Skill dir),
-    # and every contract source is auto-filled by suggest_bindings' exact
-    # short-name match against the local pseudo-tables -- nothing to pick.
-    page.wait_for_selector("#home-bindings-container .Select-value")
-    assert page.locator("#home-bindings-container .Select-value").count() >= 8
+    # Upload a small CSV that binds to SKILL-001's smallest contract source
+    # (per_diem_rates -- the same two columns and rows as the real
+    # synthetic_data/ file, so contract validation passes for real) by exact
+    # filename-stem match (run_setup._auto_bind, never fuzzy). Confirms the
+    # landing page's upload panel is a real, working run source, not just a
+    # decorative dropzone (reference_app's own L3 test documents it as
+    # exactly that decorative no-op in the prototype).
+    csv_path = tmp_path / "per_diem_rates.csv"
+    csv_path.write_text("Country/Region,Rate Per Day (S$)\nAfghanistan,101\nAlbania,87\n")
+    page.locator("#file-upload-area input[type=file]").set_input_files(str(csv_path))
+    page.wait_for_selector("#uploaded-files-list .upload-file-row")
+    assert page.get_by_text("Ready", exact=True).count() >= 1
 
-    period_inputs = page.locator("#home-period input")
-    period_inputs.first.click()
-    period_inputs.first.fill("01/01/2025")
-    page.keyboard.press("Enter")
-    period_inputs.nth(1).click()
-    period_inputs.nth(1).fill("04/30/2026")
-    page.keyboard.press("Enter")
-    page.locator("#home-objective").fill("Assess T&E spend for control exceptions.")
+    # Selecting the T&E Skill card: the prototype wires no selection
+    # callback to skill_card at all (reproduced exactly here, see the
+    # change report) -- the run always uses SKILL-001/Playbook, matching
+    # the run-summary-preview panel's own hardcoded text below. Clicking it
+    # is still the real user gesture the task asks for; it is a documented
+    # no-op rather than a broken control.
+    page.locator('[id*="skill-select-card"][id*="SKILL-001"]').first.click()
 
-    page.locator("#home-start-btn").click()
+    page.locator("#audit-period input").first.fill("01/01/2025")
+    page.keyboard.press("Enter")
+    page.locator("#audit-period input").nth(1).fill("30/04/2026")
+    page.keyboard.press("Enter")
+    page.locator("#audit-objective").fill("Assess T&E spend for control exceptions.")
+
+    page.locator("#start-run-btn").click()
     page.wait_for_url("**/run/RUN-*", timeout=15_000)
 
     assert not has_error_overlay(page)

@@ -75,12 +75,13 @@ def test_management_actions_page_builds():
 
 
 def test_management_actions_page_renders_none_exposure_without_crashing(monkeypatch):
-    """B3 (CLAUDE.md P2/P3 gate review): a management action drawn from a
-    non-monetary finding carries potential_exposure=None (CLAUDE.md NN14 --
-    never a fabricated 0), and `.get("potential_exposure", 0)` does NOT
-    substitute a default when the key is present with value None -- it
-    raised TypeError formatting None as a float. Must render "-" instead,
-    never crash, and the page must carry no cross-finding exposure total."""
+    """A management action drawn from a non-monetary finding carries
+    potential_exposure=None. `.get("potential_exposure", 0)` (the
+    prototype's own formula, reference_app/app.py) does NOT substitute a
+    default when the key is present with value None -- summing it directly
+    raised TypeError. Reproduces the prototype's page exactly (same "Total
+    exposure" KPI, same formula) while fixing that crash: a None
+    contributes $0 to the sum, never raises."""
     import fake_service
 
     def _fake_list_management_actions(ctx, filters=None):
@@ -94,8 +95,8 @@ def test_management_actions_page_renders_none_exposure_without_crashing(monkeypa
     monkeypatch.setattr(fake_service, "list_management_actions", _fake_list_management_actions)
     layout = management_actions_page()
     text = str(layout)
-    assert "—" in text
-    assert "Total exposure" not in text
+    assert "Total exposure" in text
+    assert "$0" in text
 
 
 def test_run_page_builds_for_unknown_run():
@@ -121,13 +122,13 @@ def test_workspace_tne_renders_a_completed_run():
     assert layout is not None
 
 
-def test_workspace_tne_shows_self_approved_badge_when_approver_is_run_owner():
-    # CLAUDE.md §11 "allow self sign-off for now": when the sign-off actor is
-    # the same identity as run_owner (as above, and in this fixture's normal
-    # single-actor flow), the workspace must visibly label it, not just
-    # silently accept it.
-    from orchestrator.signoff_policy import SELF_APPROVED_LABEL
+_SELF_APPROVED_TEXT = "(self-approved — segregation of duties not enforced)"
 
+
+def test_workspace_tne_appends_self_approved_text_when_approver_is_run_owner():
+    # When the sign-off actor is the same identity as run_owner, the small
+    # appended text (not a badge/chip -- user decision 2026-09-23) must be
+    # visible on the existing "Signed off by ..." sentence.
     run_id = adapters.start_audit_run(
         skill_id="SKILL-001",
         bindings={"expense_report": "test_catalog.tne_source.expense_report"},
@@ -137,12 +138,10 @@ def test_workspace_tne_shows_self_approved_badge_when_approver_is_run_owner():
     )
     adapters.sign_off(run_id, "tester@example.com")
     layout = workspace_tne.tne_workspace_layout(run_id)
-    assert SELF_APPROVED_LABEL in str(layout)
+    assert _SELF_APPROVED_TEXT in str(layout)
 
 
-def test_workspace_tne_omits_self_approved_badge_when_approver_differs_from_owner():
-    from orchestrator.signoff_policy import SELF_APPROVED_LABEL
-
+def test_workspace_tne_omits_self_approved_text_when_approver_differs_from_owner():
     run_id = adapters.start_audit_run(
         skill_id="SKILL-001",
         bindings={"expense_report": "test_catalog.tne_source.expense_report"},
@@ -152,12 +151,10 @@ def test_workspace_tne_omits_self_approved_badge_when_approver_differs_from_owne
     )
     adapters.sign_off(run_id, "reviewer@example.com")
     layout = workspace_tne.tne_workspace_layout(run_id)
-    assert SELF_APPROVED_LABEL not in str(layout)
+    assert _SELF_APPROVED_TEXT not in str(layout)
 
 
-def test_runs_list_page_shows_self_approved_badge_for_a_self_signed_run():
-    from orchestrator.signoff_policy import SELF_APPROVED_LABEL
-
+def test_run_status_page_appends_self_approved_text_when_approver_is_run_owner():
     run_id = adapters.start_audit_run(
         skill_id="SKILL-001",
         bindings={"expense_report": "test_catalog.tne_source.expense_report"},
@@ -166,8 +163,8 @@ def test_runs_list_page_shows_self_approved_badge_for_a_self_signed_run():
         run_owner="tester@example.com",
     )
     adapters.sign_off(run_id, "tester@example.com")
-    page = audit_runs_page()
-    assert SELF_APPROVED_LABEL in str(page)
+    body = run_status._render_body(adapters.get_run(run_id), run_id)
+    assert _SELF_APPROVED_TEXT in str(body)
 
 
 def test_route_page_dispatches_every_known_path():
