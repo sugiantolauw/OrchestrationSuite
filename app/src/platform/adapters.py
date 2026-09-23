@@ -57,6 +57,16 @@ def get_environment_label() -> str:
     return "Local test data" if r.get("backend") == "local" else "Unity Catalog"
 
 
+def is_demo_mode() -> bool:
+    """The prototype's `is_demo_mode()` meant "not connected to a live
+    backend, everything on screen is a fixture" (reference_app/src/platform/
+    adapters.py: `_LIVE_MODE = False`). This process is always connected to
+    a real, working backend (local test data or Unity Catalog) -- never the
+    fabricated-data sense the prototype's demo_indicator text describes
+    (CLAUDE.md NN13) -- so it is always False here."""
+    return False
+
+
 def is_local_backend() -> bool:
     """True only when this process is actually talking to the local backend
     (LocalPersistence/local file sources) -- the one place run_owner/actor
@@ -97,6 +107,77 @@ def suggest_bindings(skill_id: str) -> dict:
     return service.suggest_bindings(get_context(), skill_id)
 
 
+def _asset_card_shape(table: dict) -> dict:
+    """orchestrator.service.list_governed_tables()'s real shape (fqn/catalog/
+    schema/table/comment/columns/restricted) mapped to the data_asset_card
+    component's fields, matching the reference prototype's fixture shape
+    (reference_app/src/platform/fixtures.py DEMO_DATA_ASSETS) field-for-field.
+    Nothing here is invented: a field the real listing does not carry (owner,
+    row count, last-refreshed date, classification) is simply left unset, and
+    the component's own existing fallback text (already in components.py,
+    ported unchanged from the prototype) renders for it."""
+    return {
+        "name": table.get("fqn") or table.get("table") or "",
+        "type": "Table",
+        "owner": table.get("owner"),
+        "last_refreshed": table.get("last_refreshed"),
+        "classification": table.get("classification"),
+        "description": table.get("comment") or "",
+        "rows": table.get("rows"),
+        "access": "Restricted" if table.get("restricted") else "Available",
+    }
+
+
+def search_governed_data(query: str) -> list[dict]:
+    """Real Unity Catalog / local-source discovery (orchestrator.service.
+    list_governed_tables), filtered by `query` against the fully-qualified
+    name and comment -- the same fields the prototype's mock filtered on
+    (name, description)."""
+    tables = service.list_governed_tables(get_context())
+    if query:
+        q = query.lower()
+        tables = [
+            t for t in tables
+            if q in (t.get("fqn") or "").lower()
+            or q in (t.get("catalog") or "").lower()
+            or q in (t.get("schema") or "").lower()
+            or q in (t.get("table") or "").lower()
+            or q in (t.get("comment") or "").lower()
+        ]
+    return [_asset_card_shape(t) for t in tables]
+
+
+# ── File upload ──────────────────────────────────────────────────────────────
+
+def get_upload_base_path() -> str:
+    return service.get_upload_base_path(get_context())
+
+
+def upload_audit_file(filename: str, content: bytes, uploaded_by: str,
+                       engagement_id: str = "ENG-DEFAULT") -> dict:
+    return service.upload_file(
+        get_context(), filename=filename, content=content, uploaded_by=uploaded_by,
+        engagement_id=engagement_id,
+    )
+
+
+def list_uploaded_files(engagement_id: str | None = None) -> list[dict]:
+    return service.list_uploaded_files(get_context(), engagement_id)
+
+
+# ── Workflow preview ─────────────────────────────────────────────────────────
+
+def propose_plan(run_config: dict) -> dict:
+    """`run_config` mirrors the prototype adapter's own call shape
+    ({"mode", "skill", "sources_count"}) -- only `mode` and the skill's
+    `skill_id` are actually needed against the real pipeline's node
+    sequence (orchestrator.nodes.fieldwork.NODES_FOR)."""
+    skill = run_config.get("skill") or {}
+    return service.propose_plan(
+        get_context(), skill_id=skill.get("skill_id"), mode=run_config.get("mode", "playbook")
+    )
+
+
 # ── Run lifecycle ────────────────────────────────────────────────────────────
 
 def start_audit_run(
@@ -109,6 +190,10 @@ def start_audit_run(
     mode: str = "playbook",
     review_plan_first: bool = False,
     engagement_id: str = "ENG-DEFAULT",
+    business_unit: str | None = None,
+    materiality: float | None = None,
+    generate_management_actions: bool = True,
+    jira_preview_requested: bool = False,
 ) -> str:
     return service.start_audit_run(
         get_context(),
@@ -120,6 +205,10 @@ def start_audit_run(
         mode=mode,
         review_plan_first=review_plan_first,
         engagement_id=engagement_id,
+        business_unit=business_unit,
+        materiality=materiality,
+        generate_management_actions=generate_management_actions,
+        jira_preview_requested=jira_preview_requested,
     )
 
 

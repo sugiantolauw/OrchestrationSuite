@@ -1,20 +1,44 @@
-"""Home — the run-setup page (CLAUDE.md: pick SKILL-001, bind its sources to
-Unity Catalog tables, type an objective, click "Run audit analysis").
+"""Home — the landing page ("Start an audit analysis"). Reproduces the
+prototype's `landing_page()` layout (reference_app/src/platform/pages.py)
+and its four landing-page callbacks (reference_app/app.py:
+search_data_assets, render_workflow_preview, render_run_summary,
+start_demo_run) element-for-element -- same ids, classes, text, default
+values -- wired to the real backend (orchestrator.service via
+src.platform.adapters) instead of the prototype's fixture adapters.
 
-Nothing here fabricates a default: the audit period is unset until the
-auditor picks it (only shown as placeholder text, CLAUDE.md §0.2), a missing
-binding blocks the run, and the objective is required. `start_audit_run`
-itself runs in a callback but only inserts a `runs` row and hands off to the
-executor (CLAUDE.md §2.1) — it does not execute a node.
+Two places the prototype's own behaviour could not honestly carry over
+unchanged are called out inline below (search "DEVIATION") and in this
+change's report: the Start button's destination, and the upload panel's
+literal destination-path template. Nothing else in this file's DOM differs
+from the prototype's landing_page().
+
+The mode cards, skill cards and Explorer section are exactly as
+reference_app renders them: no selection callback exists there in the
+prototype (mode_card/skill_card's `selected` state is a hardcoded render-time
+flag, not wired to any Input), so none is added here either -- the run this
+page starts is always Playbook / SKILL-001, matching the run-summary-preview
+panel's own hardcoded "Mode: Playbook" / "Skill: ExCo T&E Executive
+Diligence" text, exactly as the prototype displays it regardless of which
+card looks selected.
 """
 
 from __future__ import annotations
 
-from dash import ALL, Input, Output, State, dcc, html, no_update
+from pathlib import Path
+
+from dash import Input, Output, State, dcc, html, no_update
 from dash.exceptions import PreventUpdate
 from flask import request
 
 from src.platform import adapters
+from src.platform.components import (
+    data_asset_card,
+    demo_indicator,
+    mode_card,
+    skill_card,
+    upload_file_row,
+    workflow_stage,
+)
 
 _DEFAULT_SKILL_ID = "SKILL-001"
 
@@ -39,204 +63,436 @@ def _request_owner() -> str:
     )
 
 
-def _table_fqn(table: dict) -> str:
-    # orchestrator.service.list_governed_tables rows use "table_fqn"; the
-    # task brief's contract sketch used "fqn" — accept either so this
-    # doesn't silently show an empty dropdown if that shape changes again.
-    return table.get("table_fqn") or table.get("fqn") or ""
-
-
-def _binding_row(source_name: str, columns: list, tables: list[dict], suggested: dict) -> html.Div:
-    options = []
-    for t in tables:
-        fqn = _table_fqn(t)
-        restricted = bool(t.get("restricted"))
-        label = fqn + (" — Restricted" if restricted else "")
-        if t.get("exists") is False:
-            label += " (not found)"
-        options.append({"label": label, "value": fqn, "disabled": restricted})
-
-    suggested_fqn = suggested.get(source_name)
-    valid_fqns = {_table_fqn(t) for t in tables if not t.get("restricted")}
-    value = suggested_fqn if suggested_fqn in valid_fqns else None
-
-    col_hint = f"{len(columns)} columns expected" if isinstance(columns, list) else ""
-
-    return html.Div([
-        html.Div([
-            html.Span(source_name, style={"fontWeight": 700, "fontSize": 13, "color": "#1a1d26"}),
-            html.Span(col_hint, style={"fontSize": 11, "color": "#6b7283", "marginLeft": 8}),
-        ], style={"marginBottom": 4}),
-        dcc.Dropdown(
-            id={"type": "home-binding", "index": source_name},
-            options=options,
-            value=value,
-            placeholder="Select a governed table…",
-            style={"fontSize": 13},
-        ),
-    ], style={"marginBottom": 14})
-
+# ─── Landing page (ported from reference_app/src/platform/pages.py) ─────────
 
 def home_layout() -> html.Div:
     skills = adapters.list_skills()
-    default_skill = next((s for s in skills if s.get("skill_id") == _DEFAULT_SKILL_ID), None)
-    default_skill_id = default_skill["skill_id"] if default_skill else (skills[0]["skill_id"] if skills else None)
+    assets = adapters.search_governed_data("")
 
     return html.Div([
+        # Hero section
         html.Div([
             html.Div("AI AUDIT ANALYST", className="showcase-eyebrow"),
             html.H2("Start an audit analysis", className="showcase-headline"),
             html.P(
-                "Pick a Skill, bind each of its data sources to a governed Unity Catalog table, "
-                "set the audit period and objective, then run the audit.",
+                "Bring governed data or business-provided files. Select a proven Skill "
+                "or explore a new audit objective. The platform takes you from data to "
+                "evidence-linked findings and management action.",
                 className="showcase-supporting",
             ),
         ], className="showcase-hero"),
 
+        demo_indicator() if adapters.is_demo_mode() else None,
+
+        # ── Data entry routes ────────────────────────────────────────────
         html.Div([
-            html.H3("Skill", style={"margin": "0 0 4px"}),
-            html.P("The governed audit methodology this run will execute.", className="sub"),
-            dcc.Dropdown(
-                id="home-skill",
-                options=[{"label": f"{s['skill_id']} — {s['name']}", "value": s["skill_id"]} for s in skills],
-                value=default_skill_id,
-                clearable=False,
-                style={"maxWidth": 480, "fontSize": 13},
+            # Route A: Governed data
+            html.Div([
+                html.Div([
+                    html.H3("Find governed data", style={"margin": 0}),
+                    html.P("Search Unity Catalog for tables, views, volumes, and approved data assets",
+                           className="sub"),
+                ]),
+                dcc.Input(
+                    id="data-search-input",
+                    type="text",
+                    placeholder="Search tables, views, volumes…",
+                    debounce=True,
+                    style={"width": "100%", "marginBottom": 12, "padding": "8px 12px",
+                           "borderRadius": 7, "border": "1px solid #cfd5e2", "fontSize": 13},
+                ),
+                html.Div(
+                    id="data-search-results",
+                    children=[data_asset_card(a) for a in assets[:4]],
+                    className="stack",
+                    style={"maxHeight": 400, "overflowY": "auto"},
+                ),
+            ], className="panel", style={"flex": 1}),
+
+            # Route B: Upload files
+            html.Div([
+                html.Div([
+                    html.H3("Upload audit files", style={"margin": 0}),
+                    html.P("Drag-and-drop business-provided audit data", className="sub"),
+                ]),
+                dcc.Upload(
+                    id="file-upload-area",
+                    children=html.Div([
+                        html.Div("Drag & drop files here, or click to browse",
+                                 style={"fontSize": 13, "color": "#6b7283"}),
+                        html.Div("CSV, Excel, Parquet — max 200 MB per file",
+                                 style={"fontSize": 11, "color": "#9fa4b3", "marginTop": 4}),
+                    ], style={"textAlign": "center"}),
+                    style={
+                        "borderWidth": 2, "borderStyle": "dashed", "borderColor": "#cfd5e2",
+                        "borderRadius": 10, "padding": "28px 20px", "background": "#fafbfc",
+                        "cursor": "pointer", "marginBottom": 12,
+                    },
+                    multiple=True,
+                ),
+                html.Div([
+                    html.Div("Destination volume", style={"fontSize": 11, "fontWeight": 700,
+                                                           "textTransform": "uppercase", "color": "#6b7283",
+                                                           "letterSpacing": "0.03em", "marginBottom": 2}),
+                    html.Div(f"{adapters.get_upload_base_path()}/runs/{{run_id}}/input",
+                             style={"fontSize": 12, "fontFamily": "monospace", "color": "#3b4150"}),
+                ], style={"marginBottom": 10}),
+                html.Div(id="uploaded-files-list"),
+                html.Div([
+                    html.Span("◆", style={"color": "#e0952a", "marginRight": 4}),
+                    html.Span("Uploaded files are not analysed until you start a run",
+                              style={"fontSize": 11.5, "color": "#6b4a00"}),
+                ], style={"marginTop": 8}),
+            ], className="panel", style={"flex": 1}),
+        ], className="plat-two-col"),
+
+        # ── Skill selection ──────────────────────────────────────────────
+        html.Div([
+            html.H3("How should the agent approach this audit?", style={"margin": "0 0 4px"}),
+            html.P("Choose a proven Skill or explore a new audit objective", className="sub"),
+        ], style={"marginTop": 24}),
+
+        html.Div([
+            mode_card("playbook", "Use a proven Skill",
+                      "Run an established audit using a governed, versioned methodology. "
+                      "The Skill defines data sources, cleaning rules, tests, metrics, "
+                      "visualisations, evidence requirements, and recommended actions.",
+                      selected=True),
+            mode_card("explorer", "Explore a new audit",
+                      "Start with an audit objective when no proven Skill exists. "
+                      "The agent profiles the data, proposes an approach, asks for "
+                      "auditor confirmation, and can save the approved methodology "
+                      "as a new Skill after the run."),
+        ], className="plat-two-col", id="mode-selector-row"),
+
+        # Playbook skill cards
+        html.Div([
+            html.Div(
+                [skill_card(s) for s in skills],
+                className="plat-skill-grid",
+                id="skill-cards-container",
             ),
-        ], className="panel", style={"marginBottom": 16}),
+        ], id="playbook-skills-section"),
 
+        # Explorer section (hidden by default)
         html.Div([
-            html.H3("Data sources", style={"margin": "0 0 4px"}),
-            html.P("Every source the Skill's contract requires. A missing binding blocks the run.",
-                   className="sub"),
-            html.Div(id="home-bindings-container"),
-        ], className="panel", style={"marginBottom": 16}),
+            html.Div([
+                html.Div([
+                    html.Span("◎", style={"color": "#e0952a", "fontSize": 18, "marginRight": 8}),
+                    html.Span("Explorer Mode", style={"fontSize": 14, "fontWeight": 700, "color": "#1e2761"}),
+                ], style={"display": "flex", "alignItems": "center", "marginBottom": 8}),
+                html.P("No pre-existing Skill is required. The agent will profile your data "
+                       "and propose an approach for your review.",
+                       style={"fontSize": 13, "color": "#3b4150", "marginBottom": 8}),
+                html.Div([
+                    html.Span("◆", style={"color": "#e0952a", "marginRight": 4}),
+                    html.Span("Explorer Mode requires auditor confirmation before execution",
+                              style={"fontSize": 12, "color": "#6b4a00"}),
+                ], style={"marginBottom": 10}),
+                html.Button("Start new objective", className="btn-generate",
+                            style={"marginRight": 8}),
+                html.Button("Save completed approach as draft Skill", className="ghost",
+                            style={"width": "auto"}),
+            ], className="panel"),
+        ], id="explorer-section", style={"display": "none"}),
 
+        # ── Run configuration ────────────────────────────────────────────
         html.Div([
             html.H3("Audit configuration", style={"margin": "0 0 4px"}),
-            html.P("Set the scope and objective for this run.", className="sub"),
-            html.Div([
-                html.Label("Audit period", style={"fontSize": 12, "fontWeight": 700, "color": "#1a1d26"}),
-                html.Div(
-                    dcc.DatePickerRange(
-                        id="home-period",
-                        start_date_placeholder_text="e.g. 2025-01-01",
-                        end_date_placeholder_text="e.g. 2026-04-30",
-                        display_format="DD MMM YYYY",
-                    ),
-                ),
-            ], style={"marginBottom": 14}),
+            html.P("Set the scope and parameters for this audit run", className="sub"),
+        ], style={"marginTop": 24}),
+
+        html.Div([
             html.Div([
                 html.Label("Audit objective", style={"fontSize": 12, "fontWeight": 700, "color": "#1a1d26"}),
                 dcc.Textarea(
-                    id="home-objective",
-                    placeholder="What is this audit assessing? e.g. Assess the selected population for "
-                                "control exceptions and quantify the potential exposure.",
+                    id="audit-objective",
+                    value=(
+                        "Assess the selected population for control exceptions, quantify the "
+                        "potential exposure, identify evidence-backed risk themes, and recommend "
+                        "management actions."
+                    ),
                     style={"width": "100%", "height": 80, "fontSize": 13, "borderRadius": 7,
                            "border": "1px solid #cfd5e2", "padding": "8px 12px", "resize": "vertical"},
                 ),
             ], style={"marginBottom": 14}),
-            dcc.Checklist(
-                id="home-review-plan",
-                options=[{"label": " Review plan before executing (Explorer requires this; optional in Playbook)",
-                          "value": "review_plan_first"}],
-                value=[],
-                style={"fontSize": 13, "color": "#3b4150"},
-            ),
-        ], className="panel", style={"marginBottom": 16}),
 
-        html.Div(id="home-validation-errors", style={"color": "#b85042", "fontSize": 13, "marginBottom": 8}),
+            html.Div([
+                html.Div([
+                    html.Label("Audit period", style={"fontSize": 12, "fontWeight": 700, "color": "#1a1d26"}),
+                    dcc.DatePickerRange(
+                        id="audit-period",
+                        start_date="2025-01-01",
+                        end_date="2026-06-30",
+                        display_format="DD MMM YYYY",
+                    ),
+                ], style={"flex": 1}),
+                html.Div([
+                    html.Label("Business unit (optional)", style={"fontSize": 12, "fontWeight": 700, "color": "#1a1d26"}),
+                    dcc.Input(id="audit-bu", type="text", placeholder="All",
+                              style={"width": "100%", "padding": "8px 12px", "borderRadius": 7,
+                                     "border": "1px solid #cfd5e2", "fontSize": 13}),
+                ], style={"flex": 1}),
+            ], style={"display": "flex", "gap": 16, "marginBottom": 14}),
 
+            # Advanced parameters (collapsed)
+            html.Details([
+                html.Summary("Advanced parameters", style={"fontSize": 13, "fontWeight": 600,
+                                                            "cursor": "pointer", "color": "#1e2761",
+                                                            "marginBottom": 8}),
+                html.Div([
+                    html.Div([
+                        html.Label("Materiality threshold", style={"fontSize": 12, "fontWeight": 700}),
+                        dcc.Input(id="audit-materiality", type="number", placeholder="$0",
+                                  style={"width": "100%", "padding": "8px 12px", "borderRadius": 7,
+                                         "border": "1px solid #cfd5e2", "fontSize": 13}),
+                    ], style={"flex": 1}),
+                ], style={"display": "flex", "gap": 16}),
+                html.Div([
+                    dcc.Checklist(
+                        id="audit-options",
+                        options=[
+                            {"label": " Show proposed approach before execution", "value": "preview_plan"},
+                            {"label": " Generate management actions after review", "value": "gen_actions"},
+                            {"label": " Prepare Jira ticket previews", "value": "jira_preview"},
+                        ],
+                        value=["preview_plan", "gen_actions"],
+                        style={"fontSize": 13, "color": "#3b4150"},
+                        labelStyle={"display": "block", "marginBottom": 6},
+                    ),
+                ], style={"marginTop": 12}),
+            ]),
+        ], className="panel"),
+
+        # ── Agent plan preview ───────────────────────────────────────────
         html.Div([
-            html.Button("Run audit analysis", id="home-start-btn", className="btn-generate",
-                        style={"fontSize": 15, "fontWeight": 700, "padding": "12px 32px", "width": "100%", "maxWidth": 360}),
-        ], style={"textAlign": "center"}),
+            html.H3("Proposed workflow", style={"margin": "0 0 4px"}),
+            html.P("Preview of the execution stages before starting the run", className="sub"),
+        ], style={"marginTop": 24}),
+        html.Div(id="workflow-preview-container"),
 
-        dcc.Store(id="home-skill-sources"),
+        # ── Start analysis ───────────────────────────────────────────────
+        html.Div([
+            html.Div(id="run-summary-preview"),
+            html.Button("Start audit analysis", id="start-run-btn", className="btn-generate",
+                        style={"fontSize": 15, "fontWeight": 700, "padding": "12px 32px",
+                               "marginTop": 16, "width": "100%", "maxWidth": 360}),
+        ], style={"marginTop": 24, "textAlign": "center"}),
+
     ], className="shell dashboard-shell plat-landing")
 
 
-def validate_form(skill_id, bindings: dict, start_date, end_date, objective) -> list[str]:
-    """Pure validation, factored out of the callback so it's directly
-    testable: no dependency on Dash's callback dispatcher."""
-    errors = []
-    if not skill_id:
-        errors.append("Select a Skill.")
-    missing = [name for name, value in bindings.items() if not value]
-    if missing:
-        errors.append(f"Bind every data source before running: missing {', '.join(missing)}.")
-    if not start_date or not end_date:
-        errors.append("Set both the audit period start and end date.")
-    if not objective or not objective.strip():
-        errors.append("Enter an audit objective.")
-    return errors
+# ─── Binding (not a prototype concept -- see the change report) ────────────
 
+def _auto_bind(skill_id: str) -> tuple[dict[str, str], list[str]]:
+    """The prototype's landing page has no binding step at all: a run always
+    used whichever fixed demo data was already loaded. A real run needs a
+    concrete source per contract entry, so this binds by EXACT name match
+    only, never fuzzy (CLAUDE.md NN14/§0.5):
+
+      1. an uploaded, Ready file whose filename (without extension) equals
+         the contract source name exactly -- local backend only (see the
+         change report for why the UC backend is not wired here yet);
+      2. otherwise the governed-table/local-default suggestion
+         (service.suggest_bindings), itself an exact short-name match.
+
+    Returns (bindings, missing_source_names). A source with neither is left
+    out of `bindings` and named in `missing_source_names` -- the caller
+    blocks the run rather than starting one with an incomplete contract."""
+    skill = adapters.get_skill(skill_id) or {}
+    source_names = [s.get("source") for s in (skill.get("sources") or [])]
+    suggested = adapters.suggest_bindings(skill_id) or {}
+
+    uploads_by_stem: dict[str, dict] = {}
+    if adapters.is_local_backend():
+        for row in adapters.list_uploaded_files():
+            if row.get("status") == "Ready":
+                stem = Path(row["filename"]).stem
+                uploads_by_stem.setdefault(stem, row)
+
+    bindings: dict[str, str] = {}
+    missing: list[str] = []
+    for name in source_names:
+        upload_row = uploads_by_stem.get(name)
+        if upload_row is not None:
+            bindings[name] = upload_row["volume_path"]
+        elif suggested.get(name):
+            bindings[name] = suggested[name]
+        else:
+            missing.append(name)
+    return bindings, missing
+
+
+# ─── Callbacks (ported from reference_app/app.py) ───────────────────────────
 
 def register_callbacks(app) -> None:
 
     @app.callback(
-        Output("home-bindings-container", "children"),
-        Output("home-skill-sources", "data"),
-        Input("home-skill", "value"),
+        Output("data-search-results", "children"),
+        Input("data-search-input", "value"),
+        prevent_initial_call=True,
     )
-    def _rebuild_bindings(skill_id):
-        if not skill_id:
-            return [], []
-        skill = adapters.get_skill(skill_id)
-        if not skill:
-            return [html.P(f"Skill {skill_id} not found.", style={"color": "#b85042"})], []
+    def search_data_assets(query):
+        """Search governed data assets via adapter."""
+        results = adapters.search_governed_data(query or "")
+        if not results:
+            return html.P("No matching data assets found.", style={"color": "#6b7283", "fontSize": 13})
+        return [data_asset_card(a) for a in results[:6]]
 
-        # skill["sources"] (orchestrator.service.get_skill) is a list of
-        # {"source": name, "columns": [str, ...]}.
-        items = [(s.get("source"), s.get("columns") or []) for s in (skill.get("sources") or [])]
+    @app.callback(
+        Output("workflow-preview-container", "children"),
+        Input("audit-objective", "value"),
+        prevent_initial_call=False,
+    )
+    def render_workflow_preview(objective):
+        """Show the agent plan preview stages."""
+        plan = adapters.propose_plan({"mode": "playbook", "skill": adapters.get_skill(_DEFAULT_SKILL_ID), "sources_count": 3})
+        stages = plan.get("stages", [])
+        total = len(stages)
+        return html.Div([
+            html.Div(
+                [workflow_stage(s, i, total) for i, s in enumerate(stages)],
+                style={"padding": "12px 0"},
+            ),
+            demo_indicator("Preview only — workflow has not been executed") if plan.get("mock") else None,
+        ], className="panel")
 
-        try:
-            tables = adapters.list_governed_tables()
-        except Exception as exc:
-            return [html.P(f"Could not list governed tables: {exc}", style={"color": "#b85042"})], []
-        suggested = adapters.suggest_bindings(skill_id) or {}
+    @app.callback(
+        Output("run-summary-preview", "children"),
+        Input("audit-objective", "value"),
+        prevent_initial_call=False,
+    )
+    def render_run_summary(objective):
+        """Show compact confirmation summary before starting."""
+        return html.Div([
+            html.Div([
+                html.Div([
+                    html.Span("Mode", style={"fontSize": 11, "fontWeight": 700, "textTransform": "uppercase",
+                                              "color": "#6b7283", "letterSpacing": "0.03em"}),
+                    html.Div("Playbook", style={"fontSize": 13, "fontWeight": 600}),
+                ], style={"flex": 1}),
+                html.Div([
+                    html.Span("Skill", style={"fontSize": 11, "fontWeight": 700, "textTransform": "uppercase",
+                                               "color": "#6b7283", "letterSpacing": "0.03em"}),
+                    html.Div("ExCo T&E Executive Diligence", style={"fontSize": 13, "fontWeight": 600}),
+                ], style={"flex": 2}),
+                html.Div([
+                    html.Span("Data mode", style={"fontSize": 11, "fontWeight": 700, "textTransform": "uppercase",
+                                                   "color": "#6b7283", "letterSpacing": "0.03em"}),
+                    html.Div("Demo" if adapters.is_demo_mode() else "Live",
+                             style={"fontSize": 13, "fontWeight": 600}),
+                ], style={"flex": 1}),
+                html.Div([
+                    html.Span("Outputs", style={"fontSize": 11, "fontWeight": 700, "textTransform": "uppercase",
+                                                 "color": "#6b7283", "letterSpacing": "0.03em"}),
+                    html.Div("Findings, PPTX, Excel", style={"fontSize": 13, "fontWeight": 600}),
+                ], style={"flex": 1}),
+            ], style={"display": "flex", "gap": 16}),
+        ], className="panel", style={"marginTop": 12})
 
-        rows = [_binding_row(name, columns, tables, suggested) for name, columns in items]
-        if not rows:
-            rows = [html.P("This Skill's contract declares no sources.", style={"color": "#6b7283"})]
-        return rows, [name for name, _ in items]
+    @app.callback(
+        Output("uploaded-files-list", "children"),
+        Input("file-upload-area", "contents"),
+        State("file-upload-area", "filename"),
+        State("uploaded-files-list", "children"),
+        prevent_initial_call=True,
+    )
+    def handle_upload(contents_list, filename_list, existing_children):
+        """Populates the (already-existing, previously always-empty)
+        uploaded-files-list container -- no callback wired it in the
+        prototype (reference_app/app.py has no Input on file-upload-area at
+        all). Adds to `existing_children` rather than replacing it, so
+        repeated drops accumulate."""
+        if not contents_list:
+            raise PreventUpdate
+        import base64
+
+        owner = _request_owner()
+        rows = list(existing_children) if existing_children else []
+        for contents, filename in zip(contents_list, filename_list or []):
+            try:
+                _header, b64data = contents.split(",", 1)
+                content = base64.b64decode(b64data)
+                result = adapters.upload_audit_file(filename, content, owner)
+                rows.append(upload_file_row({
+                    "filename": result["filename"],
+                    "size_bytes": result["size_bytes"],
+                    "destination": result["volume_path"],
+                    "validation": result["status"],
+                }))
+            except Exception as exc:
+                rows.append(upload_file_row({
+                    "filename": filename,
+                    "size_bytes": 0,
+                    "destination": str(exc),
+                    "validation": "Failed",
+                }))
+        return rows
 
     @app.callback(
         Output("url", "pathname", allow_duplicate=True),
-        Output("home-validation-errors", "children"),
-        Input("home-start-btn", "n_clicks"),
-        State("home-skill", "value"),
-        State({"type": "home-binding", "index": ALL}, "value"),
-        State({"type": "home-binding", "index": ALL}, "id"),
-        State("home-period", "start_date"),
-        State("home-period", "end_date"),
-        State("home-objective", "value"),
-        State("home-review-plan", "value"),
+        Output("run-summary-preview", "children", allow_duplicate=True),
+        Input("start-run-btn", "n_clicks"),
+        State("audit-objective", "value"),
+        State("audit-period", "start_date"),
+        State("audit-period", "end_date"),
+        State("audit-bu", "value"),
+        State("audit-materiality", "value"),
+        State("audit-options", "value"),
         prevent_initial_call=True,
     )
-    def _start_run(n_clicks, skill_id, binding_values, binding_ids, start_date, end_date, objective, review_plan):
+    def start_run(n_clicks, objective, start_date, end_date, business_unit, materiality, options):
+        """Starts a real audit run (CLAUDE.md §2.1: start_audit_run only
+        inserts the `runs` row and hands off to the executor).
+
+        DEVIATION from the prototype: `start_demo_run` always navigated to
+        the fixed "/workspace/tne" dashboard, because it never started a
+        real run -- there was nothing to wait for. A real run is not
+        complete the instant it is created (it must clear the mandatory
+        plan-confirmation and findings-sign-off gates, CLAUDE.md §2.4
+        non-negotiable 3), so this navigates to the run's own status page
+        instead. See the change report for the alternative considered."""
         if not n_clicks:
             raise PreventUpdate
 
-        bindings = {}
-        for bid, value in zip(binding_ids or [], binding_values or []):
-            bindings[bid["index"]] = value
-        errors = validate_form(skill_id, bindings, start_date, end_date, objective)
-
-        if errors:
-            return no_update, html.Ul([html.Li(e) for e in errors])
+        options = options or []
+        bindings, missing = _auto_bind(_DEFAULT_SKILL_ID)
+        if missing:
+            return no_update, html.Div([
+                html.Div([
+                    html.Span("Mode", style={"fontSize": 11, "fontWeight": 700, "textTransform": "uppercase",
+                                              "color": "#6b7283", "letterSpacing": "0.03em"}),
+                    html.Div(
+                        "Could not start the run: no governed table or uploaded file matches "
+                        f"contract source(s) {', '.join(missing)} by exact name.",
+                        style={"fontSize": 13, "fontWeight": 600, "color": "#b85042"},
+                    ),
+                ]),
+            ], className="panel", style={"marginTop": 12})
 
         try:
             run_owner = _request_owner()
             run_id = adapters.start_audit_run(
-                skill_id=skill_id,
+                skill_id=_DEFAULT_SKILL_ID,
                 bindings=bindings,
                 audit_period=(start_date, end_date),
-                objective=objective.strip(),
+                objective=(objective or "").strip(),
                 run_owner=run_owner,
                 mode="playbook",
-                review_plan_first=bool(review_plan and "review_plan_first" in review_plan),
+                review_plan_first="preview_plan" in options,
+                business_unit=(business_unit or "").strip() or None,
+                materiality=float(materiality) if materiality not in (None, "") else None,
+                generate_management_actions="gen_actions" in options,
+                jira_preview_requested="jira_preview" in options,
             )
         except Exception as exc:  # NN14: fail loudly and visibly, never a silent default
-            return no_update, html.Ul([html.Li(f"Could not start the run: {exc}")])
-        return f"/run/{run_id}", ""
+            return no_update, html.Div([
+                html.Div([
+                    html.Span("Mode", style={"fontSize": 11, "fontWeight": 700, "textTransform": "uppercase",
+                                              "color": "#6b7283", "letterSpacing": "0.03em"}),
+                    html.Div(f"Could not start the run: {exc}",
+                             style={"fontSize": 13, "fontWeight": 600, "color": "#b85042"}),
+                ]),
+            ], className="panel", style={"marginTop": 12})
+
+        return f"/run/{run_id}", no_update

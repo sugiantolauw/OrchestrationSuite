@@ -11,6 +11,7 @@ import dash_bootstrap_components as dbc
 
 from src.platform import adapters
 from src.platform.components import (
+    demo_indicator,
     env_badge,
     kpi_card,
     run_card,
@@ -80,6 +81,7 @@ def skill_library_page() -> html.Div:
             html.P("Governed audit methodologies — searchable, versioned, reusable", className="page-subtitle"),
         ], className="page-header"),
 
+        demo_indicator() if adapters.is_demo_mode() else None,
 
         html.Div([
             dcc.Input(id="skill-search", type="text", placeholder="Search skills…",
@@ -117,6 +119,7 @@ def audit_runs_page() -> html.Div:
             html.P("Persistent audit executions across all Skills and periods", className="page-subtitle"),
         ], className="page-header"),
 
+        demo_indicator() if adapters.is_demo_mode() else None,
 
         # Summary KPIs
         html.Div([
@@ -157,6 +160,7 @@ def platform_trace_page() -> html.Div:
             html.P("Observable execution events — no chain-of-thought reasoning", className="page-subtitle"),
         ], className="page-header"),
 
+        demo_indicator() if adapters.is_demo_mode() else None,
 
         html.Div([
             dcc.Dropdown(id="trace-run-filter", options=run_options,
@@ -184,17 +188,10 @@ def platform_trace_page() -> html.Div:
 # ─── Management Actions page (cross-Skill) ──────────────────────────────────
 
 def management_actions_page() -> html.Div:
-    # B3 (CLAUDE.md P2/P3 gate review): no cross-finding/cross-run exposure
-    # total here. A management action's potential_exposure is None for a
-    # non-monetary finding (CLAUDE.md NN14 -- never a fabricated 0), and even
-    # where every action carries a number, summing exposure across findings
-    # and across runs mixes overlapping populations and different monetary
-    # bases (B2) into a figure with no defensible meaning. Each run's own
-    # de-duplicated headline (CLAUDE.md §0.3) is shown on that run's own page
-    # instead of being re-summed here.
     actions = adapters.list_management_actions()
     skills_for_filter = sorted(set(a.get("skill_name", "") for a in actions))
 
+    total_exposure = sum(a.get("potential_exposure") or 0 for a in actions)
     open_count = sum(1 for a in actions if a.get("status") in ("Open", "Under review"))
     high_count = sum(1 for a in actions if a.get("risk") == "High")
 
@@ -204,10 +201,19 @@ def management_actions_page() -> html.Div:
             html.P("Cross-Skill action tracker — all findings, all runs", className="page-subtitle"),
         ], className="page-header"),
 
+        demo_indicator() if adapters.is_demo_mode() else None,
+
+        html.Div([
+            html.Span("◆", style={"color": "#e0952a", "marginRight": 4}),
+            html.Span("Session-only persistence in demo mode — actions reset when the app restarts",
+                      style={"fontSize": 12, "color": "#6b4a00"}),
+        ], style={"marginBottom": 12}),
+
         html.Div([
             kpi_card("Total actions", str(len(actions))),
             kpi_card("Open / Under review", str(open_count)),
             kpi_card("High risk", str(high_count)),
+            kpi_card("Total exposure", f"${total_exposure:,.0f}"),
         ], className="plat-kpi-row", style={"marginBottom": 16}),
 
         html.Div([
@@ -263,21 +269,6 @@ def _method_section_nav(active: str) -> html.Div:
 
 
 def _method_test_row(test: dict) -> html.Tr:
-    # CLAUDE.md §0.4/G8: a threshold whose value came from an analyst-set,
-    # not-yet-policy-confirmed entry is labelled inline -- the same rule
-    # applied to findings (workspace_tne.py's _finding_card), applied here
-    # too since this table is the reader's first look at where each number
-    # in the Skill comes from.
-    provenance = test.get("threshold_provenance") or []
-    pending = any(
-        p.get("type") == "analyst-set" and p.get("pending_policy_confirmation") for p in provenance
-    )
-    threshold_cell = [html.Span(test.get("threshold", ""))]
-    if pending:
-        threshold_cell.append(html.Div(
-            "Analyst-set — pending policy confirmation",
-            style={"fontSize": 10, "color": "#6b4a00", "marginTop": 2},
-        ))
     return html.Tr([
         html.Td(test["test_id"], className="mono",
                 style={"fontWeight": 700, "color": "#1e2761", "whiteSpace": "nowrap"}),
@@ -287,7 +278,7 @@ def _method_test_row(test: dict) -> html.Tr:
         ]),
         html.Td(test["population"], style={"fontSize": 12}),
         html.Td(test["rule"], style={"fontSize": 12}),
-        html.Td(threshold_cell, style={"fontSize": 12, "whiteSpace": "nowrap"}),
+        html.Td(test["threshold"], style={"fontSize": 12, "whiteSpace": "nowrap"}),
     ])
 
 
@@ -319,20 +310,23 @@ def _tne_methodology_body(m: dict) -> list:
     # ── Data sources ───────────────────────────────────
     src_rows = []
     for s in m["data_sources"]:
+        rows = f"{s['expected_rows']:,} rows" if s.get("expected_rows") else "—"
         src_rows.append(html.Tr([
             html.Td(s["key"], className="mono", style={"fontWeight": 700, "color": "#1e2761"}),
-            html.Td(f"{s.get('columns_declared', 0):,}", style={"fontSize": 12, "textAlign": "right"}),
+            html.Td(s["filename"], style={"fontSize": 12, "fontFamily": "ui-monospace, monospace"}),
+            html.Td(s.get("sheet") or "(first sheet)", style={"fontSize": 12, "color": "#6b7283"}),
+            html.Td(rows, style={"fontSize": 12, "textAlign": "right", "whiteSpace": "nowrap"}),
         ]))
     sections.append(html.Section([
         html.A(id="data-sources"),
         html.H3("Data sources", className="method-h3"),
-        html.P("The Skill's contract sources. Each is bound to a governed table at run start "
-               "(Home); each test cites which of these it draws from.",
+        html.P("Files consumed by the Skill. Each test cites which of these it draws from.",
                className="method-para"),
         html.Div([
             html.Table([
                 html.Thead(html.Tr([
-                    html.Th("Source"), html.Th("Columns declared", style={"textAlign": "right"}),
+                    html.Th("Key"), html.Th("Filename"),
+                    html.Th("Sheet"), html.Th("Expected rows", style={"textAlign": "right"}),
                 ])),
                 html.Tbody(src_rows),
             ], className="plat-table"),
@@ -410,31 +404,30 @@ def _tne_methodology_body(m: dict) -> list:
 
     # ── Version history ────────────────────────────────
     # Read from the real skill_versions ledger (orchestrator.service.
-    # list_skill_versions) -- never fabricated dates/narratives. Empty until
-    # this Skill has actually been published/confirmed through
-    # record_skill_version (CLAUDE.md P2/P3 gate review item 4).
+    # list_skill_versions) -- never fabricated dates. The ledger records
+    # status/created_by, not a free-text change narrative, so the "Change"
+    # column (same header as the prototype) is composed from those two real
+    # fields rather than inventing prose.
     hist_rows = []
     for v in m["version_history"]:
         hist_rows.append(html.Tr([
             html.Td(f"v{v['version']}", className="mono",
                     style={"fontWeight": 700, "color": "#1e2761", "whiteSpace": "nowrap"}),
             html.Td(v["date"], style={"fontSize": 12, "color": "#6b7283", "whiteSpace": "nowrap"}),
-            html.Td(v.get("status", ""), style={"fontSize": 12.5, "color": "#3b4150"}),
-            html.Td(v.get("created_by", ""), style={"fontSize": 12.5, "color": "#6b7283"}),
+            html.Td(f"{v.get('status', '')} — recorded by {v.get('created_by', '')}",
+                    style={"fontSize": 12.5, "color": "#3b4150"}),
         ]))
     sections.append(html.Section([
         html.A(id="history"),
         html.H3("Version history", className="method-h3"),
-        html.P("Every recorded publish/confirmation of this Skill's content, from the "
-               "immutable skill_versions ledger.",
+        html.P("Every change to the Skill methodology is versioned and audit-logged.",
                className="method-para"),
         html.Div([
             html.Table([
-                html.Thead(html.Tr([html.Th("Version"), html.Th("Date"), html.Th("Status"), html.Th("Recorded by")])),
+                html.Thead(html.Tr([html.Th("Version"), html.Th("Date"), html.Th("Change")])),
                 html.Tbody(hist_rows),
             ], className="plat-table"),
-        ], className="panel", style={"overflowX": "auto"}) if hist_rows else
-        html.P("No recorded version history yet.", style={"color": "#6b7283", "fontSize": 13}),
+        ], className="panel", style={"overflowX": "auto"}),
     ], className="method-section"))
 
     return sections

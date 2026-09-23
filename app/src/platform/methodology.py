@@ -38,7 +38,13 @@ def _tne_methodology(skill_id: str) -> dict:
     for spec in sorted(skill.get("sources") or [], key=lambda s: s.get("source", "")):
         data_sources.append({
             "key": spec.get("source"),
-            "columns_declared": len(spec.get("columns") or []),
+            "filename": spec.get("file"),
+            "sheet": spec.get("sheet"),
+            # Not declared by contract.yaml (only a runtime row count exists,
+            # per run) -- left unset rather than fabricated (CLAUDE.md NN14);
+            # the data_asset_card-style "expected_rows" fallback already
+            # handles a missing value.
+            "expected_rows": None,
         })
 
     # Category order: as first encountered in catalogue.yaml's own test
@@ -105,7 +111,7 @@ def _tne_methodology(skill_id: str) -> dict:
         "evidence_traceability": (
             "Every finding cites specific metric keys. Every metric carries a source_ref "
             "identifying the source table version or uploaded-file hash, the source "
-            "columns and the aggregation grain (CLAUDE.md non-negotiable 10)."
+            "columns and the aggregation grain."
         ),
         "version_history": [
             {

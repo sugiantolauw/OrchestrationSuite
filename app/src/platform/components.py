@@ -9,8 +9,6 @@ from __future__ import annotations
 from dash import dcc, html
 import dash_bootstrap_components as dbc
 
-from orchestrator.signoff_policy import SELF_APPROVED_LABEL
-
 
 # ── KPI card ─────────────────────────────────────────────────────────────────
 
@@ -140,10 +138,7 @@ def run_card(run: dict) -> html.Div:
         html.Div([
             kpi_card("Findings", str(run.get("findings_count", 0))),
             kpi_card("High risk", str(run.get("high_risk_count", 0))),
-            kpi_card(
-                "Exposure",
-                f"${run['potential_exposure']:,.0f}" if run.get("potential_exposure") is not None else "—",
-            ),
+            kpi_card("Exposure", f"${(run.get('potential_exposure') or 0):,.0f}"),
             kpi_card("Open actions", str(run.get("open_actions", 0))),
         ], className="plat-kpi-row"),
         html.Div([
@@ -151,11 +146,6 @@ def run_card(run: dict) -> html.Div:
             html.Span(run.get("run_timestamp", "")[:16].replace("T", " "),
                       style={"fontSize": 10.5, "color": "#6b7283"}),
         ], style={"display": "flex", "justifyContent": "space-between", "marginTop": 8}),
-        demo_indicator(SELF_APPROVED_LABEL) if run.get("self_approved") else None,
-        # P3 gate review item 4: a run queued by a different deployment never
-        # progresses under THIS one -- service.list_runs's queue_note says why,
-        # using the same small-label pattern as the self-approved notice above.
-        demo_indicator(run["queue_note"]) if run.get("queue_note") else None,
         html.Div([
             html.Button("View", id={"type": "run-view-btn", "index": run["run_id"]},
                         style={"fontSize": 12, "padding": "4px 12px"}),
@@ -193,10 +183,7 @@ def action_row(action: dict) -> html.Tr:
         html.Td(action.get("owner", ""), style={"fontSize": 12}),
         html.Td(html.Span(st, className="chip", style={**st_style, "fontSize": 10, "border": "none"})),
         html.Td(action.get("target_date", ""), style={"fontSize": 12}),
-        html.Td(
-            f"${action['potential_exposure']:,.0f}" if action.get("potential_exposure") is not None else "—",
-            style={"fontSize": 12, "fontFamily": "monospace"},
-        ),
+        html.Td(f"${(action.get('potential_exposure') or 0):,.0f}", style={"fontSize": 12, "fontFamily": "monospace"}),
         html.Td(action.get("evidence_link", ""), style={"fontSize": 11, "fontFamily": "monospace", "color": "#6b7283"}),
     ])
 
@@ -321,10 +308,8 @@ def env_badge(label: str) -> html.Span:
         "Demo": {"background": "#fffbf0", "color": "#6b4a00"},
         "Non-production": {"background": "#e8f4fd", "color": "#0a5e8a"},
         "Live": {"background": "#eaf5ee", "color": "#2c7a4b"},
-        "Local test data": {"background": "#fffbf0", "color": "#6b4a00"},
-        "Unity Catalog": {"background": "#eaf5ee", "color": "#2c7a4b"},
     }
-    st = colors.get(label, {"background": "#f0f1f4", "color": "#6b7283"})
+    st = colors.get(label, colors["Demo"])
     return html.Span(label, className="chip", style={
         **st, "fontSize": 10.5, "fontWeight": 700, "border": "none",
         "padding": "3px 10px", "letterSpacing": "0.03em",
