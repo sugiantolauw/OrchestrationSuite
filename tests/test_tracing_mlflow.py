@@ -265,6 +265,24 @@ def test_mlflow_adapter_marks_failed_span(tmp_path, monkeypatch):
     assert span.data.tags["orchestrator_outcome"] == "failed"
 
 
+def test_unset_tracking_uri_is_unavailable_and_never_touches_mlflow(tmp_path, monkeypatch):
+    # Regression: an unset tracking_uri must NOT fall through to mlflow's own
+    # default resolution, which silently creates a real local tracking store
+    # (./mlflow.db / ./mlruns) the first time anything touches it -- found
+    # live when every test constructing an AppContext without
+    # MLFLOW_TRACKING_URI set was writing to a shared repo-root mlflow.db.
+    from orchestrator.adapters.tracing_mlflow import MLflowTracingAdapter
+
+    monkeypatch.chdir(tmp_path)
+    adapter = MLflowTracingAdapter(tracking_uri=None)
+    assert not adapter.available
+    assert "not configured" in adapter.unavailable_reason or "unset" in adapter.unavailable_reason
+    assert adapter.start_run("RUN-1") == ""
+    assert adapter.start_span(run_id="RUN-1", node_name="x") == ""
+    assert not (tmp_path / "mlflow.db").exists()
+    assert not (tmp_path / "mlruns").exists()
+
+
 def test_mlflow_adapter_unavailable_is_a_documented_no_op(monkeypatch):
     import orchestrator.adapters.tracing_mlflow as mod
 

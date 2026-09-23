@@ -6,12 +6,18 @@ status, all first-class on a run -- maps onto exactly what a node attempt
 needs, with no separate tracing backend to stand up).
 
 CLAUDE.md §2.3 rule 4 / non-negotiable 13: tracing NEVER changes the audit
-result and NEVER silently pretends. If `mlflow` cannot be imported, or the
-tracking URI/experiment cannot be reached, `available` is False and every
-call is a documented no-op returning `""`; the caller
-(`orchestrator.pipeline.run_phase`) is responsible for recording ONE
+result and NEVER silently pretends. If no `tracking_uri` is configured, `mlflow`
+cannot be imported, or the tracking URI/experiment cannot be reached,
+`available` is False and every call is a documented no-op returning `""`; the
+caller (`orchestrator.pipeline.run_phase`) is responsible for recording ONE
 "tracing unavailable" trace_event and proceeding -- this module never raises
-out of a tracing call into the pipeline.
+out of a tracing call into the pipeline. An unset `tracking_uri` is
+deliberately treated as unavailable rather than falling through to mlflow's
+own default resolution, which in some environments silently creates a real
+local tracking store (`./mlflow.db` / `./mlruns`) the first time anything
+touches it -- an uncontrolled side effect every caller that never asked for
+tracing (most tests) would otherwise trigger just by constructing this
+adapter.
 
 Uses `mlflow.tracking.MlflowClient` directly rather than the fluent
 `mlflow.start_run`/active-run-stack API: the fluent API's "current active
@@ -38,6 +44,20 @@ class MLflowTracingAdapter:
         self._experiment_id: str | None = None
         self._run_id_cache: dict[str, str] = {}
         self._lock = threading.Lock()
+
+        # "Not configured" (no explicit tracking_uri) is treated as
+        # unavailable, NEVER as "fall through to mlflow's own default
+        # resolution" -- mlflow's default in this environment silently
+        # creates a real ./mlflow.db or ./mlruns store the first time a
+        # client touches it, which is exactly the kind of surprise,
+        # uncontrolled side effect (found live: every test constructing an
+        # AppContext without MLFLOW_TRACKING_URI set was writing to a
+        # shared repo-root mlflow.db) CLAUDE.md NN14 warns against. A real
+        # deployment sets MLFLOW_TRACKING_URI explicitly (.env.example);
+        # nothing here ever guesses one.
+        if not tracking_uri:
+            self.unavailable_reason = "no tracking_uri configured (MLFLOW_TRACKING_URI unset)"
+            return
 
         try:
             from mlflow.tracking import MlflowClient
