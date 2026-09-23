@@ -1708,6 +1708,21 @@ Source files are in `synthetic_data/`; row counts match `FILE_REGISTRY` exactly.
   (including hotels). Build the Surface 1 harness so the list can be dropped in there.
 - **LLM calls in this development workspace are approved** for schemas, counts, null rates and other
   aggregates (never rows). Model region and governance are re-decided at the Optus port.
+- **Skills stay in our own `skill_versions` ledger** (content-hash pinned per run). Unity Catalog
+  Skills (Beta, 2026-08) hold assistant instructions, not executable methodology, document no
+  version pinning and load over MCP; an optional "publish to UC Skills" step comes later, once GA and
+  confirmed at Optus.
+- **Lifecycle roadmap (approved 2026-09-23), in order:** (1) restore the prototype UI;
+  (2) Explorer Mode with the P6 LLM layer (model client, `llm_calls`, `llm_cache`); (3) clickable
+  mockups of the lifecycle modules (engagement home, risk register and assessment, planning/RCM,
+  issues, risk sensing), built from existing components only, **approved by the user before any
+  build** — existing pages never change; (4) research foundation: `JobsExecutor`, a
+  `KnowledgeSourceAdapter` over a UC Volume document drop with document-level cache, and a bounded
+  multi-agent research package (hard call/cost ceilings, every query and read logged, citations
+  mandatory, G17) — confined to sensing/assessment per NN1's exception, never imported by fieldwork;
+  (5) Risk Assessment v1 — agent-proposed, cited, four-dimension scoring shown as proposals, nothing
+  accepted without an auditor; the scoring methodology stays the enterprise risk function's to
+  supply.
 
 ---
 
