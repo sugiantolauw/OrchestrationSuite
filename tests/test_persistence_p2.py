@@ -272,6 +272,32 @@ def test_write_findings_persists_analyst_set_severity_and_severity_basis(persist
     assert listed[omitted["finding_id"]]["analyst_set_severity"] is None
 
 
+def test_write_findings_persists_indeterminate_severity(persistence, uid):
+    """Item 4 (CLAUDE.md NN14, P2/P3 gate review), migration 005: a finding
+    whose severity ladder could not be evaluated (a missing metric) round-
+    trips its severity='Indeterminate' / severity_basis='indeterminate'
+    through both backends -- the CHECK constraint on both must accept these
+    exact values, not just 'High'/'Medium'/'Low' and 'fixed'/'threshold'."""
+    run_id = f"RUN-{uid}"
+    skill_id = f"SKILL-{uid}"
+    finding = _finding(
+        f"{run_id}:T1", rule_id=f"{skill_id}.T1",
+        severity="Indeterminate", severity_rule="severity rule 'x > thresholds.y' could not be evaluated: metric(s) ['x'] unavailable",
+        analyst_set_severity=False, severity_basis="indeterminate",
+    )
+    written = persistence.write_findings(
+        run_id, [finding], engagement_id="ENG-DEFAULT", skill_id=skill_id, skill_version="1.0.0",
+        now=canonical_ts(0),
+    )
+    assert written[0]["severity"] == "Indeterminate"
+    assert written[0]["severity_basis"] == "indeterminate"
+    assert written[0]["analyst_set_severity"] is False
+
+    listed = persistence.list_findings(run_id)
+    assert listed[0]["severity"] == "Indeterminate"
+    assert listed[0]["severity_basis"] == "indeterminate"
+
+
 def test_write_findings_idempotent_rewrite_same_set_no_duplicates(persistence, uid):
     run_id = f"RUN-{uid}"
     skill_id = f"SKILL-{uid}"

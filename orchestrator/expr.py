@@ -191,3 +191,16 @@ def evaluate(compiled: CompiledExpr, metrics: dict[str, Any], thresholds: dict[s
     larger expression, not silently become True."""
     result = _eval(compiled.tree.body, metrics, thresholds)
     return bool(result) if result is not None else False
+
+
+def evaluate_ternary(compiled: CompiledExpr, metrics: dict[str, Any], thresholds: dict[str, Any]) -> bool | None:
+    """Same Kleene evaluation as `evaluate()`, WITHOUT collapsing a top-level
+    Unknown to False -- item 4 (CLAUDE.md NN14, P2/P3 gate review): a caller
+    walking a severity ladder must be able to tell "this rule's condition is
+    genuinely False" (fall through to the next rung) apart from "this rule's
+    condition could not be evaluated because a metric it needs is missing"
+    (an Indeterminate severity, never silently treated as if the rule had
+    evaluated False and fallen through to a lower rung). `evaluate()` stays
+    the right choice for a `trigger` (a missing metric must never make a
+    finding fire by accident) -- this is for severity selection only."""
+    return _eval(compiled.tree.body, metrics, thresholds)

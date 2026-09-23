@@ -135,6 +135,33 @@ def test_severity_falls_to_else_low():
     assert f["analyst_set_severity"] is True
 
 
+def test_severity_indeterminate_when_a_when_clauses_metric_is_missing():
+    """Item 4 (CLAUDE.md NN14, P2/P3 gate review): a severity `when` whose
+    own metric is missing is Kleene-UNKNOWN, not False -- it must not
+    silently fall through to a lower rung (here, straight to "Low") as if
+    the High rule had genuinely been checked and failed. Must report
+    severity="Indeterminate" with severity_basis naming the missing metric,
+    never a real severity level."""
+    skill = _skill(_findings_yaml(
+        severity=[
+            {"when": "missing_metric > thresholds.high_threshold", "then": "High"},
+            {"else": "Low"},
+        ],
+    ))
+    # hv_count present (fires the trigger) but "missing_metric" was never
+    # produced by any test this run -- absent from `metrics` entirely, same
+    # as a not_testable test's metric.
+    metrics = {"hv_count": _metric(5, "count"), "hv_amount": _metric(500.0, "AUD")}
+    findings = build_findings(skill, run_id="run-1", metrics=metrics)
+    assert len(findings) == 1
+    f = findings[0]
+    assert f["severity"] == "Indeterminate"
+    assert f["severity"] != "Low"
+    assert f["severity_basis"] == "indeterminate"
+    assert "missing_metric" in f["severity_rule"]
+    assert f["analyst_set_severity"] is False
+
+
 def test_template_formatting_by_unit():
     assert format_metric_value(1234, "count") == "1,234"
     assert format_metric_value(1234.5, "AUD") == "$1,234.50"

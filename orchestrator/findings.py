@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from orchestrator.expr import compile_expr, evaluate
+from orchestrator.expr import compile_expr, evaluate, evaluate_ternary
 from orchestrator.skills import Skill
 
 
@@ -28,21 +28,38 @@ def _format_template(
 
 def _select_severity(
     severity_rules: list[dict], metric_values: dict[str, Any], threshold_values: dict[str, Any]
-) -> tuple[str, str, set[str]]:
+) -> tuple[str, str, set[str], str | None]:
     """Walks the severity ladder, returning the rule that fires plus every
     threshold CONSULTED getting there (B4): every `when` evaluated -- including
     the ones that came back false before the rule that matched -- not just the
     threshold(s) named by the winning rule. A bare `else` with nothing tested
-    before it consults none, which is exactly what marks it 'fixed' severity."""
+    before it consults none, which is exactly what marks it 'fixed' severity.
+
+    Item 4 (CLAUDE.md NN14, P2/P3 gate review): a `when` whose metric(s) are
+    missing is Kleene-UNKNOWN, not False (`evaluate_ternary`, never the
+    trigger's own collapsing `evaluate()`) -- it must not silently fall
+    through to a lower rung as if the condition had genuinely failed. That
+    would let a rule intended to catch a High-severity case instead render
+    Medium/Low with no sign anything was wrong. Returns ("Indeterminate",
+    when_text, consulted_so_far, reason) instead, where `reason` names the
+    missing metric(s); every other path returns reason=None."""
     consulted: set[str] = set()
     for rule in severity_rules:
         if "when" in rule:
             compiled = compile_expr(rule["when"])
             consulted |= set(compiled.threshold_ids)
-            if evaluate(compiled, metric_values, threshold_values):
-                return rule["then"], rule["when"], consulted
+            result = evaluate_ternary(compiled, metric_values, threshold_values)
+            if result is None:
+                missing = sorted(n for n in compiled.metric_names if metric_values.get(n) is None)
+                reason = (
+                    f"severity rule {rule['when']!r} could not be evaluated: "
+                    f"metric(s) {missing} unavailable"
+                )
+                return "Indeterminate", reason, consulted, reason
+            if result:
+                return rule["then"], rule["when"], consulted, None
         elif "else" in rule:
-            return rule["else"], "else", consulted
+            return rule["else"], "else", consulted, None
     raise ValueError("no severity rule matched, and no 'else' entry was present")
 
 
@@ -68,7 +85,7 @@ def build_findings(
         if not evaluate(trigger, metric_values, threshold_values):
             continue
 
-        severity, severity_rule_text, severity_threshold_ids = _select_severity(
+        severity, severity_rule_text, severity_threshold_ids, indeterminate_reason = _select_severity(
             rule["severity"], metric_values, threshold_values
         )
 
@@ -107,12 +124,23 @@ def build_findings(
         # true unless every one of them carries provenance 'policy' -- one
         # analyst-set threshold anywhere in the path that was walked is enough
         # to mark the whole severity call analyst-set.
-        severity_basis = "threshold" if severity_threshold_ids else "fixed"
-        if severity_basis == "fixed":
-            analyst_set_severity = True
+        if indeterminate_reason is not None:
+            # Item 4: a distinct severity_basis enum value (DDL CHECK
+            # constraint: 'fixed' | 'threshold' | 'indeterminate', migration
+            # 005) -- the actual explanation of WHICH metric was missing is
+            # in severity_rule (unconstrained text, already `reason` here).
+            # An Indeterminate severity is never counted as Low, never
+            # attributed to an analyst-set threshold it never actually
+            # consulted.
+            severity_basis = "indeterminate"
+            analyst_set_severity = False
         else:
-            consulted_refs = [r for r in threshold_refs if r["id"] in severity_threshold_ids]
-            analyst_set_severity = not all(r["provenance_type"] == "policy" for r in consulted_refs)
+            severity_basis = "threshold" if severity_threshold_ids else "fixed"
+            if severity_basis == "fixed":
+                analyst_set_severity = True
+            else:
+                consulted_refs = [r for r in threshold_refs if r["id"] in severity_threshold_ids]
+                analyst_set_severity = not all(r["provenance_type"] == "policy" for r in consulted_refs)
 
         test = test_lookup.get(rule["test_id"], {})
 
