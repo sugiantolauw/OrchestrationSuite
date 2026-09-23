@@ -140,7 +140,10 @@ def run_card(run: dict) -> html.Div:
         html.Div([
             kpi_card("Findings", str(run.get("findings_count", 0))),
             kpi_card("High risk", str(run.get("high_risk_count", 0))),
-            kpi_card("Exposure", f"${run.get('potential_exposure', 0):,.0f}"),
+            kpi_card(
+                "Exposure",
+                f"${run['potential_exposure']:,.0f}" if run.get("potential_exposure") is not None else "—",
+            ),
             kpi_card("Open actions", str(run.get("open_actions", 0))),
         ], className="plat-kpi-row"),
         html.Div([
@@ -190,7 +193,10 @@ def action_row(action: dict) -> html.Tr:
         html.Td(action.get("owner", ""), style={"fontSize": 12}),
         html.Td(html.Span(st, className="chip", style={**st_style, "fontSize": 10, "border": "none"})),
         html.Td(action.get("target_date", ""), style={"fontSize": 12}),
-        html.Td(f"${action.get('potential_exposure', 0):,.0f}", style={"fontSize": 12, "fontFamily": "monospace"}),
+        html.Td(
+            f"${action['potential_exposure']:,.0f}" if action.get("potential_exposure") is not None else "—",
+            style={"fontSize": 12, "fontFamily": "monospace"},
+        ),
         html.Td(action.get("evidence_link", ""), style={"fontSize": 11, "fontFamily": "monospace", "color": "#6b7283"}),
     ])
 

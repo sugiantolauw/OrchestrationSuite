@@ -17,16 +17,21 @@ def _completed_run():
     return run_id
 
 
-def test_exposure_summary_says_not_yet_computed_when_all_none():
+def test_exposure_summary_says_not_available_when_all_none():
     findings = [{"exposure_amount": None}, {"exposure_amount": None}]
-    assert "Not yet computed" in workspace_tne._exposure_summary(findings)
+    assert "Not available" in workspace_tne._exposure_summary(findings)
 
 
-def test_exposure_summary_sums_known_values_and_never_fabricates():
+def test_exposure_summary_never_sums_per_finding_amounts_without_a_headline():
+    """B4 (CLAUDE.md NN14, P2/P3 gate review): with no run-level headline in
+    the payload, this must NOT fall back to summing each finding's own
+    exposure_amount -- that double-counts a row cited by more than one
+    finding, the exact bug the headline exists to prevent (CLAUDE.md §0.3).
+    It must say the headline is not available, never show a fabricated sum."""
     findings = [{"exposure_amount": 100.0}, {"exposure_amount": None}]
     summary = workspace_tne._exposure_summary(findings)
-    assert "$100" in summary
-    assert "1 finding(s) still pending" in summary
+    assert "$100" not in summary
+    assert "Not available" in summary
 
 
 def test_exposure_summary_prefers_the_run_headline_over_summing_findings():
@@ -72,12 +77,28 @@ def test_finding_card_flags_analyst_set_threshold():
     finding = {
         "severity": "High", "test_id": "T4.1", "title": "Missing receipts",
         "observation": "obs", "recommendation": "rec", "management_questions": ["q?"],
-        "analyst_set_severity": True, "exposure_amount": None,
+        "analyst_set_severity": True, "severity_basis": "threshold", "exposure_amount": None,
     }
     card = workspace_tne._finding_card(0, finding)
     text = str(card)
     assert "Analyst-set threshold" in text
     assert "not yet computed" in text
+
+
+def test_finding_card_hides_the_threshold_chip_for_fixed_severity():
+    """Item 7 (CLAUDE.md P2/P3 gate review): a fixed severity (a bare
+    `else:` rule, no `when` at all) consults no threshold -- the
+    "Analyst-set threshold" chip names a threshold that does not exist for
+    this finding, so it must not render, even though analyst_set_severity is
+    True (findings.py sets it True for a fixed severity too, by definition)."""
+    finding = {
+        "severity": "Medium", "test_id": "T3.1a", "title": "Unlinked travel requests",
+        "observation": "obs", "recommendation": "rec", "management_questions": [],
+        "analyst_set_severity": True, "severity_basis": "fixed", "exposure_amount": None,
+    }
+    card = workspace_tne._finding_card(0, finding)
+    text = str(card)
+    assert "Analyst-set threshold" not in text
 
 
 def test_finding_card_raises_if_analyst_set_severity_was_never_persisted():

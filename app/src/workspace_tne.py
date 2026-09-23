@@ -431,12 +431,14 @@ def _build_header(run: dict, payload: dict | None = None) -> html.Div:
 # ── Executive brief tab ──────────────────────────────────────────────────────
 
 def _exposure_summary(findings: list[dict], payload: dict | None = None) -> str:
-    """Prefers the run's own de-duplicated exposure headline
-    (get_run_payload()["exposure"], CLAUDE.md §0.3) over summing each
-    finding's own exposure_amount, which double-counts overlapping
-    populations — exactly the bug §0.3 describes. Falls back to an honest
-    "not yet computed" rather than either fabricating a number or reusing
-    the double-counted one."""
+    """Only ever shows the run's own de-duplicated exposure headline
+    (get_run_payload()["exposure"], CLAUDE.md §0.3). B4 (CLAUDE.md NN14,
+    P2/P3 gate review): this used to fall back to summing each finding's own
+    exposure_amount when no headline was present -- the exact double-count
+    §0.3 exists to prevent (the same row can be cited by more than one
+    finding). No fallback sum, ever: an absent headline is reported as
+    explicitly not available, never silently replaced by a different, wrong
+    number."""
     exposure = (payload or {}).get("exposure") or {}
     headline = exposure.get("headline")
     if headline is not None:
@@ -444,13 +446,7 @@ def _exposure_summary(findings: list[dict], payload: dict | None = None) -> str:
         return f"${headline:,.0f}" + (f" — {basis}" if basis else "")
     if not findings:
         return "No findings"
-    amounts = [f.get("exposure_amount") for f in findings]
-    if all(a is None for a in amounts):
-        return "Not yet computed — pending de-duplicated exposure figure (CLAUDE.md §0.3, P3)"
-    total = sum(a for a in amounts if a is not None)
-    missing = sum(1 for a in amounts if a is None)
-    note = f" ({missing} finding(s) still pending)" if missing else ""
-    return f"${total:,.0f}{note}"
+    return "Not available — the run's de-duplicated exposure headline has not been computed (CLAUDE.md §0.3)"
 
 
 def _executive_tab(run: dict, findings: list[dict], payload: dict | None, actions: list[dict], frames: dict | None = None) -> html.Div:
@@ -590,7 +586,15 @@ def _finding_card(idx: int, finding: dict) -> html.Article:
         html.Span(severity, className="chip", style={"color": color, "borderColor": color}),
         html.Span(test_id, className="chip mono", style={"color": "#6b7283"}),
     ]
-    if finding["analyst_set_severity"]:
+    # Item 7 (CLAUDE.md P2/P3 gate review): the chip's own text names a
+    # THRESHOLD ("Analyst-set threshold") -- it must not render for a fixed
+    # severity (severity_basis == "fixed", e.g. a bare `else: Medium` rule
+    # with no `when` at all), which consulted no threshold whatsoever.
+    # analyst_set_severity is True for BOTH cases by design (findings.py: a
+    # fixed severity is analyst-set by definition, just not by a threshold
+    # lookup) -- gating on severity_basis too is what keeps the chip's own
+    # wording honest about what actually happened.
+    if finding["analyst_set_severity"] and finding.get("severity_basis") == "threshold":
         summary_items.append(html.Span(
             "Analyst-set threshold — pending policy confirmation", className="chip",
             style={"color": "#6b4a00", "borderColor": "#e0952a", "fontSize": 10.5},

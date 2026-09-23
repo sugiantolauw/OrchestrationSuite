@@ -74,6 +74,30 @@ def test_management_actions_page_builds():
     assert management_actions_page() is not None
 
 
+def test_management_actions_page_renders_none_exposure_without_crashing(monkeypatch):
+    """B3 (CLAUDE.md P2/P3 gate review): a management action drawn from a
+    non-monetary finding carries potential_exposure=None (CLAUDE.md NN14 --
+    never a fabricated 0), and `.get("potential_exposure", 0)` does NOT
+    substitute a default when the key is present with value None -- it
+    raised TypeError formatting None as a float. Must render "-" instead,
+    never crash, and the page must carry no cross-finding exposure total."""
+    import fake_service
+
+    def _fake_list_management_actions(ctx, filters=None):
+        return [{
+            "action_id": "MA-1", "finding_id": "F1", "finding_title": "Non-monetary finding",
+            "run_id": "RUN-1", "skill_id": "SKILL-001", "skill_name": "T&E ExCo",
+            "risk": "Medium", "owner": None, "status": "Open", "target_date": None,
+            "potential_exposure": None, "evidence_link": "T6.1a",
+        }]
+
+    monkeypatch.setattr(fake_service, "list_management_actions", _fake_list_management_actions)
+    layout = management_actions_page()
+    text = str(layout)
+    assert "—" in text
+    assert "Total exposure" not in text
+
+
 def test_run_page_builds_for_unknown_run():
     layout = run_status.run_page("RUN-DOES-NOT-EXIST")
     assert layout is not None

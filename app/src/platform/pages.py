@@ -184,10 +184,17 @@ def platform_trace_page() -> html.Div:
 # ─── Management Actions page (cross-Skill) ──────────────────────────────────
 
 def management_actions_page() -> html.Div:
+    # B3 (CLAUDE.md P2/P3 gate review): no cross-finding/cross-run exposure
+    # total here. A management action's potential_exposure is None for a
+    # non-monetary finding (CLAUDE.md NN14 -- never a fabricated 0), and even
+    # where every action carries a number, summing exposure across findings
+    # and across runs mixes overlapping populations and different monetary
+    # bases (B2) into a figure with no defensible meaning. Each run's own
+    # de-duplicated headline (CLAUDE.md §0.3) is shown on that run's own page
+    # instead of being re-summed here.
     actions = adapters.list_management_actions()
     skills_for_filter = sorted(set(a.get("skill_name", "") for a in actions))
 
-    total_exposure = sum(a.get("potential_exposure", 0) for a in actions)
     open_count = sum(1 for a in actions if a.get("status") in ("Open", "Under review"))
     high_count = sum(1 for a in actions if a.get("risk") == "High")
 
@@ -197,18 +204,10 @@ def management_actions_page() -> html.Div:
             html.P("Cross-Skill action tracker — all findings, all runs", className="page-subtitle"),
         ], className="page-header"),
 
-
-        html.Div([
-            html.Span("◆", style={"color": "#e0952a", "marginRight": 4}),
-            html.Span("Session-only persistence in demo mode — actions reset when the app restarts",
-                      style={"fontSize": 12, "color": "#6b4a00"}),
-        ], style={"marginBottom": 12}),
-
         html.Div([
             kpi_card("Total actions", str(len(actions))),
             kpi_card("Open / Under review", str(open_count)),
             kpi_card("High risk", str(high_count)),
-            kpi_card("Total exposure", f"${total_exposure:,.0f}"),
         ], className="plat-kpi-row", style={"marginBottom": 16}),
 
         html.Div([

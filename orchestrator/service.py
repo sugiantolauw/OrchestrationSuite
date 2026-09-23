@@ -633,7 +633,11 @@ def list_runs(ctx: AppContext, filters: dict | None = None) -> list[dict]:
                 "status": str(r["status"]).replace("_", " ").title(),
                 "findings_count": len(findings),
                 "high_risk_count": sum(1 for f in findings if f["severity"] == "High"),
-                "potential_exposure": exposure_metric["value"] if exposure_metric else 0,
+                # B4 (CLAUDE.md NN14): a run that has not yet reached
+                # `prioritise` (or one whose whole finding set is non-monetary)
+                # has no run_exposure_headline metric -- None, never a
+                # fabricated 0 that would misrepresent "nothing at risk".
+                "potential_exposure": exposure_metric["value"] if exposure_metric else None,
                 "open_actions": len(open_actions),
                 "last_updated": r["last_state_change_at"],
                 "has_workspace": bool(skill_entry and skill_entry.get("has_workspace")),
