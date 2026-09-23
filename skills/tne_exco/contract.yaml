@@ -5,6 +5,18 @@ sources:
     sheet: data
     file: Expense_Report_Combined.xlsx
     header_trim: false
+    # B2 (CLAUDE.md P2/P3 gate review): the transaction entry key for this
+    # source's run headline de-duplication (orchestrator.nodes.fieldwork.
+    # prioritise) -- real declared columns, never a positional row index.
+    # T4.1's own semi-join key to the missing_receipt register (spec T4.1,
+    # docs/specs/SKILL-001_test_specification.md), sharpened with the report
+    # key so two genuinely distinct lines that happen to share employee/date/
+    # type/amount (but belong to different reports) are never collapsed into
+    # one entry -- and, deliberately, so two T5.2 DUPLICATE lines (same
+    # employee/date/vendor/amount but DIFFERENT Report Legacy Key, since a
+    # duplicate is a second, separate submission) are never collapsed either:
+    # both are real, distinct reimbursement events.
+    entry_key: [Employee ID, Report Legacy Key, Transaction Date, Expense Type, Expense Amount (reimbursement currency)]
     columns:
       Employee:
         type: string
@@ -64,6 +76,12 @@ sources:
     sheet: Sheet1
     file: Attendee_Validity_Report.xlsx
     header_trim: false
+    # B2: T3.3b's own "Entry identity" (spec T3.3b) -- this source is
+    # attendee-grain (one row per attendee of one entertainment entry), so
+    # several flagged rows legitimately share one entry_key; the headline's
+    # de-duplication collapses them to that single entry, never summing the
+    # same Entry Amount once per attendee.
+    entry_key: [Employee ID, Report Name, Transaction Date, Vendor, Entry Amount]
     columns:
       Employee ID:
         type: integer

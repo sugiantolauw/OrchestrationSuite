@@ -162,6 +162,10 @@ def build_findings(
                 "control_id": test.get("control_id"),
                 "risk_id": test.get("risk_id"),
                 "assertion": test.get("assertion"),
+                # B2 (CLAUDE.md P2/P3 gate review): required on every
+                # findings.yaml rule (validate_skill enforces it), read
+                # straight through -- never invented here.
+                "monetary_basis": rule["monetary_basis"],
                 "exposure_amount": None,
                 "exposure_basis": "pending P3 de-duplicated exposure",
                 "review_state": "draft",

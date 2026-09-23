@@ -100,7 +100,7 @@ _FINDING_COLUMNS = (
     "metrics_cited_json", "evidence_refs_json", "observation", "recommendation",
     "management_questions_json", "exposure_amount", "exposure_basis", "theme_id",
     "review_state", "prior_finding_id", "recurrence_count", "created_at", "updated_at",
-    "analyst_set_severity", "severity_basis",
+    "analyst_set_severity", "severity_basis", "monetary_basis",
 )
 
 # On a re-write of a finding_id that already exists (a node overwriting its own prior
@@ -212,6 +212,7 @@ def _finding_row_values(
         # raise rather than defaulting False when the persisted value is None.
         "analyst_set_severity": finding.get("analyst_set_severity"),
         "severity_basis": finding.get("severity_basis"),
+        "monetary_basis": finding.get("monetary_basis"),
     }
 
 

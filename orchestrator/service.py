@@ -731,6 +731,7 @@ def get_run_payload(ctx: AppContext, run_id: str) -> dict:
 
     not_testable = [t for t in state.test_results if t["status"] == "not_testable"]
     exposure_metric = metrics.get("run_exposure_headline")
+    approved_not_spent_metric = metrics.get("run_approved_not_spent_total")
 
     return {
         "run_id": run_id,
@@ -741,9 +742,17 @@ def get_run_payload(ctx: AppContext, run_id: str) -> dict:
         "not_testable": not_testable,
         "findings": findings,
         "reconciliation": state.reconciliation,
+        # B2 (CLAUDE.md P2/P3 gate review): "headline" is the "Gross value of
+        # flagged spend (de-duplicated)" figure -- never call it "exposure" in
+        # a UI label, that word implies every dollar is at risk, which
+        # 'excess'-basis findings (only the over-limit portion) contradict.
+        # approved_not_spent is reported alongside it, never inside it.
         "exposure": {
             "headline": exposure_metric["value"] if exposure_metric else None,
             "basis": (exposure_metric.get("source_ref") or {}).get("basis") if exposure_metric else None,
+            "label": (exposure_metric.get("source_ref") or {}).get("label") if exposure_metric else None,
+            "sources": (exposure_metric.get("source_ref") or {}).get("sources") if exposure_metric else None,
+            "approved_not_spent_total": approved_not_spent_metric["value"] if approved_not_spent_metric else None,
         },
     }
 

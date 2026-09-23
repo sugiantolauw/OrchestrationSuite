@@ -16,6 +16,12 @@ findings:
     severity:
       - else: Medium
     metrics_cited: [preapproval_unlinked_count, preapproval_unlinked_amount, preapproval_employees]
+    # B2 (CLAUDE.md P2/P3 gate review): preapproval_unlinked_amount is the
+    # APPROVED travel request amount that was never turned into an expense
+    # claim -- money that was authorised but never spent, not a reimbursed
+    # transaction. Reported separately from the run headline (never summed
+    # into "gross value of flagged spend").
+    monetary_basis: approved_not_spent
     observation: >
       {preapproval_unlinked_count} pre-approved travel requests totalling
       {preapproval_unlinked_amount} across {preapproval_employees} employees do not
@@ -42,6 +48,8 @@ findings:
         then: Medium
       - else: Low
     metrics_cited: [no_preapproval_bookings, no_preapproval_employees, t31b_name_match_rate]
+    # B2: no dollar figure is cited -- non-monetary.
+    monetary_basis: none
     # Item 7 (CLAUDE.md P2/P3 gate review): reworded from an unattributed
     # "Policy requires" to cite the catalogue's own control objective
     # (catalogue.yaml T3.1b) instead of asserting an uncited policy.
@@ -77,6 +85,8 @@ findings:
         then: Medium
       - else: Low
     metrics_cited: [pref_dom_airline, pref_int_airline, pref_dom_car, pref_int_car]
+    # B2: no dollar figure is cited -- non-monetary.
+    monetary_basis: none
     observation: >
       {pref_dom_airline} domestic and {pref_int_airline} international airline
       bookings, and {pref_dom_car} domestic and {pref_int_car} international car
@@ -100,6 +110,8 @@ findings:
         then: High
       - else: Medium
     metrics_cited: [late_booking_count_dom, late_booking_count_int, very_late_booking_count, late_booking_employees_dom, late_booking_employees_int]
+    # B2: no dollar figure is cited -- non-monetary.
+    monetary_basis: none
     observation: >
       {late_booking_count_dom} domestic bookings were made less than the applicable
       advance-purchase threshold before departure, and {late_booking_count_int}
@@ -126,6 +138,11 @@ findings:
     severity:
       - else: Low
     metrics_cited: [ent_over_internal_count, ent_over_external_count, ent_over_amount, ent_assessed]
+    # B2: ent_over_amount is plan.yaml's `kind: sum` of the FULL Entry
+    # Amount of each over-per-head-threshold entertainment entry (not an
+    # excess-over-limit figure -- there is no per-entry limit, only a
+    # per-head one) -- real reimbursed spend, flagged as over-threshold.
+    monetary_basis: spend
     observation: >
       Of {ent_assessed} entertainment entries assessed, {ent_over_internal_count}
       exceeded the internal per-head threshold and {ent_over_external_count}
@@ -155,6 +172,9 @@ findings:
     # (analyst-set, pending policy confirmation), never a bare number written
     # into this template.
     thresholds_cited: [t41_auto_reject_amount]
+    # B2: missing_receipt_amount is plan.yaml's `kind: sum` of the FULL
+    # Expense Amount of claims missing a receipt -- real reimbursed spend.
+    monetary_basis: spend
     observation: >
       {missing_receipt_count} claims ({missing_receipt_pct} of total) are missing
       receipt documentation, representing {missing_receipt_amount} in unsupported
@@ -178,6 +198,8 @@ findings:
         then: High
       - else: Medium
     metrics_cited: [att_missing_count, att_total, att_missing_pct]
+    # B2: no dollar figure is cited -- non-monetary.
+    monetary_basis: none
     # Item 7 (CLAUDE.md P2/P3 gate review): reworded from an unattributed
     # "Policy requires" to cite the catalogue's own control objective
     # (catalogue.yaml T4.2) instead of asserting an uncited policy.
@@ -200,6 +222,9 @@ findings:
     severity:
       - else: Medium
     metrics_cited: [hv_count, hv_amount, hv_employees]
+    # B2: hv_amount is plan.yaml's `kind: sum` of the FULL Expense Amount of
+    # high-value claims -- real reimbursed spend.
+    monetary_basis: spend
     observation: >
       {hv_count} claims exceed the high-value threshold, totalling {hv_amount}
       across {hv_employees} employees. High-value claims carry elevated risk of
@@ -225,6 +250,12 @@ findings:
         then: High
       - else: Medium
     metrics_cited: [split_groups, split_same_day_groups, split_window_groups, split_lines, split_amount]
+    # B2: split_amount is the sum of the FULL amounts of the distinct
+    # flagged lines (spec T5.1 "split_amount (over the distinct lines)") --
+    # every line is individually under the high-value limit by construction
+    # (a split is defined as parts each under the limit), so there is no
+    # per-line excess figure; these are real reimbursed spend amounts.
+    monetary_basis: spend
     observation: >
       {split_groups} split-claim groups were identified ({split_same_day_groups}
       found by same-day matching, {split_window_groups} by the rolling window --
@@ -248,6 +279,10 @@ findings:
         then: High
       - else: Medium
     metrics_cited: [duplicate_groups, duplicate_lines, duplicate_amount, duplicate_oop_card_groups]
+    # B2: duplicate_amount is "sum of the extra lines beyond the first in
+    # each group" (spec T5.2) -- the double-payment excess at risk, not the
+    # full value of both lines.
+    monetary_basis: excess
     observation: >
       {duplicate_groups} potential duplicate claim groups ({duplicate_lines} lines,
       {duplicate_amount} at risk) were identified, of which
@@ -271,6 +306,8 @@ findings:
         then: High
       - else: Medium
     metrics_cited: [approver_total_reports, approver_count, approver_no_receipt_pct, approver_instant_pct, approver_worst_case_n, approver_worst_case_pct]
+    # B2: no dollar figure is cited -- non-monetary.
+    monetary_basis: none
     observation: >
       Of {approver_total_reports} expense reports reviewed by {approver_count}
       approvers, {approver_no_receipt_pct} were approved without the approver
@@ -298,6 +335,8 @@ findings:
     severity:
       - else: Medium
     metrics_cited: [att_hierarchy_invalid, att_hierarchy_total]
+    # B2: no dollar figure is cited -- non-monetary.
+    monetary_basis: none
     # Item 7 (CLAUDE.md P2/P3 gate review): the test evaluates "Is Attendee
     # also in Hierarchy?" = Yes, which is the claimant's whole reporting
     # hierarchy, not specifically a direct report -- reworded to match, and
@@ -330,6 +369,9 @@ findings:
         then: High
       - else: Medium
     metrics_cited: [daily_over_count_dom, daily_over_amount_dom, daily_over_count_int, daily_over_amount_int, daily_over_max_dom, daily_over_max_int]
+    # B2: daily_over_amount_dom/_int is plan.yaml's `kind: excess` -- the
+    # amount over the per-diem limit, not the full day's spend.
+    monetary_basis: excess
     observation: >
       {daily_over_count_dom} domestic and {daily_over_count_int} international
       employee-days exceeded the applicable per-diem daily spend threshold,

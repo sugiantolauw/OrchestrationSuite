@@ -4,6 +4,7 @@ sources:
     format: csv
     file: claims.csv
     header_trim: true
+    entry_key: [Employee ID, Transaction Date, Vendor, Amount]
     columns:
       Employee ID:
         type: integer

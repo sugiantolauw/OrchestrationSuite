@@ -42,6 +42,35 @@ def test_exposure_summary_prefers_the_run_headline_over_summing_findings():
     assert "de-duplicated" in summary
 
 
+def test_exposure_summary_prefers_label_over_basis():
+    # B2 (CLAUDE.md P2/P3 gate review): `label` is the short display name;
+    # `basis` is the full methodology paragraph, shown separately -- when
+    # both are present the short label wins the hero line.
+    payload = {"exposure": {
+        "headline": 1725.0, "label": "Gross value of flagged spend (de-duplicated)",
+        "basis": "a very long methodology paragraph " * 5,
+    }}
+    summary = workspace_tne._exposure_summary([{"exposure_amount": 1.0}], payload)
+    assert "Gross value of flagged spend (de-duplicated)" in summary
+    assert "methodology paragraph" not in summary
+
+
+def test_exposure_methodology_note_shows_basis_and_approved_not_spent():
+    payload = {"exposure": {
+        "headline": 1725.0, "basis": "sum of distinct flagged entries.",
+        "approved_not_spent_total": 4200.0,
+    }}
+    note = workspace_tne._exposure_methodology_note(payload)
+    text = str(note)
+    assert "sum of distinct flagged entries" in text
+    assert "$4,200" in text
+
+
+def test_exposure_methodology_note_is_none_when_nothing_to_show():
+    assert workspace_tne._exposure_methodology_note(None) is None
+    assert workspace_tne._exposure_methodology_note({"exposure": {}}) is None
+
+
 def test_latest_completed_run_id_finds_the_run():
     run_id = _completed_run()
     assert workspace_tne.latest_completed_run_id() == run_id

@@ -163,6 +163,7 @@ def test_severity_basis_fixed_for_a_bare_else_with_no_when_evaluated(tne_skill):
                 "trigger": "m2 > thresholds.policy_thr",
                 "severity": [{"else": "Medium"}],
                 "metrics_cited": ["m2"],
+                "monetary_basis": "none",
                 "observation": "{m2}",
             }
         ]
@@ -198,6 +199,7 @@ def test_severity_basis_threshold_via_else_reached_after_a_false_when(tne_skill)
                     {"else": "Low"},
                 ],
                 "metrics_cited": ["m1"],
+                "monetary_basis": "none",
                 "observation": "{m1}",
             }
         ]
@@ -228,6 +230,7 @@ def test_severity_basis_threshold_analyst_set_when_matched(tne_skill):
                     {"else": "Low"},
                 ],
                 "metrics_cited": ["m3"],
+                "monetary_basis": "none",
                 "observation": "{m3}",
             }
         ]

@@ -298,6 +298,39 @@ def test_write_findings_persists_indeterminate_severity(persistence, uid):
     assert listed[0]["severity_basis"] == "indeterminate"
 
 
+def test_write_findings_persists_monetary_basis(persistence, uid):
+    """B2 (CLAUDE.md P2/P3 gate review), migration 006: every valid
+    monetary_basis value round-trips through both backends -- the CHECK
+    constraint must accept 'spend', 'excess', 'approved_not_spent' and
+    'none', and a finding that omits it comes back None (never defaulted)."""
+    run_id = f"RUN-{uid}"
+    skill_id = f"SKILL-{uid}"
+    findings = [
+        _finding(f"{run_id}:T1", rule_id=f"{skill_id}.T1", monetary_basis="spend"),
+        _finding(f"{run_id}:T2", rule_id=f"{skill_id}.T2", monetary_basis="excess"),
+        _finding(f"{run_id}:T3", rule_id=f"{skill_id}.T3", monetary_basis="approved_not_spent"),
+        _finding(f"{run_id}:T4", rule_id=f"{skill_id}.T4", monetary_basis="none"),
+    ]
+    omitted = dict(_finding(f"{run_id}:T5", rule_id=f"{skill_id}.T5"))
+    omitted.pop("monetary_basis", None)
+    findings.append(omitted)
+
+    written = persistence.write_findings(
+        run_id, findings, engagement_id="ENG-DEFAULT", skill_id=skill_id, skill_version="1.0.0",
+        now=canonical_ts(0),
+    )
+    by_id = {f["finding_id"]: f for f in written}
+    assert by_id[f"{run_id}:T1"]["monetary_basis"] == "spend"
+    assert by_id[f"{run_id}:T2"]["monetary_basis"] == "excess"
+    assert by_id[f"{run_id}:T3"]["monetary_basis"] == "approved_not_spent"
+    assert by_id[f"{run_id}:T4"]["monetary_basis"] == "none"
+    assert by_id[f"{run_id}:T5"]["monetary_basis"] is None
+
+    listed = {f["finding_id"]: f for f in persistence.list_findings(run_id)}
+    assert listed[f"{run_id}:T1"]["monetary_basis"] == "spend"
+    assert listed[f"{run_id}:T5"]["monetary_basis"] is None
+
+
 def test_write_findings_idempotent_rewrite_same_set_no_duplicates(persistence, uid):
     run_id = f"RUN-{uid}"
     skill_id = f"SKILL-{uid}"

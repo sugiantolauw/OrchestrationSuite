@@ -25,6 +25,7 @@
           },
           "metrics_cited": {"type": "array", "items": {"type": "string"}},
           "thresholds_cited": {"type": "array", "items": {"type": "string"}},
+          "monetary_basis": {"type": "string", "enum": ["spend", "excess", "approved_not_spent", "none"]},
           "observation": {"type": "string"},
           "recommendation": {"type": "string"},
           "management_questions": {"type": "array", "items": {"type": "string"}}
@@ -36,6 +37,7 @@
           "trigger",
           "severity",
           "metrics_cited",
+          "monetary_basis",
           "observation",
           "recommendation"
         ],

@@ -442,11 +442,40 @@ def _exposure_summary(findings: list[dict], payload: dict | None = None) -> str:
     exposure = (payload or {}).get("exposure") or {}
     headline = exposure.get("headline")
     if headline is not None:
-        basis = exposure.get("basis")
-        return f"${headline:,.0f}" + (f" — {basis}" if basis else "")
+        # B2 (CLAUDE.md P2/P3 gate review): `label` is the short display name
+        # ("Gross value of flagged spend (de-duplicated)"); `basis` is the
+        # full methodology paragraph, shown separately by
+        # _exposure_methodology_note -- never inlined here, it would swamp
+        # the one-line executive hero.
+        label = exposure.get("label") or exposure.get("basis")
+        return f"${headline:,.0f}" + (f" — {label}" if label else "")
     if not findings:
         return "No findings"
     return "Not available — the run's de-duplicated exposure headline has not been computed (CLAUDE.md §0.3)"
+
+
+def _exposure_methodology_note(payload: dict | None) -> html.Div | None:
+    """B2 (CLAUDE.md P2/P3 gate review): the methodology note shown beside
+    the headline -- what is and is not included, that per-finding figures
+    overlap and must never be summed, and the separately-reported
+    approved-not-spent total. Returns None when there is nothing to show
+    (no run payload yet), never a blank/misleading panel."""
+    exposure = (payload or {}).get("exposure") or {}
+    basis = exposure.get("basis")
+    approved_not_spent = exposure.get("approved_not_spent_total")
+    if not basis and approved_not_spent is None:
+        return None
+    parts = []
+    if basis:
+        parts.append(html.P(basis, style={"margin": "0 0 6px", "fontSize": 11.5, "color": "#6b7283", "lineHeight": 1.5}))
+    if approved_not_spent is not None:
+        parts.append(html.P(
+            f"Separately: ${approved_not_spent:,.0f} approved but never actually spent "
+            f"(e.g. travel requests with no linked expense claim) -- not flagged spend, "
+            f"never included in the headline above.",
+            style={"margin": 0, "fontSize": 11.5, "color": "#6b7283", "lineHeight": 1.5},
+        ))
+    return html.Div(parts, style={"marginTop": 4})
 
 
 def _executive_tab(run: dict, findings: list[dict], payload: dict | None, actions: list[dict], frames: dict | None = None) -> html.Div:
@@ -498,10 +527,11 @@ def _executive_tab(run: dict, findings: list[dict], payload: dict | None, action
                 className="showcase-headline",
             ),
             html.P(
-                f"Potential financial exposure: {_exposure_summary(findings, payload)}. "
+                f"{_exposure_summary(findings, payload)}. "
                 "Every number below is read from this run's persisted results.",
                 className="showcase-supporting",
             ),
+            _exposure_methodology_note(payload),
         ], className="showcase-hero"),
 
         html.Div([
@@ -745,10 +775,16 @@ def _findings_tab(bundle: dict) -> html.Div:
     n_med = sum(1 for f in findings if f.get("severity") == "Medium")
     n_low = sum(1 for f in findings if f.get("severity") == "Low")
 
+    # B2 (CLAUDE.md P2/P3 gate review): a chip is too small for the full
+    # "$X — Gross value of flagged spend (de-duplicated)" label -- shows the
+    # figure alone here, with the label spelled out in full on the
+    # executive tab (_executive_tab) instead.
+    headline_value = (payload.get("exposure") or {}).get("headline")
+    headline_chip_text = f"Flagged spend: ${headline_value:,.0f}" if headline_value is not None else "Flagged spend: not available"
     summary_bar = html.Div([
         html.Span(f"{len(findings)} findings", className="chip"),
         html.Span(f"{n_high} High · {n_med} Medium · {n_low} Low", className="chip"),
-        html.Span(f"Exposure: {_exposure_summary(findings, payload)}", className="chip",
+        html.Span(headline_chip_text, className="chip",
                    style={"color": "#b85042", "borderColor": "#b85042"}) if findings else None,
     ], className="chip-row", style={"marginBottom": 14})
 

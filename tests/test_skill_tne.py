@@ -7,7 +7,7 @@ import pytest
 
 from orchestrator.contract import LocalFileDataSource
 from orchestrator.engine import execute_skill
-from orchestrator.findings import _format_template
+from orchestrator.findings import _format_template, format_metric_value
 from orchestrator.skills import load_skill
 
 SKILL_DIR = Path(__file__).parent.parent / "skills" / "tne_exco"
@@ -116,11 +116,18 @@ def test_all_finding_templates_render_cleanly_against_real_metrics(tne_skill, tn
         missing = [n for n in cited_names if n not in metrics]
         assert not missing, f"{rule['id']}: metrics_cited references unknown metric(s) {missing}"
         cited = {n: metrics[n] for n in cited_names}
+        # Item 7 (CLAUDE.md P2/P3 gate review): a template may also quote a
+        # threshold's own value (thresholds_cited) -- mirrors
+        # orchestrator.findings.build_findings' own kwargs construction.
+        threshold_kwargs = {
+            tid: format_metric_value(tne_skill.thresholds[tid]["value"], tne_skill.thresholds[tid]["unit"])
+            for tid in rule.get("thresholds_cited", [])
+        }
         for field in ("observation", "recommendation"):
             text = rule.get(field) or ""
             if not text.strip():
                 continue
-            rendered = _format_template(text, cited)
+            rendered = _format_template(text, cited, threshold_kwargs)
             assert "%%" not in rendered, f"{rule['id']}.{field}: double percent in rendered text: {rendered!r}"
             assert "{" not in rendered and "}" not in rendered, (
                 f"{rule['id']}.{field}: unrendered template braces: {rendered!r}"

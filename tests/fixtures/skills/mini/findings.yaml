@@ -8,6 +8,7 @@ findings:
         then: High
       - else: Medium
     metrics_cited: [hv_count, hv_amount]
+    monetary_basis: spend
     observation: >
       {hv_count} claims exceed the high-value threshold, totalling {hv_amount}.
     recommendation: >
@@ -22,6 +23,7 @@ findings:
     severity:
       - else: Low
     metrics_cited: [missing_count, missing_pct, missing_amount]
+    monetary_basis: spend
     observation: >
       {missing_count} claims ({missing_pct}) have no matching register entry, totalling {missing_amount}.
     recommendation: >

@@ -434,21 +434,6 @@ def find(ctx: NodeContext, state: RunState) -> RunState:
     return dataclasses.replace(state, findings=compact, events=state.events + [_event("find", message, now)])
 
 
-# Primitives whose group_id groups a set of rows that are genuinely ONE
-# monetary entry sharing a single amount, not several distinct entries
-# (CLAUDE.md P2/P3 gate review item 1). This is a property of the PRIMITIVE's
-# own scoring unit, declared once here rather than inferred per run from
-# whether a group's members happen to carry equal amounts -- duplicate_detection's
-# grouping key deliberately INCLUDES the amount column (T5.2: "(Employee ID,
-# Transaction Date, Vendor, amount) exact"), so every duplicate group's members
-# always agree on amount by construction, and the old equality-inference
-# collapsed every one of them to a single entry, discarding every line but one
-# from the run's headline exposure. Only ratio_per_group's group_id is the
-# attendee-grain shape (CLAUDE.md build brief T3.3b: one Entry Amount repeated
-# once per attendee row) where collapsing to one entry is correct.
-_GROUP_COLLAPSE_PRIMITIVES = {"ratio_per_group"}
-
-
 def prioritise(ctx: NodeContext, state: RunState) -> RunState:
     """Deterministic ordering: severity, then de-duplicated exposure (CLAUDE.md
     §0.3 -- fixes app.py's double count, where the same row could be summed
@@ -481,33 +466,50 @@ def prioritise(ctx: NodeContext, state: RunState) -> RunState:
     `exposure_basis: "non-monetary finding"` -- never a fabricated 0.0
     (CLAUDE.md NN14).
 
-    The run's headline exposure is a separate figure: the sum, over every
-    monetary finding's flagged rows, of each DISTINCT MONETARY ENTRY's full
-    transaction amount, de-duplicated across findings so a row shared by two
-    findings is never counted twice in the headline (never the sum of
-    per-finding totals). "Distinct monetary entries", not "distinct rows":
-    ratio_per_group's (T3.3b) attendee-grain output repeats one Entry Amount
-    once per attendee row, all sharing one group_id, so summing per row_key
-    would count that amount once per attendee -- collapsed to one entry.
-    Every other primitive's group_id (duplicate_detection, split_detection,
-    threshold_exceedance's `group_by`) clusters DISTINCT entries and must
-    never collapse, even where every member happens to share one amount by
-    construction (duplicate_detection's grouping key deliberately includes
-    the amount column). Which primitives collapse is a declared property of
-    the primitive's own scoring unit (`_GROUP_COLLAPSE_PRIMITIVES` above),
-    never inferred per run from whether a group's members happen to agree on
-    amount -- that inference is exactly what under-counted T5.2's headline
-    contribution before this fix.
+    The run headline is a SEPARATE figure from any finding's exposure_amount,
+    named "Gross value of flagged spend (de-duplicated)" everywhere it is
+    shown (never "exposure" or "at risk" -- B2, CLAUDE.md P2/P3 gate review):
+    the sum, over every DISTINCT flagged transaction entry of every finding
+    whose `monetary_basis` is 'spend' or 'excess', of that entry's own cited
+    amount. Two things a naive "sum every monetary finding's exposure_amount"
+    would get wrong, both fixed here:
+
+    1. Not every monetary finding belongs in the headline. `monetary_basis`
+       (findings.yaml, schema-required) says what a finding's cited amount
+       actually MEANS: 'spend' (a real reimbursed transaction, flagged),
+       'excess' (only the over-limit/duplicate portion is at risk, not the
+       whole transaction), 'approved_not_spent' (money approved but never
+       actually spent -- T3.1a's unlinked travel requests; reported as its
+       own separate total, `run_approved_not_spent_total`, NEVER summed into
+       "flagged spend"), or 'none' (no dollar figure at all). Only 'spend'
+       and 'excess' findings contribute to the headline.
+    2. The same transaction entry can be flagged by more than one finding,
+       and the SAME row can appear more than once within one finding's own
+       flagged rows (T3.3b's attendee-grain output repeats one Entry Amount
+       once per attendee row). De-duplication is keyed on each source's
+       declared `entry_key` (contract.yaml -- REAL columns, e.g. expense_
+       report's (Employee ID, Report Legacy Key, Transaction Date, Expense
+       Type, Expense Amount), never a positional row index) so the same
+       transaction entry is counted exactly once in the headline no matter
+       how many findings or how many flagged rows cite it, while two
+       genuinely distinct entries that happen to look alike in the group_id
+       sense (e.g. two duplicate_detection lines, which share amount by
+       construction) are correctly counted separately. Every finding's
+       own `exposure_amount` above is unaffected by any of this -- it is
+       always that finding's own cited metric sum, on its own.
 
     This is the one node besides `execute` that reads bound source data: no
-    primitive or population exposes a row_key -> amount map (flagged_rows
-    deliberately carries no amount column, CLAUDE.md build brief P3 §1), so
-    the headline's entry-grain de-duplication requires one lookup pass over
-    each source that a population declares an `amount_column` for, at the
+    primitive or population exposes a row_key -> (amount, entry_key) map
+    (flagged_rows deliberately carries neither, CLAUDE.md build brief P3
+    §1), so the headline's entry-grain de-duplication requires one lookup
+    pass over each source a spend/excess finding's rows come from, at the
     same pinned versions execute() used. A value that fails to parse as a
     number, or is null, is a contract violation the contract's own
     type/nullability declaration should already have caught -- raised here,
-    never silently coerced to 0.0 (CLAUDE.md NN14)."""
+    never silently coerced to 0.0 (CLAUDE.md NN14). A spend/excess finding
+    whose source declares no `entry_key` also raises: it cannot be safely
+    de-duplicated, so it must not silently enter a headline that claims to
+    be de-duplicated."""
     persisted = ctx.persistence.list_findings(state.run_id)
     now = ctx.clock()
 
@@ -518,59 +520,85 @@ def prioritise(ctx: NodeContext, state: RunState) -> RunState:
     existing_metrics = ctx.persistence.get_run_metrics(state.run_id)
 
     bindings = {b["source"]: b["version"] for b in state.data_assets}
+    populations_cfg = ctx.skill.plan.get("populations", {})
+    plan_sources = {pop_cfg.get("source") for pop_cfg in populations_cfg.values() if pop_cfg.get("source")}
     amount_col_by_source: dict[str, str] = {}
-    for pop_cfg in ctx.skill.plan.get("populations", {}).values():
+    for pop_cfg in populations_cfg.values():
         src = pop_cfg.get("source")
         col = pop_cfg.get("amount_column")
         if col and src and src not in amount_col_by_source:
             amount_col_by_source[src] = col
 
+    # B2 (CLAUDE.md P2/P3 gate review): each source's declared entry_key
+    # (contract.yaml) -- the REAL columns that identify one distinct
+    # transaction entry for that source, never a positional row index.
+    # Scoped to sources plan.yaml actually reads (same scoping
+    # amount_col_by_source already has above), not every contract-declared
+    # source regardless of whether this Skill's plan even uses it.
+    entry_key_cols_by_source: dict[str, list[str]] = {
+        name: cfg["entry_key"] for name, cfg in ctx.skill.contract.get("sources", {}).items()
+        if cfg.get("entry_key") and name in plan_sources
+    }
+
     row_amount: dict[tuple[str, str], float] = {}
-    for source, col in amount_col_by_source.items():
+    entry_key_by_row: dict[tuple[str, str], tuple] = {}
+    for source in sorted(set(amount_col_by_source) | set(entry_key_cols_by_source)):
         version = bindings.get(source)
         # Item 2 (CLAUDE.md P2/P3 gate review): a source a population
-        # declares an amount_column for must have a real binding and a real
-        # amount column in the data it reads -- discover() already required
-        # every contract source to have a binding, so a missing one here
-        # means that invariant was violated somewhere upstream. Silently
-        # skipping this source would silently drop its rows from the
-        # headline's entry-grain de-duplication -- fail loudly instead
-        # (CLAUDE.md NN14).
+        # declares an amount_column for, or that declares an entry_key, must
+        # have a real binding -- discover() already required every contract
+        # source to have one, so a missing one here means that invariant was
+        # violated somewhere upstream. Silently skipping this source would
+        # silently drop its rows from the headline's entry-grain
+        # de-duplication -- fail loudly instead (CLAUDE.md NN14).
         if version is None:
             raise ContractViolation(
-                [f"population for source {source!r} declares amount_column {col!r} but "
-                 f"state.data_assets has no binding for {source!r} -- discover() should "
+                [f"source {source!r} declares amount_column and/or entry_key but "
+                 f"state.data_assets has no binding for it -- discover() should "
                  f"have required one"]
             )
         df = ctx.data_source.read_population(source, version=version)
-        if col not in df.columns:
-            raise ContractViolation(
-                [f"{source}: declared amount_column {col!r} is not a column in the data read "
-                 f"at version {version!r} -- the contract's column declaration should have "
-                 f"caught this before execute() ran"]
-            )
-        for row_key, amount in zip(df["__row_key"], df[col]):
-            if pd.isna(amount):
+
+        col = amount_col_by_source.get(source)
+        if col is not None:
+            if col not in df.columns:
                 raise ContractViolation(
-                    [f"{source}.{col} row {row_key!r}: amount is null -- the contract's "
-                     f"nullability declaration for this column should have caught this "
-                     f"before execute() ran"]
+                    [f"{source}: declared amount_column {col!r} is not a column in the data read "
+                     f"at version {version!r} -- the contract's column declaration should have "
+                     f"caught this before execute() ran"]
                 )
-            try:
-                value = float(amount)
-            except (TypeError, ValueError) as exc:
+            for row_key, amount in zip(df["__row_key"], df[col]):
+                if pd.isna(amount):
+                    raise ContractViolation(
+                        [f"{source}.{col} row {row_key!r}: amount is null -- the contract's "
+                         f"nullability declaration for this column should have caught this "
+                         f"before execute() ran"]
+                    )
+                try:
+                    value = float(amount)
+                except (TypeError, ValueError) as exc:
+                    raise ContractViolation(
+                        [f"{source}.{col} row {row_key!r}: amount {amount!r} is not numeric ({exc}) "
+                         f"-- the contract's type declaration for this column should have caught this"]
+                    ) from exc
+                row_amount[(source, row_key)] = value
+
+        entry_key_cols = entry_key_cols_by_source.get(source)
+        if entry_key_cols is not None:
+            missing_cols = [c for c in entry_key_cols if c not in df.columns]
+            if missing_cols:
                 raise ContractViolation(
-                    [f"{source}.{col} row {row_key!r}: amount {amount!r} is not numeric ({exc}) "
-                     f"-- the contract's type declaration for this column should have caught this"]
-                ) from exc
-            row_amount[(source, row_key)] = value
+                    [f"{source}: declared entry_key column(s) {missing_cols} not in the data read "
+                     f"at version {version!r} -- the contract's entry_key declaration should have "
+                     f"caught this before this run"]
+                )
+            for row_key, key_values in zip(df["__row_key"], df[entry_key_cols].itertuples(index=False, name=None)):
+                entry_key_by_row[(source, row_key)] = key_values
 
     plan_tests = ctx.skill.plan.get("tests", [])
     flags_by_test_id: dict[str, set[str]] = {}
-    primitive_by_flag: dict[str, str | None] = {}
     for e in plan_test_flags(plan_tests):
         flags_by_test_id.setdefault(e["test_id"], set()).add(e["flag"])
-        primitive_by_flag[e["flag"]] = e.get("primitive")
     amount_metrics_by_test_id = plan_test_amount_metrics(plan_tests)
     all_additive_amount_names: set[str] = set()
     for names in amount_metrics_by_test_id.values():
@@ -580,35 +608,46 @@ def prioritise(ctx: NodeContext, state: RunState) -> RunState:
     for r in ctx.persistence.list_flagged_rows(state.run_id):
         rows_by_flag.setdefault(r["flag"], []).append(r)
 
-    # Headline-only entry-grain de-duplication (see docstring above): a
-    # (source, group_id) collapses to one entry only when the flag's OWNING
-    # PRIMITIVE is declared to group one monetary entry per group_id
-    # (_GROUP_COLLAPSE_PRIMITIVES) -- never inferred from the group's members
-    # happening to agree on amount. Where a collapsing primitive's group
-    # members disagree on amount, that primitive's own declared shape has
-    # been violated by this run's data -- fail loudly rather than guess which
-    # member's amount is "the" entry amount.
+    # Headline entry-grain de-duplication (see docstring above): entry_id is
+    # (source, entry_key tuple) -- real declared columns, so rows that are
+    # genuinely the same transaction entry (T3.3b's attendee-grain repeats,
+    # or the same entry cited by two different findings) collapse to one,
+    # while two distinct entries that happen to look alike in a group_id
+    # sense (e.g. a duplicate_detection pair, which shares amount by
+    # construction) never do, because they have different entry_key values
+    # (different Report Legacy Key -- see contract.yaml's own reasoning).
+    # Two rows sharing an entry_id that DISAGREE on amount is a genuine data
+    # integrity problem (the same transaction entry cannot have two
+    # amounts) -- fail loudly rather than guess which is right.
     entry_amount: dict[tuple, float] = {}
 
-    def _entry_id(r: dict) -> tuple | None:
-        source, row_key, gid = r["source"], r["row_key"], r.get("group_id")
+    def _entry_id(r: dict) -> tuple:
+        source, row_key = r["source"], r["row_key"]
+        if source not in entry_key_cols_by_source:
+            raise ContractViolation(
+                [f"{source}: a 'spend'/'excess' finding flags rows from this source, but it "
+                 f"declares no entry_key in contract.yaml -- it cannot be safely de-duplicated "
+                 f"in the run headline"]
+            )
+        key_values = entry_key_by_row.get((source, row_key))
         amt = row_amount.get((source, row_key))
-        if amt is None:
-            return None
-        collapse = gid is not None and primitive_by_flag.get(r["flag"]) in _GROUP_COLLAPSE_PRIMITIVES
-        entry_id = ("group", source, gid) if collapse else ("row", source, row_key)
-        if collapse:
-            existing = entry_amount.get(entry_id)
-            if existing is not None and round(existing, 6) != round(amt, 6):
-                raise ContractViolation(
-                    [f"{source} group {gid!r}: members disagree on amount ({existing} vs {amt}) -- "
-                     f"this group's primitive is declared to share one amount per group_id "
-                     f"(_GROUP_COLLAPSE_PRIMITIVES), which this run's data violates"]
-                )
+        if key_values is None or amt is None:
+            raise ContractViolation(
+                [f"{source} row {row_key!r}: missing entry_key or amount for headline "
+                 f"de-duplication -- this source's population should have been read above"]
+            )
+        entry_id = (source, key_values)
+        existing = entry_amount.get(entry_id)
+        if existing is not None and round(existing, 6) != round(amt, 6):
+            raise ContractViolation(
+                [f"{source} entry {key_values!r}: rows disagree on amount ({existing} vs {amt}) -- "
+                 f"the same transaction entry cannot have two different amounts"]
+            )
         entry_amount[entry_id] = amt
         return entry_id
 
     all_entry_ids: set[tuple] = set()
+    approved_not_spent_total = None
     updated_findings: list[dict] = []
     for f in persisted:
         cited_metrics = f.get("metrics_cited") or {}
@@ -655,8 +694,20 @@ def prioritise(ctx: NodeContext, state: RunState) -> RunState:
             ),
             2,
         )
-        entry_ids = {eid for r in rows if (eid := _entry_id(r)) is not None}
-        all_entry_ids |= entry_ids
+
+        # B2: only 'spend'/'excess' findings contribute to the run headline
+        # (approved_not_spent is money that was never actually reimbursed --
+        # reported separately below, never summed into "flagged spend"; a
+        # finding's monetary_basis is required by the schema and read here
+        # with no default -- a missing one is a caller bug, not silently
+        # treated as non-monetary).
+        monetary_basis = f.get("monetary_basis")
+        if monetary_basis in ("spend", "excess"):
+            entry_ids = {_entry_id(r) for r in rows}
+            all_entry_ids |= entry_ids
+        elif monetary_basis == "approved_not_spent":
+            approved_not_spent_total = round((approved_not_spent_total or 0.0) + exposure, 2)
+
         updated_findings.append(
             {
                 **f,
@@ -693,15 +744,58 @@ def prioritise(ctx: NodeContext, state: RunState) -> RunState:
         }
         for name, m in existing_metrics.items()
     }
+    # B2 (CLAUDE.md P2/P3 gate review, NN10): source provenance for every
+    # source that actually contributed a distinct entry to the headline --
+    # table version, the amount/entry-key columns read, and the declared
+    # grain (the entry_key itself IS the grain: one row per distinct value
+    # of it). A LIST of {name, version, ...}, matching the same shape every
+    # other run_metrics row's source_ref.sources already uses
+    # (orchestrator.engine._run_metric_source_ref) -- app/src callers read
+    # sources[0]["name"] generically across every metric, so this can never
+    # be a differently-shaped dict keyed by source name.
+    contributing_sources = sorted({src for src, _ in all_entry_ids})
+    headline_provenance = [
+        {
+            "name": src,
+            "version": bindings.get(src),
+            "amount_column": amount_col_by_source.get(src),
+            "entry_key": entry_key_cols_by_source.get(src),
+        }
+        for src in contributing_sources
+    ]
     metrics_map["run_exposure_headline"] = {
         "metric_name": "run_exposure_headline",
         "value": headline_exposure,
         "unit": "AUD",
         "source_ref": {
-            "basis": "sum of amount over the union of distinct monetary entries flagged "
-            "across every finding (attendee-grain duplicates of one entry collapsed to "
-            "one; non-monetary findings excluded) -- never the sum of per-finding totals "
-            "(CLAUDE.md §0.3)",
+            "label": "Gross value of flagged spend (de-duplicated)",
+            "basis": (
+                "Sum of every DISTINCT flagged transaction entry from findings whose "
+                "monetary_basis is 'spend' (a real reimbursed transaction) or 'excess' (only the "
+                "over-limit/duplicate portion) -- de-duplicated across findings AND across sources "
+                "on each source's own declared entry_key (contract.yaml, real columns, never a "
+                "positional row index). Excludes 'approved_not_spent' findings (money approved but "
+                "never actually spent -- see run_approved_not_spent_total) and 'none' (no dollar "
+                "figure). Per-finding exposure_amount figures overlap with each other and with this "
+                "headline by design (the same entry can be cited by more than one finding) and must "
+                "never be summed (CLAUDE.md §0.3)."
+            ),
+            "sources": headline_provenance,
+        },
+        "test_id": None,
+    }
+    metrics_map["run_approved_not_spent_total"] = {
+        "metric_name": "run_approved_not_spent_total",
+        "value": approved_not_spent_total,
+        "unit": "AUD",
+        "source_ref": {
+            "label": "Approved but never spent (not flagged spend)",
+            "basis": (
+                "Sum of every 'approved_not_spent' finding's own exposure_amount -- money "
+                "authorised (e.g. an approved travel request) but never turned into an actual "
+                "reimbursed transaction. Reported separately because it is not spend at all; "
+                "never included in the gross-flagged-spend headline above."
+            ),
         },
         "test_id": None,
     }

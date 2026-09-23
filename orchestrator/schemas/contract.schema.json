@@ -11,6 +11,7 @@
           "sheet": {"type": ["string", "integer"]},
           "file": {"type": "string"},
           "header_trim": {"type": "boolean"},
+          "entry_key": {"type": "array", "items": {"type": "string"}, "minItems": 1},
           "columns": {
             "type": "object",
             "additionalProperties": {

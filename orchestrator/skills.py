@@ -299,6 +299,21 @@ def validate_skill(skill: Skill) -> None:
     known_metric_names: set[str] = set()
     seen_test_ids: set[str] = set()
 
+    # B2 (CLAUDE.md P2/P3 gate review): a source's declared entry_key
+    # (contract.yaml) is what the run headline (orchestrator.nodes.fieldwork.
+    # prioritise) de-duplicates a monetary finding's flagged rows on -- every
+    # column it names must be a real column of that same source.
+    for src_name, src_cfg in skill.contract.get("sources", {}).items():
+        entry_key = src_cfg.get("entry_key")
+        if not entry_key:
+            continue
+        contract_columns = src_cfg.get("columns", {})
+        unknown_entry_key_cols = [c for c in entry_key if c not in contract_columns]
+        if unknown_entry_key_cols:
+            violations.append(
+                f"contract.sources.{src_name}.entry_key {unknown_entry_key_cols} not a column of {src_name!r}"
+            )
+
     for source_name, pop_cfg in populations.items():
         src = pop_cfg.get("source")
         if src not in skill.contract.get("sources", {}):
@@ -412,6 +427,17 @@ def validate_skill(skill: Skill) -> None:
             )
 
     known_threshold_ids = set(thresholds.keys())
+    # B2 (CLAUDE.md P2/P3 gate review): flattened across every test, for the
+    # monetary_basis cross-check below -- deliberately NOT restricted to
+    # "this finding's own test_id" (that restriction is exactly the string-
+    # prefix mistake B1 fixed at run time; at Skill-load time there is no
+    # run-recorded metric->test mapping to use instead, so this check only
+    # asks "is there ANY additive-AUD metric among this finding's
+    # metrics_cited", the same question prioritise() asks at run time).
+    all_additive_amount_names: set[str] = set()
+    for names in plan_test_amount_metrics(tests).values():
+        all_additive_amount_names |= names
+
     seen_finding_ids: set[str] = set()
     for finding in skill.findings.get("findings", []):
         fid = finding.get("id", "?")
@@ -439,6 +465,24 @@ def validate_skill(skill: Skill) -> None:
         if unknown_cited_thresholds:
             violations.append(
                 f"findings.{fid}: thresholds_cited {sorted(unknown_cited_thresholds)} not in thresholds.yaml"
+            )
+
+        # B2: monetary_basis must agree with whether this finding actually
+        # cites a real additive-AUD amount metric -- 'none' with a dollar
+        # figure, or a monetary basis with no dollar figure at all, is
+        # exactly the kind of authoring mistake that produced a wrong
+        # headline in the first place.
+        monetary_basis = finding.get("monetary_basis")
+        has_amount_metric = bool(all_additive_amount_names & cited)
+        if monetary_basis == "none" and has_amount_metric:
+            violations.append(
+                f"findings.{fid}: monetary_basis is 'none' but metrics_cited includes an "
+                f"additive-AUD metric -- set a real monetary_basis"
+            )
+        if monetary_basis in ("spend", "excess", "approved_not_spent") and not has_amount_metric:
+            violations.append(
+                f"findings.{fid}: monetary_basis is {monetary_basis!r} but metrics_cited has no "
+                f"additive-AUD metric to be that spend/excess/approved-not-spent figure"
             )
 
         try:
