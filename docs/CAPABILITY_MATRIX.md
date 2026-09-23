@@ -11,16 +11,16 @@ Corporate target: to be filled by the platform owner before migration.
 |---|---|---|---|---|---|
 | 1 | Databricks Apps (create + deploy) | P3 (restart test), P5 | **Verified** 2026-09-23 — created in 139 s (compute MEDIUM), deployed in 9 s | ? | App URL needs OAuth; PAT is redirected to login |
 | 2 | App container CPU / memory limits | P3 | **Verified** 2026-09-23 — 4 vCPU, 15.6 GB RAM (MEDIUM); no cgroup limits visible below that | ? | Revisit if compute size changes |
-| 3 | Container recycling / scale-to-zero behaviour | P3 | **Observed** 2026-09-23 — one container, one pid for 53 min (02:59–03:52 UTC) with zero HTTP traffic: no recycling, no idle scale-down | ? | Re-observe over a longer window and across a redeploy in P3 |
+| 3 | Container recycling / scale-to-zero behaviour | P3 | **Observed** 2026-09-23 — one container, one pid for 53 min with zero HTTP traffic: no recycling, no idle scale-down. Explicit stop→start took ~140 s, and the new container reached `app.py` (reaper ran) ~56 s after the SDK reported "started" | ? | A redeploy/restart kills in-flight runs; reaper + Resume verified live (RUN-F7DFE14191D7) |
 | 4 | Background threads survive a multi-minute run | P3 | **Verified** 2026-09-23 — daemon thread wrote 102 heartbeats over 53 min, max gap 33 s | ? | |
-| 5 | HTTP / gateway timeout on callbacks | P3 | Unverified | ? | Polling callbacks must stay under it |
+| 5 | HTTP / gateway timeout on callbacks | P3 | Unverified — first /workspace/tne load was ~38 s before row snapshots (now ~8–12 s measured from outside the App) with no timeout observed from the platform side | ? | Measure from inside the App |
 | 6 | Serverless SQL warehouse | P1A (Delta tests) | **Verified** 2026-09-23 — cold start 8.5 s, warm 1.2 s; single-row writes 2–8 s | ? | |
 | 7 | Warehouse attachable as App resource | P5 | **Verified** 2026-09-23 — `CAN_USE` resource; `valueFrom` injects the warehouse id; App SP writes Delta after `GRANT … TO \`<sp client id>\`` | ? | |
 | 8 | Unity Catalog metadata | P1A | **Verified** 2026-09-23 — catalog `orchestrationsuite`, schema `audit_ledger` | ? | Names come from `DBX_CATALOG` / `DBX_SCHEMA` only |
 | 9 | Unity Catalog managed storage (Delta writes) | P1A | **Verified** 2026-09-23 — Databricks-managed storage | ? | |
 | 10 | Delta features: CHECK constraints, `appendOnly`, deletion vectors, row tracking | P1A | **Verified** 2026-09-23 — CHECK enforced; DV + row tracking accepted; CAS returns 1 then 0 affected rows | ? | appendOnly verified by the live contract suite |
-| 11 | `DESCRIBE HISTORY` + `VERSION AS OF` on source tables | P3 / P5 | `DESCRIBE HISTORY` **verified**; `VERSION AS OF` pending | ? | |
-| 12 | Volumes (uploads/, exports/) | P5 | Unverified (no Volume exists) | ? | Path from `DBX_VOLUME` only |
+| 11 | `DESCRIBE HISTORY` + `VERSION AS OF` on source tables | P3 / P5 | **Verified** 2026-09-23 — versions resolved at run creation and every read pinned with `VERSION AS OF`; UC reads equal the source files exactly (8/8 tables) | ? | |
+| 12 | Volumes (uploads/, exports/) | P5 | **Verified** 2026-09-23 — `orchestrationsuite.audit_ledger.files`: XLSX workpapers and per-run Parquet row snapshots written by the App SP and read back with matching sha256; `tne_source.raw` used for source loading | ? | Path from `DBX_VOLUME` only; user file upload flow (P5) still to build |
 | 13 | Workspace files (App source upload) | P5 | **Verified** 2026-09-23 | ? | |
 | 14 | Pay-per-token model serving — Sonnet class | P6 | **Verified present** 2026-09-23 (`databricks-claude-sonnet-5`) | ? | Invocation and parameter matrix not yet run (§11) |
 | 15 | Pay-per-token model serving — GPT-OSS | P6 | **Verified present** 2026-09-23 (`databricks-gpt-oss-120b`, `-20b`) | ? | As above |
