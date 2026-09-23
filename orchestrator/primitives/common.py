@@ -314,10 +314,22 @@ def build_metrics(
             v = float(frame[col].max()) if frame is not None and len(frame) else 0.0
             metric = Metric(value=v, unit=unit or "AUD", source_ref=_base_source_ref(population, [col], grain))
         elif kind == "pct_of_population":
+            # CLAUDE.md P2/P3 gate review item 6 (G10): an empty population
+            # (denom == 0) has no defined percentage -- 0.0 would silently
+            # claim "zero percent flagged" when the true answer is "nothing
+            # to divide by", which reads identically to a genuinely clean
+            # population in every chart/export downstream. None + a
+            # not_testable-style reason in source_ref makes that distinction
+            # visible instead of erasing it.
             n = len(scored_units) if scored_units is not None else (len(row_df) if row_df is not None else 0)
             denom = values.get("population_size", population.rows)
-            v = round(n / denom * 100, 1) if denom else 0.0
-            metric = Metric(value=v, unit=unit or "%", source_ref=_base_source_ref(population, columns, grain))
+            source_ref = _base_source_ref(population, columns, grain)
+            if denom:
+                v = round(n / denom * 100, 1)
+            else:
+                v = None
+                source_ref = {**source_ref, "reason": "not_testable: population is empty, percentage is undefined"}
+            metric = Metric(value=v, unit=unit or "%", source_ref=source_ref)
         elif kind == "excess":
             v = float(values.get("excess", 0.0))
             metric = Metric(value=v, unit=unit or "AUD", source_ref=_base_source_ref(population, columns, grain))

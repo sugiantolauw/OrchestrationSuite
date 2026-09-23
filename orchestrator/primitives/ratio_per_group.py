@@ -79,6 +79,25 @@ def run(ctx: PrimitiveContext, params: dict) -> PrimitiveResult:
     flag = params.get("flag", "RF_RATIO_PER_GROUP")
     group_by = params.get("group_by")
 
+    if len(df) == 0:
+        # CLAUDE.md P2/P3 gate review item 6 (G10): `work.apply(..., axis=1)`
+        # below, on an empty frame, returns an empty DataFrame rather than an
+        # empty Series (pandas cannot infer the output shape without calling
+        # the function at least once) -- the later `values > limits`
+        # comparison then raises "Operands are not aligned" instead of
+        # zero exceptions. Short-circuit before groupby/apply ever runs: an
+        # empty population has zero exceptions, definitionally, on every
+        # code path below.
+        values = {"population_size": 0, "assessed": 0}
+        for case in params.get("limit_cases", {}):
+            values[f"count_{case}"] = 0
+        metrics = build_metrics(
+            params.get("metrics", {}), population=population,
+            default_columns=[num_col, den_col], grain=",".join(group_by) if group_by else "row",
+            row_df=df, group_df=None, scored_units=[], values=values,
+        )
+        return PrimitiveResult(metrics=metrics, flags=flags_from_rows(df, flag=flag), scored_units=[])
+
     if group_by:
         num_agg = params.get("numerator_aggregate", "sum")
         agg_kwargs = {"__num": (num_col, num_agg), "__den": (den_col, "first")}

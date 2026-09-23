@@ -112,10 +112,13 @@ def t6_1a_approver_review(ctx: PrimitiveContext, params: dict) -> PrimitiveResul
     approver_id_col = params["approver_id_column"]
     approver_name_col = params["approver_name_column"]
     approver_count = int(df[approver_id_col].nunique()) if total_reports else 0
-    no_receipt_pct = round(float((~receipt_viewed).mean() * 100), 1) if total_reports else 0.0
-    instant_pct = round(float(instant.mean() * 100), 1) if total_reports else 0.0
+    # CLAUDE.md P2/P3 gate review item 6 (G10): a percentage over zero
+    # reports is undefined, not zero -- 0.0 would read identically to
+    # "every report reviewed properly", the opposite of "nothing to assess".
+    no_receipt_pct = round(float((~receipt_viewed).mean() * 100), 1) if total_reports else None
+    instant_pct = round(float(instant.mean() * 100), 1) if total_reports else None
     worst_case_n = int(worst_case.sum())
-    worst_case_pct = round(worst_case_n / total_reports * 100, 1) if total_reports else 0.0
+    worst_case_pct = round(worst_case_n / total_reports * 100, 1) if total_reports else None
 
     approver_detail = []
     if total_reports:
