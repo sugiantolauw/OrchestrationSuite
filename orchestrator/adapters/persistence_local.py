@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime
 import hashlib
 import json
 import logging
@@ -86,6 +87,39 @@ def _attempt_id(execution_key: str) -> str:
 
 def _canonical_json(value) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
+def _metric_value_columns(value) -> tuple[float | None, str | None]:
+    # run_metrics stores a numeric `value` when the metric IS one (the common
+    # case -- every build_metrics() kind except a non-numeric "value" metric),
+    # and falls back to `value_text` (JSON-encoded) otherwise, so a metric can
+    # never be silently coerced or dropped (CLAUDE.md NN14).
+    if isinstance(value, bool):
+        return None, _canonical_json(value)
+    if isinstance(value, (int, float)):
+        return float(value), None
+    return None, _canonical_json(value)
+
+
+def _metric_dict_from_row(row: dict) -> dict:
+    value = row["value"] if row["value"] is not None else (
+        json.loads(row["value_text"]) if row["value_text"] is not None else None
+    )
+    return {
+        "value": value,
+        "unit": row.get("unit"),
+        "source_ref": json.loads(row["source_ref_json"]) if row.get("source_ref_json") else {},
+        "test_id": row.get("test_id"),
+    }
+
+
+def _add_seconds(ts: str, seconds: float) -> str:
+    from datetime import timedelta
+
+    from orchestrator.timeutil import normalise_ts
+
+    dt = datetime.datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    return normalise_ts(dt + timedelta(seconds=seconds))
 
 
 def _finding_row_values(
@@ -814,6 +848,236 @@ class LocalPersistence:
         try:
             rows = conn.execute(
                 f"SELECT run_id FROM run_state WHERE status IN ({placeholders})", statuses
+            ).fetchall()
+        finally:
+            self._release(conn)
+        return [r["run_id"] for r in rows]
+
+    # ── P3 run outputs ───────────────────────────────────────────────────────
+
+    def write_flagged_rows(self, run_id: str, rows: list[dict]) -> None:
+        with self._writer() as conn:
+            conn.execute("DELETE FROM flagged_rows WHERE run_id = ?", (run_id,))
+            conn.executemany(
+                "INSERT INTO flagged_rows (run_id, source, row_key, flag, group_id) VALUES (?,?,?,?,?)",
+                [
+                    (run_id, r["source"], r["row_key"], r["flag"], r.get("group_id"))
+                    for r in rows
+                ],
+            )
+
+    def list_flagged_rows(self, run_id: str, flag: str | None = None) -> list[dict]:
+        conn = self._connect()
+        try:
+            if flag is None:
+                rows = conn.execute(
+                    "SELECT * FROM flagged_rows WHERE run_id = ? ORDER BY source, row_key, flag",
+                    (run_id,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM flagged_rows WHERE run_id = ? AND flag = ? ORDER BY source, row_key",
+                    (run_id, flag),
+                ).fetchall()
+        finally:
+            self._release(conn)
+        return [dict(r) for r in rows]
+
+    def write_run_metrics(self, run_id: str, metrics: list[dict]) -> None:
+        with self._writer() as conn:
+            conn.execute("DELETE FROM run_metrics WHERE run_id = ?", (run_id,))
+            conn.executemany(
+                "INSERT INTO run_metrics (run_id, metric_name, value, value_text, unit, "
+                "source_ref_json, test_id) VALUES (?,?,?,?,?,?,?)",
+                [
+                    (
+                        run_id,
+                        m["metric_name"],
+                        *_metric_value_columns(m.get("value")),
+                        m.get("unit"),
+                        _canonical_json(m.get("source_ref", {})),
+                        m.get("test_id"),
+                    )
+                    for m in metrics
+                ],
+            )
+
+    def get_run_metrics(self, run_id: str) -> dict[str, dict]:
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM run_metrics WHERE run_id = ? ORDER BY metric_name", (run_id,)
+            ).fetchall()
+        finally:
+            self._release(conn)
+        return {r["metric_name"]: _metric_dict_from_row(dict(r)) for r in rows}
+
+    def write_issues_for_findings(
+        self, run_id: str, findings: list[dict], *, engagement_id, now: str
+    ) -> list[dict]:
+        created: list[dict] = []
+        with self._writer() as conn:
+            for finding in findings:
+                issue_id = f"ISS-{finding['finding_id']}"
+                existing = conn.execute(
+                    "SELECT issue_id FROM issues WHERE issue_id = ?", (issue_id,)
+                ).fetchone()
+                if existing is not None:
+                    continue
+                conn.execute(
+                    "INSERT INTO issues (issue_id, engagement_id, rule_id, title, description, "
+                    "rating, status, raised_by, raised_at, owner, due_date, remediation_plan, "
+                    "management_response, prior_issue_id, finding_ids_json, run_ids_json, "
+                    "created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        issue_id,
+                        engagement_id,
+                        finding.get("rule_id"),
+                        finding["title"],
+                        finding.get("observation"),
+                        finding.get("severity"),
+                        "draft",
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        _canonical_json([finding["finding_id"]]),
+                        _canonical_json([run_id]),
+                        now,
+                        now,
+                    ),
+                )
+                created.append({"issue_id": issue_id, "finding_id": finding["finding_id"]})
+        return created
+
+    def write_management_actions(self, run_id: str, actions: list[dict], *, now: str) -> None:
+        with self._writer() as conn:
+            conn.execute("DELETE FROM management_actions WHERE run_id = ?", (run_id,))
+            for a in actions:
+                conn.execute(
+                    "INSERT INTO management_actions (action_id, issue_id, finding_id, run_id, "
+                    "engagement_id, skill_id, title, description, owner, risk, status, "
+                    "target_date, potential_exposure, evidence_link, created_at, last_updated) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        a["action_id"],
+                        a.get("issue_id"),
+                        a.get("finding_id"),
+                        run_id,
+                        a.get("engagement_id"),
+                        a.get("skill_id"),
+                        a["title"],
+                        a.get("description"),
+                        a.get("owner"),
+                        a.get("risk"),
+                        a.get("status", "draft"),
+                        a.get("target_date"),
+                        a.get("potential_exposure"),
+                        a.get("evidence_link"),
+                        now,
+                        now,
+                    ),
+                )
+
+    def list_management_actions(self, filters: dict | None = None) -> list[dict]:
+        filters = filters or {}
+        clauses = []
+        params: list = []
+        for col in ("run_id", "skill_id", "engagement_id", "status"):
+            if filters.get(col):
+                clauses.append(f"ma.{col} = ?")
+                params.append(filters[col])
+        sql = (
+            "SELECT ma.*, f.title AS finding_title, f.observation AS finding_observation "
+            "FROM management_actions ma LEFT JOIN findings f ON f.finding_id = ma.finding_id"
+        )
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY ma.created_at DESC"
+        conn = self._connect()
+        try:
+            rows = conn.execute(sql, params).fetchall()
+        finally:
+            self._release(conn)
+        return [dict(r) for r in rows]
+
+    def record_export(
+        self, run_id: str, kind: str, *, path: str, sha256: str, created_by: str, now: str
+    ) -> dict:
+        with self._writer() as conn:
+            conn.execute(
+                "INSERT INTO exports (run_id, kind, path, sha256, created_at, created_by) "
+                "VALUES (?,?,?,?,?,?) ON CONFLICT(run_id, kind) DO UPDATE SET "
+                "path = excluded.path, sha256 = excluded.sha256, created_at = excluded.created_at, "
+                "created_by = excluded.created_by",
+                (run_id, kind, path, sha256, now, created_by),
+            )
+        return {
+            "run_id": run_id, "kind": kind, "path": path, "sha256": sha256,
+            "created_at": now, "created_by": created_by,
+        }
+
+    def list_exports(self, run_id: str) -> list[dict]:
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM exports WHERE run_id = ? ORDER BY kind", (run_id,)
+            ).fetchall()
+        finally:
+            self._release(conn)
+        return [dict(r) for r in rows]
+
+    # ── leases (CLAUDE.md §9C P1A concurrency foundation, §2.3 rule 3) ──────
+
+    def acquire_lease(self, run_id: str, worker_id: str, *, ttl_s: float, now: str) -> bool:
+        expires_at = _add_seconds(now, ttl_s)
+        with self._writer() as conn:
+            row = conn.execute(
+                "SELECT claimed_by, lease_expires_at FROM run_leases WHERE run_id = ?", (run_id,)
+            ).fetchone()
+            if row is None:
+                conn.execute(
+                    "INSERT INTO run_leases (run_id, claimed_by, claimed_at, heartbeat_at, "
+                    "lease_expires_at) VALUES (?,?,?,?,?)",
+                    (run_id, worker_id, now, now, expires_at),
+                )
+                return True
+            if row["lease_expires_at"] <= now:
+                # Expired -- take it over, whoever held it before.
+                conn.execute(
+                    "UPDATE run_leases SET claimed_by = ?, claimed_at = ?, heartbeat_at = ?, "
+                    "lease_expires_at = ? WHERE run_id = ? AND lease_expires_at = ?",
+                    (worker_id, now, now, expires_at, run_id, row["lease_expires_at"]),
+                )
+                return conn.execute(
+                    "SELECT claimed_by FROM run_leases WHERE run_id = ?", (run_id,)
+                ).fetchone()["claimed_by"] == worker_id
+            return False
+
+    def renew_lease(self, run_id: str, worker_id: str, *, ttl_s: float, now: str) -> bool:
+        expires_at = _add_seconds(now, ttl_s)
+        with self._writer() as conn:
+            cur = conn.execute(
+                "UPDATE run_leases SET heartbeat_at = ?, lease_expires_at = ? "
+                "WHERE run_id = ? AND claimed_by = ?",
+                (now, expires_at, run_id, worker_id),
+            )
+            return cur.rowcount > 0
+
+    def release_lease(self, run_id: str, worker_id: str) -> None:
+        with self._writer() as conn:
+            conn.execute(
+                "DELETE FROM run_leases WHERE run_id = ? AND claimed_by = ?", (run_id, worker_id)
+            )
+
+    def expired_leases(self, now: str) -> list[str]:
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT run_id FROM run_leases WHERE lease_expires_at <= ?", (now,)
             ).fetchall()
         finally:
             self._release(conn)

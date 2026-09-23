@@ -180,6 +180,60 @@ class PersistenceAdapter(Protocol):
     def set_finding_review_state(self, finding_id: str, *, to_state: str, actor: str, now: str) -> dict:
         ...
 
+    # ── P3 run outputs (CLAUDE.md §4.2, §9C) ────────────────────────────────
+
+    def write_flagged_rows(self, run_id: str, rows: list[dict]) -> None:
+        """Idempotent replace-per-run: `rows` (each {source, row_key, flag,
+        group_id}) becomes this run's entire flagged_rows set -- a re-run of the
+        node that produced them overwrites, never appends duplicates."""
+        ...
+
+    def list_flagged_rows(self, run_id: str, flag: str | None = None) -> list[dict]:
+        ...
+
+    def write_run_metrics(self, run_id: str, metrics: list[dict]) -> None:
+        """Idempotent replace-per-run: `metrics` (each {metric_name, value,
+        unit, source_ref, test_id}) becomes this run's entire run_metrics set."""
+        ...
+
+    def get_run_metrics(self, run_id: str) -> dict[str, dict]:
+        ...
+
+    def write_issues_for_findings(
+        self, run_id: str, findings: list[dict], *, engagement_id: str | None, now: str
+    ) -> list[dict]:
+        """One issue per finding (issue_id = f'ISS-{finding_id}'), status 'draft'.
+        Idempotent: a repeat call for an issue_id that already exists leaves it
+        untouched (its status may have moved on since)."""
+        ...
+
+    def write_management_actions(self, run_id: str, actions: list[dict], *, now: str) -> None:
+        """Idempotent replace-per-run, same shape as write_flagged_rows."""
+        ...
+
+    def list_management_actions(self, filters: dict | None = None) -> list[dict]:
+        ...
+
+    def record_export(
+        self, run_id: str, kind: str, *, path: str, sha256: str, created_by: str, now: str
+    ) -> dict:
+        ...
+
+    def list_exports(self, run_id: str) -> list[dict]:
+        ...
+
+    def acquire_lease(self, run_id: str, worker_id: str, *, ttl_s: float, now: str) -> bool:
+        ...
+
+    def renew_lease(self, run_id: str, worker_id: str, *, ttl_s: float, now: str) -> bool:
+        ...
+
+    def release_lease(self, run_id: str, worker_id: str) -> None:
+        ...
+
+    def expired_leases(self, now: str) -> list[str]:
+        ...
+
 
 class PromptRepository(Protocol):
     def get_prompt(self, task: str, *, skill_id: str | None = None) -> str:

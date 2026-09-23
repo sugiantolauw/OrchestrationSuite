@@ -129,6 +129,24 @@ class InvalidReviewStateTransition(Exception):
         )
 
 
+class ReconciliationError(Exception):
+    """G6 (CLAUDE.md §5): tested-population rows/amount/min-max-date must
+    reconcile to source totals with zero unexplained variance, or the run fails
+    outright rather than proceeding on a number nobody can trust."""
+
+    def __init__(self, run_id: str, differences: list[str]):
+        self.run_id = run_id
+        self.differences = list(differences)
+        super().__init__(f"run {run_id!r}: reconciliation variance: {'; '.join(differences)}")
+
+
+class LeaseNotHeld(Exception):
+    def __init__(self, run_id: str, worker_id: str):
+        self.run_id = run_id
+        self.worker_id = worker_id
+        super().__init__(f"run {run_id!r}: lease is not held by worker {worker_id!r}")
+
+
 class NonDraftFindingWouldBeDeleted(Exception):
     def __init__(self, run_id: str, finding_ids: list[str]):
         self.run_id = run_id

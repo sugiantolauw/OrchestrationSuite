@@ -116,6 +116,31 @@ def _canonical_json(value) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
 
 
+def _metric_value_columns(value) -> tuple[float | None, str | None]:
+    if isinstance(value, bool):
+        return None, _canonical_json(value)
+    if isinstance(value, (int, float)):
+        return float(value), None
+    return None, _canonical_json(value)
+
+
+def _metric_dict_from_row(row: dict) -> dict:
+    value = row["value"] if row["value"] is not None else (
+        json.loads(row["value_text"]) if row.get("value_text") is not None else None
+    )
+    return {
+        "value": value,
+        "unit": row.get("unit"),
+        "source_ref": json.loads(row["source_ref_json"]) if row.get("source_ref_json") else {},
+        "test_id": row.get("test_id"),
+    }
+
+
+def _add_seconds(ts: str, seconds: float) -> str:
+    dt = _dt.datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    return normalise_ts(dt + _dt.timedelta(seconds=seconds))
+
+
 def _finding_row_values(
     run_id: str, finding: dict, *, engagement_id, skill_id, skill_version, now: str
 ) -> dict:
@@ -1110,6 +1135,270 @@ class DeltaPersistence:
         with self._cursor_ctx() as conn:
             cur = self._execute(
                 conn, f"SELECT run_id FROM {self._table('run_state')} WHERE status IN ({placeholders})", params
+            )
+            return [r["run_id"] for r in _fetchall_dicts(cur)]
+
+    # ── P3 run outputs ───────────────────────────────────────────────────────
+
+    def write_flagged_rows(self, run_id: str, rows: list[dict]) -> None:
+        with self._cursor_ctx() as conn:
+            self._execute(
+                conn, f"DELETE FROM {self._table('flagged_rows')} WHERE run_id = :run_id", {"run_id": run_id}
+            )
+            for r in rows:
+                self._execute(
+                    conn,
+                    f"INSERT INTO {self._table('flagged_rows')} (run_id, source, row_key, flag, group_id) "
+                    "VALUES (:run_id, :source, :row_key, :flag, :group_id)",
+                    {
+                        "run_id": run_id, "source": r["source"], "row_key": r["row_key"],
+                        "flag": r["flag"], "group_id": r.get("group_id"),
+                    },
+                )
+
+    def list_flagged_rows(self, run_id: str, flag: str | None = None) -> list[dict]:
+        with self._cursor_ctx() as conn:
+            if flag is None:
+                cur = self._execute(
+                    conn,
+                    f"SELECT * FROM {self._table('flagged_rows')} WHERE run_id = :run_id "
+                    "ORDER BY source, row_key, flag",
+                    {"run_id": run_id},
+                )
+            else:
+                cur = self._execute(
+                    conn,
+                    f"SELECT * FROM {self._table('flagged_rows')} WHERE run_id = :run_id AND flag = :flag "
+                    "ORDER BY source, row_key",
+                    {"run_id": run_id, "flag": flag},
+                )
+            return _fetchall_dicts(cur)
+
+    def write_run_metrics(self, run_id: str, metrics: list[dict]) -> None:
+        with self._cursor_ctx() as conn:
+            self._execute(
+                conn, f"DELETE FROM {self._table('run_metrics')} WHERE run_id = :run_id", {"run_id": run_id}
+            )
+            for m in metrics:
+                value, value_text = _metric_value_columns(m.get("value"))
+                self._execute(
+                    conn,
+                    f"INSERT INTO {self._table('run_metrics')} (run_id, metric_name, value, value_text, "
+                    "unit, source_ref_json, test_id) VALUES (:run_id, :metric_name, :value, :value_text, "
+                    ":unit, :source_ref_json, :test_id)",
+                    {
+                        "run_id": run_id,
+                        "metric_name": m["metric_name"],
+                        "value": value,
+                        "value_text": value_text,
+                        "unit": m.get("unit"),
+                        "source_ref_json": _canonical_json(m.get("source_ref", {})),
+                        "test_id": m.get("test_id"),
+                    },
+                )
+
+    def get_run_metrics(self, run_id: str) -> dict[str, dict]:
+        with self._cursor_ctx() as conn:
+            cur = self._execute(
+                conn,
+                f"SELECT * FROM {self._table('run_metrics')} WHERE run_id = :run_id ORDER BY metric_name",
+                {"run_id": run_id},
+            )
+            rows = _fetchall_dicts(cur)
+        return {r["metric_name"]: _metric_dict_from_row(r) for r in rows}
+
+    def write_issues_for_findings(
+        self, run_id: str, findings: list[dict], *, engagement_id, now: str
+    ) -> list[dict]:
+        created: list[dict] = []
+        with self._cursor_ctx() as conn:
+            for finding in findings:
+                issue_id = f"ISS-{finding['finding_id']}"
+                cur = self._execute(
+                    conn,
+                    f"SELECT issue_id FROM {self._table('issues')} WHERE issue_id = :issue_id",
+                    {"issue_id": issue_id},
+                )
+                if _fetchone_dict(cur) is not None:
+                    continue
+                self._execute(
+                    conn,
+                    f"INSERT INTO {self._table('issues')} (issue_id, engagement_id, rule_id, title, "
+                    "description, rating, status, raised_by, raised_at, owner, due_date, "
+                    "remediation_plan, management_response, prior_issue_id, finding_ids_json, "
+                    "run_ids_json, created_at, updated_at) VALUES (:issue_id, :engagement_id, "
+                    ":rule_id, :title, :description, :rating, :status, NULL, NULL, NULL, NULL, "
+                    "NULL, NULL, NULL, :finding_ids_json, :run_ids_json, :created_at, :updated_at)",
+                    {
+                        "issue_id": issue_id,
+                        "engagement_id": engagement_id,
+                        "rule_id": finding.get("rule_id"),
+                        "title": finding["title"],
+                        "description": finding.get("observation"),
+                        "rating": finding.get("severity"),
+                        "status": "draft",
+                        "finding_ids_json": _canonical_json([finding["finding_id"]]),
+                        "run_ids_json": _canonical_json([run_id]),
+                        "created_at": now,
+                        "updated_at": now,
+                    },
+                )
+                created.append({"issue_id": issue_id, "finding_id": finding["finding_id"]})
+        return created
+
+    def write_management_actions(self, run_id: str, actions: list[dict], *, now: str) -> None:
+        with self._cursor_ctx() as conn:
+            self._execute(
+                conn,
+                f"DELETE FROM {self._table('management_actions')} WHERE run_id = :run_id",
+                {"run_id": run_id},
+            )
+            for a in actions:
+                self._execute(
+                    conn,
+                    f"INSERT INTO {self._table('management_actions')} (action_id, issue_id, "
+                    "finding_id, run_id, engagement_id, skill_id, title, description, owner, risk, "
+                    "status, target_date, potential_exposure, evidence_link, created_at, "
+                    "last_updated) VALUES (:action_id, :issue_id, :finding_id, :run_id, "
+                    ":engagement_id, :skill_id, :title, :description, :owner, :risk, :status, "
+                    ":target_date, :potential_exposure, :evidence_link, :created_at, :last_updated)",
+                    {
+                        "action_id": a["action_id"],
+                        "issue_id": a.get("issue_id"),
+                        "finding_id": a.get("finding_id"),
+                        "run_id": run_id,
+                        "engagement_id": a.get("engagement_id"),
+                        "skill_id": a.get("skill_id"),
+                        "title": a["title"],
+                        "description": a.get("description"),
+                        "owner": a.get("owner"),
+                        "risk": a.get("risk"),
+                        "status": a.get("status", "draft"),
+                        "target_date": a.get("target_date"),
+                        "potential_exposure": a.get("potential_exposure"),
+                        "evidence_link": a.get("evidence_link"),
+                        "created_at": now,
+                        "last_updated": now,
+                    },
+                )
+
+    def list_management_actions(self, filters: dict | None = None) -> list[dict]:
+        filters = filters or {}
+        clauses = []
+        params: dict = {}
+        for col in ("run_id", "skill_id", "engagement_id", "status"):
+            if filters.get(col):
+                clauses.append(f"ma.{col} = :{col}")
+                params[col] = filters[col]
+        sql_text = (
+            f"SELECT ma.*, f.title AS finding_title, f.observation AS finding_observation "
+            f"FROM {self._table('management_actions')} ma "
+            f"LEFT JOIN {self._table('findings')} f ON f.finding_id = ma.finding_id"
+        )
+        if clauses:
+            sql_text += " WHERE " + " AND ".join(clauses)
+        sql_text += " ORDER BY ma.created_at DESC"
+        with self._cursor_ctx() as conn:
+            cur = self._execute(conn, sql_text, params)
+            return _fetchall_dicts(cur)
+
+    def record_export(
+        self, run_id: str, kind: str, *, path: str, sha256: str, created_by: str, now: str
+    ) -> dict:
+        with self._cursor_ctx() as conn:
+            self._execute(
+                conn,
+                f"MERGE INTO {self._table('exports')} t "
+                "USING (SELECT :run_id AS run_id, :kind AS kind) s "
+                "ON t.run_id = s.run_id AND t.kind = s.kind "
+                "WHEN MATCHED THEN UPDATE SET path = :path, sha256 = :sha256, "
+                "created_at = :created_at, created_by = :created_by "
+                "WHEN NOT MATCHED THEN INSERT (run_id, kind, path, sha256, created_at, created_by) "
+                "VALUES (:run_id, :kind, :path, :sha256, :created_at, :created_by)",
+                {
+                    "run_id": run_id, "kind": kind, "path": path, "sha256": sha256,
+                    "created_at": now, "created_by": created_by,
+                },
+            )
+        return {
+            "run_id": run_id, "kind": kind, "path": path, "sha256": sha256,
+            "created_at": now, "created_by": created_by,
+        }
+
+    def list_exports(self, run_id: str) -> list[dict]:
+        with self._cursor_ctx() as conn:
+            cur = self._execute(
+                conn,
+                f"SELECT * FROM {self._table('exports')} WHERE run_id = :run_id ORDER BY kind",
+                {"run_id": run_id},
+            )
+            return _fetchall_dicts(cur)
+
+    # ── leases (CLAUDE.md §9C P1A concurrency foundation, §2.3 rule 3) ──────
+
+    def acquire_lease(self, run_id: str, worker_id: str, *, ttl_s: float, now: str) -> bool:
+        expires_at = _add_seconds(now, ttl_s)
+        with self._cursor_ctx() as conn:
+            cur = self._execute(
+                conn,
+                f"SELECT claimed_by, lease_expires_at FROM {self._table('run_leases')} "
+                "WHERE run_id = :run_id",
+                {"run_id": run_id},
+            )
+            row = _fetchone_dict(cur)
+            if row is None:
+                self._execute(
+                    conn,
+                    f"INSERT INTO {self._table('run_leases')} (run_id, claimed_by, claimed_at, "
+                    "heartbeat_at, lease_expires_at) VALUES (:run_id, :claimed_by, :now, :now, "
+                    ":expires_at)",
+                    {"run_id": run_id, "claimed_by": worker_id, "now": now, "expires_at": expires_at},
+                )
+                return True
+            if row["lease_expires_at"] <= now:
+                self._execute(
+                    conn,
+                    f"UPDATE {self._table('run_leases')} SET claimed_by = :claimed_by, "
+                    "claimed_at = :now, heartbeat_at = :now, lease_expires_at = :expires_at "
+                    "WHERE run_id = :run_id AND lease_expires_at = :prior_expiry",
+                    {
+                        "claimed_by": worker_id, "now": now, "expires_at": expires_at,
+                        "run_id": run_id, "prior_expiry": row["lease_expires_at"],
+                    },
+                )
+                cur2 = self._execute(
+                    conn,
+                    f"SELECT claimed_by FROM {self._table('run_leases')} WHERE run_id = :run_id",
+                    {"run_id": run_id},
+                )
+                return _fetchone_dict(cur2)["claimed_by"] == worker_id
+            return False
+
+    def renew_lease(self, run_id: str, worker_id: str, *, ttl_s: float, now: str) -> bool:
+        expires_at = _add_seconds(now, ttl_s)
+        with self._cursor_ctx() as conn:
+            cur = self._execute(
+                conn,
+                f"UPDATE {self._table('run_leases')} SET heartbeat_at = :now, "
+                "lease_expires_at = :expires_at WHERE run_id = :run_id AND claimed_by = :claimed_by",
+                {"now": now, "expires_at": expires_at, "run_id": run_id, "claimed_by": worker_id},
+            )
+            return _num_affected_rows(cur) > 0
+
+    def release_lease(self, run_id: str, worker_id: str) -> None:
+        with self._cursor_ctx() as conn:
+            self._execute(
+                conn,
+                f"DELETE FROM {self._table('run_leases')} WHERE run_id = :run_id AND claimed_by = :claimed_by",
+                {"run_id": run_id, "claimed_by": worker_id},
+            )
+
+    def expired_leases(self, now: str) -> list[str]:
+        with self._cursor_ctx() as conn:
+            cur = self._execute(
+                conn,
+                f"SELECT run_id FROM {self._table('run_leases')} WHERE lease_expires_at <= :now",
+                {"now": now},
             )
             return [r["run_id"] for r in _fetchall_dicts(cur)]
 
