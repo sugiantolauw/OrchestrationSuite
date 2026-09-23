@@ -77,7 +77,6 @@ def _build_bundle(tmp_dir: Path, app_yaml_text: str) -> None:
     ignore = shutil.ignore_patterns("__pycache__", "*.pyc", ".pytest_cache", "*.db")
     for name in ("app", "orchestrator", "skills"):
         shutil.copytree(REPO_ROOT / name, tmp_dir / name, ignore=ignore)
-    shutil.copy(REPO_ROOT / "requirements.txt", tmp_dir / "requirements.txt")
     # P2/P3 gate review item 8: orchestrator.fingerprint.compute_fingerprint
     # hashes requirements.lock (the sibling of requirements.txt), not
     # requirements.txt itself -- the deployed app resolves REPO_ROOT from its
@@ -95,6 +94,16 @@ def _build_bundle(tmp_dir: Path, app_yaml_text: str) -> None:
             f"{lock_path} is missing -- run scripts/generate_requirements_lock.py first "
             f"(CLAUDE.md P2/P3 gate review item 8)"
         )
+    # Non-blocking item 1 (P2/P3 gate review): Databricks Apps installs
+    # dependencies from the bundle's OWN requirements.txt, not requirements.lock
+    # -- shipping the loose, unpinned requirements.txt there meant the
+    # fingerprint's dependency_lock_hash (hashed from requirements.lock)
+    # described a set of pinned versions that was never actually what got
+    # installed. The bundle's requirements.txt IS requirements.lock's exact
+    # content (byte-for-byte the same file, under both names) so what pip
+    # installs and what the fingerprint hashes are, by construction, the
+    # same bytes -- never hashing a file that describes a different install.
+    shutil.copy(lock_path, tmp_dir / "requirements.txt")
     shutil.copy(lock_path, tmp_dir / "requirements.lock")
     (tmp_dir / "app.yaml").write_text(app_yaml_text)
 
