@@ -353,9 +353,9 @@ def _fmt_currency(value) -> str:
 
 def _fmt_count(value) -> str:
     """A count-unit metric (CLAUDE.md build brief P3 §2's total_records etc.)
-    may come back as a float from a SQL aggregation (152921.0) even though
-    it is conceptually an integer -- render it as one rather than
-    "152,921.0"."""
+    may come back as a float from a SQL aggregation even though it is
+    conceptually an integer -- render it as one rather than with a
+    trailing ".0"."""
     return f"{int(round(value)):,}" if isinstance(value, (int, float)) else str(value)
 
 
@@ -1272,8 +1272,8 @@ def _claims_population_panel(payload: dict | None) -> html.Div | None:
     amount) -- ports reference_app/app.py's 'Population Reconciliation'
     panel, but every figure here is read from this run's persisted metrics
     (skills/tne_exco/plan.yaml), never recomputed or hardcoded (CLAUDE.md
-    §0.2 N6 -- computation.py's `total_records: 152_921` is exactly the
-    number this replaces)."""
+    §0.2 N6 -- computation.py's hardcoded `total_records` placeholder is
+    exactly the shape this replaces)."""
     rows_chip = []
     for label, rows_metric, amount_metric in [
         ("Prepared", "claims_prepared_rows", "claims_prepared_amount"),

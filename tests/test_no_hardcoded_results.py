@@ -7,6 +7,15 @@ import yaml
 
 ORCHESTRATOR_DIR = Path(__file__).parent.parent / "orchestrator"
 SKILLS_DIR = Path(__file__).parent.parent / "skills"
+APP_DIR = Path(__file__).parent.parent / "app"
+
+# CLAUDE.md P2/P3 gate review item 4: app/tests/test_layouts.py asserts these
+# exact placeholder strings are ABSENT from the real methodology page (a
+# regression test for the app/src/test_catalogue.py hardcode this same gate
+# review deleted) -- it legitimately needs the literal values to check for
+# their absence, which is the opposite of reproducing the bug. Nothing else
+# under app/ is exempted.
+_APP_ALLOWED_FILES = {APP_DIR / "tests" / "test_layouts.py"}
 
 _PLACEHOLDER_PATTERNS = [
     re.compile(r"\b132\b"),  # computation.py compute_test_4_3_cached's hardcoded `flagged`
@@ -21,9 +30,9 @@ _PLACEHOLDER_PATTERNS = [
 
 
 def _all_source_files():
-    for base in (ORCHESTRATOR_DIR, SKILLS_DIR):
+    for base in (ORCHESTRATOR_DIR, SKILLS_DIR, APP_DIR):
         for path in base.rglob("*.py"):
-            if "__pycache__" in path.parts:
+            if "__pycache__" in path.parts or path in _APP_ALLOWED_FILES:
                 continue
             yield path
         for path in base.rglob("*.yaml"):

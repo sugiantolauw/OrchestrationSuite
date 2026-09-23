@@ -83,6 +83,10 @@ def get_skill(skill_id: str) -> dict | None:
     return service.get_skill(get_context(), skill_id)
 
 
+def list_skill_versions(skill_id: str) -> list[dict]:
+    return service.list_skill_versions(get_context(), skill_id)
+
+
 # ── Governed data discovery ──────────────────────────────────────────────────
 
 def list_governed_tables() -> list[dict]:

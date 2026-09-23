@@ -264,6 +264,21 @@ def _method_section_nav(active: str) -> html.Div:
 
 
 def _method_test_row(test: dict) -> html.Tr:
+    # CLAUDE.md §0.4/G8: a threshold whose value came from an analyst-set,
+    # not-yet-policy-confirmed entry is labelled inline -- the same rule
+    # applied to findings (workspace_tne.py's _finding_card), applied here
+    # too since this table is the reader's first look at where each number
+    # in the Skill comes from.
+    provenance = test.get("threshold_provenance") or []
+    pending = any(
+        p.get("type") == "analyst-set" and p.get("pending_policy_confirmation") for p in provenance
+    )
+    threshold_cell = [html.Span(test.get("threshold", ""))]
+    if pending:
+        threshold_cell.append(html.Div(
+            "Analyst-set — pending policy confirmation",
+            style={"fontSize": 10, "color": "#6b4a00", "marginTop": 2},
+        ))
     return html.Tr([
         html.Td(test["test_id"], className="mono",
                 style={"fontWeight": 700, "color": "#1e2761", "whiteSpace": "nowrap"}),
@@ -273,7 +288,7 @@ def _method_test_row(test: dict) -> html.Tr:
         ]),
         html.Td(test["population"], style={"fontSize": 12}),
         html.Td(test["rule"], style={"fontSize": 12}),
-        html.Td(test["threshold"], style={"fontSize": 12, "whiteSpace": "nowrap"}),
+        html.Td(threshold_cell, style={"fontSize": 12, "whiteSpace": "nowrap"}),
     ])
 
 
@@ -395,25 +410,32 @@ def _tne_methodology_body(m: dict) -> list:
     ], className="method-section"))
 
     # ── Version history ────────────────────────────────
+    # Read from the real skill_versions ledger (orchestrator.service.
+    # list_skill_versions) -- never fabricated dates/narratives. Empty until
+    # this Skill has actually been published/confirmed through
+    # record_skill_version (CLAUDE.md P2/P3 gate review item 4).
     hist_rows = []
     for v in m["version_history"]:
         hist_rows.append(html.Tr([
             html.Td(f"v{v['version']}", className="mono",
                     style={"fontWeight": 700, "color": "#1e2761", "whiteSpace": "nowrap"}),
             html.Td(v["date"], style={"fontSize": 12, "color": "#6b7283", "whiteSpace": "nowrap"}),
-            html.Td(v["change"], style={"fontSize": 12.5, "color": "#3b4150"}),
+            html.Td(v.get("status", ""), style={"fontSize": 12.5, "color": "#3b4150"}),
+            html.Td(v.get("created_by", ""), style={"fontSize": 12.5, "color": "#6b7283"}),
         ]))
     sections.append(html.Section([
         html.A(id="history"),
         html.H3("Version history", className="method-h3"),
-        html.P("Every change to the Skill methodology is versioned and audit-logged.",
+        html.P("Every recorded publish/confirmation of this Skill's content, from the "
+               "immutable skill_versions ledger.",
                className="method-para"),
         html.Div([
             html.Table([
-                html.Thead(html.Tr([html.Th("Version"), html.Th("Date"), html.Th("Change")])),
+                html.Thead(html.Tr([html.Th("Version"), html.Th("Date"), html.Th("Status"), html.Th("Recorded by")])),
                 html.Tbody(hist_rows),
             ], className="plat-table"),
-        ], className="panel", style={"overflowX": "auto"}),
+        ], className="panel", style={"overflowX": "auto"}) if hist_rows else
+        html.P("No recorded version history yet.", style={"color": "#6b7283", "fontSize": 13}),
     ], className="method-section"))
 
     return sections
@@ -483,8 +505,7 @@ def skill_methodology_page(skill_id: str) -> html.Div:
     """Full methodology viewer for a single Skill."""
     from src.platform.methodology import get_methodology
 
-    skill = adapters.get_skill(skill_id)
-    m = get_methodology(skill_id, sources=(skill or {}).get("sources"))
+    m = get_methodology(skill_id)
     is_stub = m.get("is_stub", False)
 
     if is_stub:

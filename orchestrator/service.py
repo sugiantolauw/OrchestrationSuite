@@ -42,6 +42,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import string
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -347,12 +348,59 @@ def get_skill(ctx: AppContext, skill_id: str) -> dict | None:
     for e in plan_entries:
         cid = _catalogue_id_for_plan_test(e["test_id"], catalogue_ids)
         plan_tests_by_catalogue.setdefault(cid, []).append(e)
+
+    # Render each catalogue entry's `threshold` template against thresholds.yaml
+    # (CLAUDE.md §0.4/G8, P2/P3 gate review item 4): catalogue.yaml deliberately
+    # carries `{threshold_id}` placeholders rather than a hand-typed number so
+    # G8 (tests/test_g8_thresholds.py) can assert the catalogue and
+    # thresholds.yaml never disagree BY CONSTRUCTION -- but a caller reading
+    # the raw template (methodology.py, workspace_tne.py's catalogue tab) would
+    # show literal "{...}" braces unless it is resolved once, here, the same
+    # way test_g8_thresholds.py does. `threshold_provenance` names every
+    # threshold id the rendered text drew on, so the UI can label a test
+    # whose threshold is analyst-set / pending_policy_confirmation without
+    # re-parsing the template itself.
+    thresholds = _read_yaml(d / "thresholds.yaml")
+    threshold_values = {tid: spec.get("value") for tid, spec in thresholds.items()}
+    fmt = string.Formatter()
+
+    def _render_threshold(entry: dict) -> dict:
+        raw = entry.get("threshold")
+        if not isinstance(raw, str):
+            return entry
+        used_ids = [fn for _, fn, _, _ in fmt.parse(raw) if fn]
+        try:
+            rendered = raw.format(**threshold_values)
+        except (KeyError, IndexError):
+            return entry  # an id referenced isn't in thresholds.yaml -- leave the raw template, don't fabricate a number
+        return {
+            **entry,
+            "threshold": rendered,
+            "threshold_provenance": [
+                {"id": tid, **(thresholds.get(tid, {}).get("provenance") or {})} for tid in used_ids
+            ],
+        }
+
     tests_with_plan = [
-        {**t, "plan_tests": plan_tests_by_catalogue.get(t.get("test_id"), [])} for t in tests
+        {**_render_threshold(t), "plan_tests": plan_tests_by_catalogue.get(t.get("test_id"), [])} for t in tests
     ]
     flag_to_test = {e["flag"]: e["test_id"] for e in plan_entries}
 
-    return {**base, "sources": sources, "tests": tests_with_plan, "flag_to_test": flag_to_test}
+    risk_control = _read_yaml(d / "risk_control.yaml")
+
+    return {
+        **base, "sources": sources, "tests": tests_with_plan, "flag_to_test": flag_to_test,
+        "thresholds": thresholds, "risk_control": risk_control,
+    }
+
+
+def list_skill_versions(ctx: AppContext, skill_id: str) -> list[dict]:
+    """Recorded skill_versions rows for this skill_id, newest last (CLAUDE.md
+    §4.6/§8: an immutable content-hashed snapshot per publish). Empty until a
+    Skill has actually been published/confirmed through record_skill_version
+    -- the UI (methodology page) must show that explicitly, never fabricate
+    version-history entries (CLAUDE.md P2/P3 gate review item 4)."""
+    return ctx.persistence.list_skill_versions(skill_id)
 
 
 # ── Governed data discovery ───────────────────────────────────────────────────

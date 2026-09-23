@@ -64,3 +64,49 @@ def test_flag_to_test_is_the_reverse_lookup(tmp_path):
         for e in t["plan_tests"]
     }
     assert set(flag_to_test) == all_flags
+
+
+# ── threshold rendering (CLAUDE.md §0.4/G8, P2/P3 gate review item 4) ────────
+
+
+def test_catalogue_threshold_templates_are_rendered_with_real_values(tmp_path):
+    """catalogue.yaml's T3.3a threshold is a template with {..._days}
+    placeholders -- get_skill must return it resolved against
+    thresholds.yaml, never the raw "{...}" braces a UI would otherwise show
+    verbatim (methodology.py, workspace_tne.py's catalogue tab)."""
+    skill = service.get_skill(_ctx(tmp_path), "SKILL-001")
+    thresholds = skill["thresholds"]
+    t33a = next(t for t in skill["tests"] if t["test_id"] == "T3.3a")
+    assert "{" not in t33a["threshold"] and "}" not in t33a["threshold"]
+    assert str(thresholds["late_booking_domestic_days"]["value"]) in t33a["threshold"]
+    assert str(thresholds["late_booking_international_days"]["value"]) in t33a["threshold"]
+    assert str(thresholds["very_late_booking_days"]["value"]) in t33a["threshold"]
+
+
+def test_catalogue_threshold_carries_provenance_for_ui_labelling(tmp_path):
+    skill = service.get_skill(_ctx(tmp_path), "SKILL-001")
+    t33a = next(t for t in skill["tests"] if t["test_id"] == "T3.3a")
+    provenance_ids = {p["id"] for p in t33a["threshold_provenance"]}
+    assert provenance_ids == {"late_booking_domestic_days", "late_booking_international_days", "very_late_booking_days"}
+    for p in t33a["threshold_provenance"]:
+        assert p["type"] == "analyst-set"
+        assert p["pending_policy_confirmation"] is True
+
+
+def test_get_skill_exposes_thresholds_and_risk_control(tmp_path):
+    skill = service.get_skill(_ctx(tmp_path), "SKILL-001")
+    assert skill["thresholds"]["high_value_limit"]["value"] == 5000
+    assert any(c["control_id"] == "CTL-TNE-01" for c in skill["risk_control"]["controls"])
+
+
+def test_get_skill_manifest_fields_are_not_hardcoded_stale_values(tmp_path):
+    """CLAUDE.md P2/P3 gate review item 4: the app's methodology page used to
+    hardcode version "1.2"/status "Published" while the real manifest says
+    otherwise -- get_skill must be the one source of truth."""
+    skill = service.get_skill(_ctx(tmp_path), "SKILL-001")
+    import yaml as _yaml
+
+    manifest = _yaml.safe_load((REPO_ROOT / "skills" / "tne_exco" / "manifest.yaml").read_text())
+    assert skill["version"] == manifest["version"]
+    assert skill["owner"] == manifest["owner"]
+    assert skill["status"].lower().replace(" ", "_") == str(manifest["status"]).lower()

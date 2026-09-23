@@ -27,6 +27,41 @@ def test_skill_methodology_page_builds():
     assert skill_methodology_page("SKILL-001") is not None
 
 
+def test_skill_methodology_page_reflects_the_real_skill_not_a_stale_copy(monkeypatch, tmp_path):
+    """CLAUDE.md §3 NN16, P2/P3 gate review item 4: the methodology page used
+    to render app/src/test_catalogue.py's own hardcoded version ("1.2"),
+    status ("Published") and a stale "$1,000 per employee per day" threshold
+    text, independent of the real Skill under skills/tne_exco/. Renders
+    against the REAL orchestrator.service (overriding this file's autouse
+    fake_backend fixture for this one test) so drift in the real wiring is
+    actually caught here, not just in the fake."""
+    from pathlib import Path
+
+    from orchestrator import service as real_service
+
+    repo_root = Path(__file__).resolve().parents[2]
+    env = {
+        "ORCH_BACKEND": "local",
+        "ORCH_LOCAL_DB": str(tmp_path / "orch.db"),
+        "ORCH_LOCAL_DATA_ROOT": str(tmp_path),
+        "ORCH_LOCAL_EXPORT_ROOT": str(tmp_path / "exports"),
+        "SKILLS_DIR": str(repo_root / "skills"),
+    }
+    monkeypatch.setattr(adapters, "service", real_service)
+    adapters._ctx = None
+    original_build = real_service.build_app_context
+    monkeypatch.setattr(real_service, "build_app_context", lambda *a, **k: original_build(env))
+
+    page = skill_methodology_page("SKILL-001")
+    text = str(page)
+
+    manifest = __import__("yaml").safe_load((repo_root / "skills" / "tne_exco" / "manifest.yaml").read_text())
+    assert manifest["version"] in text
+    assert "1.2" not in text or manifest["version"] == "1.2"
+    assert "$1,000" not in text
+    assert "Published" not in text  # real status is "draft" -> "Draft"
+
+
 def test_audit_runs_page_builds_with_no_runs():
     assert audit_runs_page() is not None
 

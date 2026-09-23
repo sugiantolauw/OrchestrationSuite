@@ -1,11 +1,15 @@
 """Skill methodology metadata assembly.
 
-For the T&E Skill (SKILL-001), pulls real methodology content from the
-existing test catalogue plus the Skill's own contract (via
-orchestrator.service.get_skill / adapters), so the viewer reflects what the
-connected app actually runs — not a copy of the prototype's file registry
-(reference_app/src/data_loader.py, deliberately not ported: CLAUDE.md §0.2
-names it among the modules that must not survive into the build).
+For the T&E Skill (SKILL-001), every field here is read from the Skill
+itself -- manifest.yaml (version/owner/status/description), catalogue.yaml
+(rendered against thresholds.yaml, with provenance), and skill_versions
+(the real publish history) -- via orchestrator.service.get_skill /
+list_skill_versions (adapters). This module used to keep its own copy of
+the test catalogue (app/src/test_catalogue.py, deleted) with a hardcoded
+version, status and threshold text that drifted from the real Skill the
+moment anyone edited skills/tne_exco/*.yaml without also editing this file
+by hand (CLAUDE.md §3 NN16, P2/P3 gate review item 4). There is exactly one
+source of truth now: the Skill's own files.
 
 For other Skills, returns lightweight stub metadata clearly marked as
 "under development" so the platform remains honest about what's implemented.
@@ -14,86 +18,103 @@ For other Skills, returns lightweight stub metadata clearly marked as
 from __future__ import annotations
 
 
-def get_methodology(skill_id: str, sources: list | None = None) -> dict:
-    """Return methodology metadata for a given skill_id. `sources` is
-    orchestrator.service.get_skill(skill_id)["sources"] — a list of
-    {"source": name, "columns": [str, ...]} — passed in by the caller
-    rather than this module reaching into a static registry."""
+def get_methodology(skill_id: str) -> dict:
+    """Return methodology metadata for a given skill_id, read entirely from
+    the connected backend (never a static registry in this module)."""
     if skill_id == "SKILL-001":
-        return _tne_methodology(sources)
+        return _tne_methodology(skill_id)
     return _stub_methodology(skill_id)
 
 
-# ─── T&E Skill methodology (real, pulled from live catalogue + contract) ────
+# ─── T&E Skill methodology (real, pulled from the Skill's own files) ────────
 
-def _tne_methodology(sources: list | None = None) -> dict:
-    from src.test_catalogue import TEST_CATALOGUE, CATEGORY_ORDER
+def _tne_methodology(skill_id: str) -> dict:
+    from src.platform.adapters import get_skill, list_skill_versions
+
+    skill = get_skill(skill_id) or {}
+    tests = skill.get("tests") or []
 
     data_sources = []
-    for spec in sorted((sources or []), key=lambda s: s.get("source", "")):
+    for spec in sorted(skill.get("sources") or [], key=lambda s: s.get("source", "")):
         data_sources.append({
             "key": spec.get("source"),
             "columns_declared": len(spec.get("columns") or []),
         })
 
-    # Group tests by category
-    tests_by_category = {cat: [] for cat in CATEGORY_ORDER}
-    for t in TEST_CATALOGUE:
-        cat = t.get("category", "Uncategorised")
+    # Category order: as first encountered in catalogue.yaml's own test
+    # order (skill["tests"]) -- never a second, separately-maintained list
+    # that can silently drift from the real file (CLAUDE.md NN16).
+    categories: list[str] = []
+    for t in tests:
+        cat = t.get("category") or "Uncategorised"
+        if cat not in categories:
+            categories.append(cat)
+
+    tests_by_category: dict[str, list[dict]] = {cat: [] for cat in categories}
+    for t in tests:
+        cat = t.get("category") or "Uncategorised"
         tests_by_category.setdefault(cat, []).append({
-            "test_id": t["test_id"],
-            "test_name": t["test_name"],
-            "control_objective": t["control_objective"],
-            "population": t["population"],
-            "rule": t["rule"],
-            "threshold": t["threshold"],
-            "source_file_key": t.get("source_file_key"),
+            "test_id": t.get("test_id"),
+            "test_name": t.get("test_name"),
+            "control_objective": t.get("control_objective"),
+            "population": t.get("population"),
+            "rule": t.get("rule"),
+            # threshold text is already rendered against thresholds.yaml by
+            # orchestrator.service.get_skill (never a raw "{...}" template);
+            # threshold_provenance names which threshold id(s) it drew on so
+            # the UI can label an analyst-set / pending-confirmation value
+            # (CLAUDE.md §0.4/G8) without re-parsing the template itself.
+            "threshold": t.get("threshold"),
+            "threshold_provenance": t.get("threshold_provenance") or [],
         })
 
+    source_names = [s["key"] for s in data_sources if s.get("key")]
+    versions = list_skill_versions(skill_id)
+
     return {
-        "skill_id": "SKILL-001",
-        "name": "ExCo T&E Executive Diligence",
-        "domain": "Travel & Entertainment",
-        "version": "1.2",
-        "owner": "Internal Audit",
-        "status": "Published",
-        "last_updated": "2026-07-15",
-        "purpose": (
-            "Assess executive T&E spend against Optus policy for the audit period. "
-            "The Skill runs 14 deterministic tests across pre-travel controls, spend "
-            "compliance, fraud risk indicators, and approval effectiveness — every "
-            "metric is traceable back to a specific source file."
-        ),
+        "skill_id": skill.get("skill_id", skill_id),
+        "name": skill.get("name", "Unknown Skill"),
+        "domain": skill.get("domain", ""),
+        "version": skill.get("version", "?"),
+        "owner": skill.get("owner", ""),
+        "status": skill.get("status", "Draft"),
+        "last_updated": skill.get("last_updated", ""),
+        "purpose": skill.get("description") or "No description recorded in manifest.yaml.",
         "population": (
-            "All expense claims, travel requests, approvals, and attendee records "
-            "for members of the Optus Executive Committee (ExCo) within the audit "
-            "period (01 Jan 2025 – 30 Apr 2026)."
+            (f"Declared contract sources: {', '.join(source_names)}." if source_names
+             else "This Skill's contract declares no sources.")
+            + " The audit period and population of interest are chosen per run, not fixed by the Skill."
         ),
         "data_sources": data_sources,
-        "categories": CATEGORY_ORDER,
+        "categories": categories,
         "tests_by_category": tests_by_category,
-        "total_tests": len(TEST_CATALOGUE),
+        "total_tests": len(tests),
         "risk_scoring": {
-            "High": "Material exposure OR systemic control failure OR fraud indicator",
-            "Medium": "Non-trivial exposure OR recurring control weakness",
-            "Low": "Isolated exception OR minor policy deviation",
+            "High": "Set by this test's own severity ladder (skills/<id>/findings.yaml) -- "
+                    "see the Threshold column above for the specific value and its provenance.",
+            "Medium": "Set by this test's own severity ladder -- see the Threshold column above.",
+            "Low": "The ladder's fallback band when no severity threshold is exceeded.",
         },
         "outputs": [
             "Executive brief with headline exposure, risk mix, action summary",
             "Findings register with evidence-linked observations and recommendations",
-            "Optus-branded PowerPoint export (cover, exec summary, native charts, findings)",
+            "Branded PowerPoint export (cover, exec summary, native charts, findings)",
             "Excel workbook with per-finding exception sheets and test catalogue",
             "Management action tracker with edit history and audit log",
         ],
         "evidence_traceability": (
-            "Every finding cites specific metric keys. Every metric carries a "
-            "source_file identifier so the reader can trace the number to the "
-            "originating file. The evidence drawer surfaces this trail per finding."
+            "Every finding cites specific metric keys. Every metric carries a source_ref "
+            "identifying the source table version or uploaded-file hash, the source "
+            "columns and the aggregation grain (CLAUDE.md non-negotiable 10)."
         ),
         "version_history": [
-            {"version": "1.2", "date": "2026-07-15", "change": "Added T3.3a (late booking) and T6.1d (daily spend limit) tests"},
-            {"version": "1.1", "date": "2026-05-02", "change": "Introduced deterministic risk scoring; separated per-approver detail"},
-            {"version": "1.0", "date": "2026-03-14", "change": "Initial published methodology — 12 tests across 4 categories"},
+            {
+                "version": v.get("version"),
+                "date": (v.get("created_at") or "")[:10],
+                "status": v.get("status"),
+                "created_by": v.get("created_by"),
+            }
+            for v in versions
         ],
         "is_stub": False,
     }

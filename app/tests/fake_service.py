@@ -31,14 +31,37 @@ _SKILL = {
 
 _TEST_CATALOGUE = [
     {"test_id": "T4.1", "category": "Documentation", "test_name": "Missing receipts",
-     "threshold": "0", "flag": "RF_CS_MissingReceipt",
+     "control_objective": "All claims must have supporting receipt documentation",
+     "population": "All claims", "rule": "Semi-join claims against the missing-receipt register",
+     "threshold": "0", "threshold_provenance": [], "flag": "RF_CS_MissingReceipt",
      "plan_tests": [{"test_id": "T4.1", "flag": "RF_CS_MissingReceipt", "primitive": "anti_join_gap"}]},
     {"test_id": "T5.1", "category": "Split claims", "test_name": "Split claims same day",
-     "threshold": "n/a", "flag": "RF_CS_SplitClaims_SameDay",
+     "control_objective": "Claims should not be split to evade approval limits",
+     "population": "Same employee/vendor/type claim pairs", "rule": "Sum within a sliding window",
+     "threshold": "$5000 aggregate", "threshold_provenance": [
+         {"id": "split_aggregate_threshold", "type": "analyst-set", "pending_policy_confirmation": True}
+     ], "flag": "RF_CS_SplitClaims_SameDay",
      "plan_tests": [{"test_id": "T5.1", "flag": "RF_CS_SplitClaims_SameDay", "primitive": "split_detection"}]},
 ]
 
 _FLAG_TO_TEST = {"RF_CS_MissingReceipt": "T4.1", "RF_CS_SplitClaims_SameDay": "T5.1"}
+
+_THRESHOLDS = {
+    "split_aggregate_threshold": {
+        "value": 5000, "unit": "AUD", "description": "Aggregate group/window sum threshold.",
+        "used_by": ["T5.1"], "effective_date": "2026-09-23",
+        "provenance": {"type": "analyst-set", "pending_policy_confirmation": True},
+    },
+}
+
+_RISK_CONTROL = {
+    "controls": [
+        {"control_id": "CTL-TNE-05", "risk_id": "RSK-TNE-05", "category": "Documentation",
+         "title": "All claims must have supporting receipt documentation", "tests": ["T4.1"]},
+    ],
+}
+
+_SKILL_VERSIONS: list = []
 
 _GOVERNED_TABLES = [
     {"name": "expense_report", "table_fqn": "test_catalog.tne_source.expense_report",
@@ -86,7 +109,14 @@ def list_skills(ctx) -> list:
 def get_skill(ctx, skill_id: str):
     if skill_id != _SKILL["skill_id"]:
         return None
-    return {**_SKILL, "tests": _TEST_CATALOGUE, "flag_to_test": _FLAG_TO_TEST}
+    return {
+        **_SKILL, "tests": _TEST_CATALOGUE, "flag_to_test": _FLAG_TO_TEST,
+        "thresholds": _THRESHOLDS, "risk_control": _RISK_CONTROL,
+    }
+
+
+def list_skill_versions(ctx, skill_id: str) -> list:
+    return list(_SKILL_VERSIONS)
 
 
 def list_governed_tables(ctx) -> list:
