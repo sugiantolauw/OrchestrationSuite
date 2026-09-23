@@ -39,7 +39,6 @@ owned by the Unity Catalog work) against Unity Catalog, surfaced as
 
 from __future__ import annotations
 
-import dataclasses
 import json
 import os
 import uuid
@@ -454,6 +453,22 @@ def start_audit_run(
 
     register_skill(skill, ctx.persistence, actor=run_owner, now=now)
 
+    # data_assets is NODE_OWNED (the `discover` node's field), but bindings
+    # must already be present for `discover` to validate against -- exactly
+    # like a resolved plan being handed to `execute`, the service establishes
+    # them once at creation, before any node has run, which the pipeline's
+    # per-node lifecycle check never sees or restricts (CLAUDE.md build brief
+    # P3 §2, discover node docstring). Passed into create_run itself, part of
+    # the SAME initial insert, rather than a follow-up save_state: the run
+    # becomes visible to any already-running executor's admission loop
+    # (find_runs(["queued"])) the instant the row lands, and a second write
+    # here racing that executor's own first CAS transition would lose --
+    # StaleStateError, observed live against a real deployed App.
+    data_assets = [
+        {"source": name, "table_fqn": bindings[name], "version": source_versions[name]}
+        for name in contract_sources
+    ]
+
     options = {"auto_confirm_plan": not review_plan_first}
     state = runs_module.create_run(
         ctx.persistence,
@@ -466,21 +481,10 @@ def start_audit_run(
         objective=objective,
         run_owner=run_owner,
         options=options,
+        data_assets=data_assets,
         fingerprint=fingerprint,
         now=now,
     )
-
-    # data_assets is NODE_OWNED (the `discover` node's field), but bindings
-    # must already be present for `discover` to validate against -- exactly
-    # like a resolved plan being handed to `execute`, the service establishes
-    # them once at creation, before any node has run, which the pipeline's
-    # per-node lifecycle check never sees or restricts (CLAUDE.md build brief
-    # P3 §2, discover node docstring).
-    data_assets = [
-        {"source": name, "table_fqn": bindings[name], "version": source_versions[name]}
-        for name in contract_sources
-    ]
-    state = ctx.persistence.save_state(dataclasses.replace(state, data_assets=data_assets))
 
     if ctx.executor is not None:
         ctx.executor.start(state.run_id, state.phase)

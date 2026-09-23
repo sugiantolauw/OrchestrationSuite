@@ -124,6 +124,31 @@ def test_start_audit_run_rejects_missing_binding(tmp_path):
         )
 
 
+def test_start_audit_run_writes_data_assets_in_the_same_insert_as_the_run(tmp_path):
+    """Regression (found live, against a real deployed App): data_assets
+    used to be written in a SEPARATE save_state call after create_run,
+    leaving a window where the row was already `queued` -- visible to any
+    ALREADY-RUNNING executor's admission loop (find_runs(["queued"])),
+    polling independently of this process -- but data_assets was still
+    empty. That other executor's own first CAS transition (queued ->
+    running) would then win the race, and this service's own follow-up
+    save_state call lost with StaleStateError. data_assets is now part of
+    create_run's own initial insert, so state_version stays 1 and
+    data_assets is never empty for a row any executor can see."""
+    ctx = _build_ctx(tmp_path)
+    ctx.executor = None  # isolate the create_run write itself
+    bindings = service.suggest_bindings(ctx, "SKILL-MINI")
+    run_id = service.start_audit_run(
+        ctx, skill_id="SKILL-MINI", bindings=bindings,
+        audit_period=("2026-01-01", "2026-02-28"), objective="race regression", run_owner="tester",
+    )
+    state = ctx.persistence.load_state(run_id)
+    assert state.status == "queued"
+    assert state.state_version == 1, "data_assets must not require a second write after creation"
+    assert state.data_assets
+    assert {b["source"] for b in state.data_assets} == set(bindings)
+
+
 # ── restart survival: worker A dies mid-run, worker B resumes and finishes ──
 
 

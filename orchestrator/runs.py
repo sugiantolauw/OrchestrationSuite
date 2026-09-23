@@ -60,6 +60,7 @@ def create_run(
     business_unit: str | None = None,
     materiality: float | None = None,
     options: dict | None = None,
+    data_assets: list[dict] | None = None,
     fingerprint: dict,
     now: str,
 ) -> RunState:
@@ -85,6 +86,14 @@ def create_run(
         business_unit=business_unit,
         materiality=materiality,
         options=options or {},
+        # data_assets is written in this SAME initial insert, never a
+        # follow-up save_state (CLAUDE.md §2.3 rule 2 concurrency note): the
+        # run becomes visible to any already-running executor's admission
+        # loop (find_runs(["queued"])) the moment this row lands, and a
+        # second write racing that executor's own first CAS transition
+        # (queued -> running) would lose -- StaleStateError, observed live
+        # against the deployed App during the P3 integration pass.
+        data_assets=data_assets or [],
         run_owner=run_owner,
         fingerprint_id=fingerprint["fingerprint_id"],
         created_at=now,
