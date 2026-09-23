@@ -26,3 +26,6 @@ _test_*.py
 
 # Agent worktrees
 .claude/worktrees/
+
+# Local run outputs (ORCH_BACKEND=local exports, sqlite ledgers)
+.local/
