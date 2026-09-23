@@ -357,6 +357,122 @@ def test_normalise_datetime_dtypes_leaves_non_datetime_alone():
     assert out["n"].tolist() == [1, 2, 3]
 
 
+# ── list_tables() / WorkspaceClient construction ────────────────────────────
+# CLAUDE.md §11 Batch-1b item 1: Config has no `credentials_strategy` attribute
+# on the installed SDK (0.140.0; it's the private `_credentials_strategy`), so
+# `WorkspaceClient(host=..., credentials_strategy=cfg.credentials_strategy)`
+# raised AttributeError before ever reaching the workspace, breaking UC table
+# discovery for the run-setup page entirely.
+
+
+class _FakeColumn:
+    def __init__(self, name):
+        self.name = name
+
+
+class _FakeTable:
+    def __init__(self, name, comment, columns):
+        self.name = name
+        self.comment = comment
+        self.columns = [_FakeColumn(c) for c in columns]
+
+
+class _FakeNamed:
+    def __init__(self, name):
+        self.name = name
+
+
+class _FakeWorkspaceClient:
+    """Records constructor kwargs and serves a small fixed catalog tree,
+    including one restricted catalog and one restricted schema, so list_tables()
+    is exercised the same way it is against a real workspace (CLAUDE.md §8 P5:
+    'no-access catalogs surface as Restricted')."""
+
+    last_init_kwargs: dict | None = None
+
+    def __init__(self, **kwargs):
+        _FakeWorkspaceClient.last_init_kwargs = kwargs
+        self.catalogs = self._Catalogs()
+        self.schemas = self._Schemas()
+        self.tables = self._Tables()
+
+    class _Catalogs:
+        def list(self):
+            return [_FakeNamed("orchestrationsuite"), _FakeNamed("locked_catalog")]
+
+    class _Schemas:
+        def list(self, catalog_name):
+            from databricks.sdk.errors import DatabricksError
+
+            if catalog_name == "locked_catalog":
+                raise DatabricksError("PERMISSION_DENIED")
+            return [_FakeNamed("tne_source"), _FakeNamed("locked_schema")]
+
+    class _Tables:
+        def list(self, catalog_name, schema_name):
+            from databricks.sdk.errors import DatabricksError
+
+            if schema_name == "locked_schema":
+                raise DatabricksError("PERMISSION_DENIED")
+            return [
+                _FakeTable("expense_report", "T&E expense claims", ["Employee ID", "Expense Amount"]),
+                _FakeTable("booking_detail", None, ["Booking Type"]),
+            ]
+
+
+def test_list_tables_constructs_workspace_client_with_only_host(monkeypatch):
+    """Guards against the AttributeError regression directly: whatever kwargs
+    list_tables() uses to build a WorkspaceClient, `credentials_strategy` must
+    not be one of them -- Config on the installed SDK has no such public
+    attribute, and passing it either raises or silently breaks auth."""
+    import databricks.sdk as sdk_module
+
+    _FakeWorkspaceClient.last_init_kwargs = None
+    monkeypatch.setattr(sdk_module, "WorkspaceClient", _FakeWorkspaceClient)
+
+    ds, _ = _ds({}, bindings={})
+    ds.list_tables()
+
+    assert _FakeWorkspaceClient.last_init_kwargs is not None
+    assert "credentials_strategy" not in _FakeWorkspaceClient.last_init_kwargs
+    assert _FakeWorkspaceClient.last_init_kwargs == {"host": "https://x.cloud.databricks.com"}
+
+
+def test_list_tables_returns_expected_shape_including_restricted_catalog():
+    ds, _ = _ds({}, bindings={}, workspace_client_factory=_FakeWorkspaceClient)
+
+    results = ds.list_tables()
+
+    restricted = [r for r in results if r.get("restricted")]
+    assert {"orchestrationsuite.locked_schema", "locked_catalog"} <= {r["fqn"] for r in restricted}
+
+    found = {r["fqn"]: r for r in results if not r.get("restricted")}
+    assert "orchestrationsuite.tne_source.expense_report" in found
+    row = found["orchestrationsuite.tne_source.expense_report"]
+    assert row == {
+        "fqn": "orchestrationsuite.tne_source.expense_report",
+        "catalog": "orchestrationsuite",
+        "schema": "tne_source",
+        "table": "expense_report",
+        "comment": "T&E expense claims",
+        "columns": ["Employee ID", "Expense Amount"],
+    }
+
+
+def test_list_tables_caches_workspace_client_across_calls():
+    calls = {"n": 0}
+
+    def factory():
+        calls["n"] += 1
+        return _FakeWorkspaceClient()
+
+    ds, _ = _ds({}, bindings={}, workspace_client_factory=factory)
+    ds.list_tables()
+    ds.list_tables()
+
+    assert calls["n"] == 1
+
+
 # ── live equality tests: UC-backed read vs LocalFileDataSource read ─────────
 # Skipped unless RUN_DELTA_TESTS=1 -- prove that pointing the Skill at UC gives
 # byte-identical population data to reading the original files (CLAUDE.md §2.1).

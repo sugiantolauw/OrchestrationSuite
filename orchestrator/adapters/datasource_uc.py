@@ -124,12 +124,40 @@ class UCTableDataSource:
     bindings: dict[str, str]
     max_cells: int | None = None
     connection_factory: Callable[[], object] | None = None
+    workspace_client_factory: Callable[[], Any] | None = None
     _conn: object | None = field(default=None, init=False, repr=False, compare=False)
     _conn_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False, compare=False)
+    _ws_client: object | None = field(default=None, init=False, repr=False, compare=False)
+    _ws_client_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         self._max_cells = _resolve_max_cells(self.max_cells)
         self._factory = self.connection_factory or (lambda: _default_connection_factory(self.settings))
+
+    def _workspace_client(self):
+        """Cached WorkspaceClient for list_tables() -- built once per adapter
+        instance and reused (mirrors VolumeExportStorage._client() in
+        orchestrator/adapters/export_storage.py, which re-pays SDK auth/config
+        resolution on every call otherwise).
+
+        Uses the SDK's default unified auth resolution (host from config, then
+        whatever credential strategy `WorkspaceClient` itself picks -- PAT, OAuth
+        M2M, etc.) rather than reaching into `databricks.sdk.core.Config` for a
+        `credentials_strategy` attribute: that attribute does not exist on the
+        installed SDK (0.140.0; it is `_credentials_strategy`, private), so doing
+        that raised AttributeError and broke UC table discovery entirely (found
+        live against the deployed App, whose service principal authenticates via
+        injected OAuth M2M credentials -- the same unified-auth path this now
+        relies on)."""
+        with self._ws_client_lock:
+            if self._ws_client is None:
+                if self.workspace_client_factory is not None:
+                    self._ws_client = self.workspace_client_factory()
+                else:
+                    from databricks.sdk import WorkspaceClient
+
+                    self._ws_client = WorkspaceClient(host=self.settings.host)
+            return self._ws_client
 
     # ── binding / connection plumbing ───────────────────────────────────────
 
@@ -376,12 +404,9 @@ class UCTableDataSource:
         A catalog this identity cannot list surfaces as `{"fqn": catalog,
         "restricted": True}` rather than being silently dropped or raising, so the
         UI can show 'Restricted' instead of an empty list."""
-        from databricks.sdk import WorkspaceClient
-        from databricks.sdk.core import Config
         from databricks.sdk.errors import DatabricksError
 
-        cfg = Config(host=self.settings.host)
-        w = WorkspaceClient(host=self.settings.host, credentials_strategy=cfg.credentials_strategy)
+        w = self._workspace_client()
 
         results: list[dict] = []
         if catalog is not None:
