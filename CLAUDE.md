@@ -1662,6 +1662,12 @@ Source files are in `synthetic_data/`; row counts match `FILE_REGISTRY` exactly.
   the phase report.
 - **Workspace resources** may be created in `test_workspace` once it works: a small serverless SQL
   warehouse with auto-stop, the App, a Volume for uploads, tables in `audit_ledger`.
+- **Skill reuse across audit projects (queued after the connected App works, user-approved
+  2026-09-23):** explicit column mapping at run setup (recorded in the run fingerprint, never
+  fuzzy); project-specific reference data (population of interest, supplier lists, lookups) as run
+  parameters with provenance; per-test source requirements so a missing source makes only its
+  tests `not_testable`; any mapping, parameter or override makes plan confirmation mandatory and is
+  shown in finding provenance.
 - **§9A defaults (revisit before corporate migration):** the App runs as its service principal and
   records the signed-in user from the forwarded identity as `run_owner` (Q1); CI runs Tier A against
   `LocalPersistence`, Delta-backed tests run inside the workspace (Q3).
