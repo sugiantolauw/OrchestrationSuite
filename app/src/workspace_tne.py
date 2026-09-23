@@ -1472,6 +1472,9 @@ def register_callbacks(app) -> None:
     )
     def _filter_findings(severity_filter, category_filter, sort_by, findings, run_id):
         bundle = _load_bundle(run_id)
+        load_error = (bundle or {}).get("load_error")
+        if load_error is not None:
+            return _load_error_panel(run_id, load_error)
         tests = (bundle or {}).get("skill", {}).get("tests", [])
         return _render_filtered_findings(findings or [], severity_filter or [], category_filter or [], sort_by, tests)
 
@@ -1548,6 +1551,9 @@ def register_callbacks(app) -> None:
         test_id = finding.get("test_id", "")
 
         bundle = _load_bundle(run_id)
+        load_error = (bundle or {}).get("load_error")
+        if load_error is not None:
+            return True, _load_error_panel(run_id, load_error), f"{test_id}: Exception Records"
         frames = (bundle or {}).get("frames", {})
         tests = (bundle or {}).get("skill", {}).get("tests", [])
         meta = _skill_flag_meta((bundle or {}).get("run", {}).get("skill_id"), tests)
@@ -1636,6 +1642,17 @@ def register_callbacks(app) -> None:
         bundle = _load_bundle(run_id)
         if bundle is None:
             raise PreventUpdate
+        load_error = bundle.get("load_error")
+        if load_error is not None:
+            # Never let a payload/frame load failure (e.g. a frame snapshot
+            # integrity error) fall through into charts/tables that just
+            # render empty -- that looks like "no exceptions" instead of a
+            # broken load (CLAUDE.md NN14). Surfaces the run's KPI/evidence
+            # slots with the same panel the main layout shows for this run;
+            # every other output is left as it was (no_update) rather than
+            # replaced with something misleadingly empty.
+            panel = _load_error_panel(run_id, load_error)
+            return (panel,) + (dash.no_update,) * 8 + (panel,)
         tests = bundle["skill"].get("tests", [])
         meta = _skill_flag_meta(bundle["run"].get("skill_id"), tests)
         return _p1_update(bundle, start_date, end_date, members, meta)
@@ -1667,6 +1684,9 @@ def register_callbacks(app) -> None:
         bundle = _load_bundle(run_id)
         if bundle is None:
             raise PreventUpdate
+        load_error = bundle.get("load_error")
+        if load_error is not None:
+            return (_load_error_panel(run_id, load_error),) + (dash.no_update,) * 13
         tests = bundle["skill"].get("tests", [])
         meta = _skill_flag_meta(bundle["run"].get("skill_id"), tests)
         return _p2_update(bundle, start_date, end_date, members, expense_types, meta)
@@ -1691,6 +1711,9 @@ def register_callbacks(app) -> None:
         bundle = _load_bundle(run_id)
         if bundle is None:
             raise PreventUpdate
+        load_error = bundle.get("load_error")
+        if load_error is not None:
+            return (_load_error_panel(run_id, load_error),) + (dash.no_update,) * 7
         return _p3_update(bundle, start_date, end_date, approvers)
 
     # ── Management actions ───────────────────────────────────────────────────
@@ -1702,6 +1725,9 @@ def register_callbacks(app) -> None:
     )
     def _render_actions(overrides, run_id):
         bundle = _load_bundle(run_id)
+        load_error = (bundle or {}).get("load_error")
+        if load_error is not None:
+            return _load_error_panel(run_id, load_error)
         actions = (bundle or {}).get("actions", [])
         return _render_mgmt_tracker(actions, overrides or {})
 
