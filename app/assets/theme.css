@@ -1,0 +1,918 @@
+:root {
+	--ink: #1a1d26;
+	--ink-2: #3b4150;
+	--muted: #6b7283;
+	--line: #e4e7ee;
+	--line-2: #cfd5e2;
+	--panel: #ffffff;
+	--bg: #f5f6f8;
+	--navy: #1e2761;
+	--teal: #1c7293;
+	--terra: #b85042;
+	--amber: #e0952a;
+	--up: #2c7a4b;
+	--down: #b85042;
+}
+
+/* ── Bootstrap reset: suppress all Bootstrap visual styling ────────────── */
+
+*,
+*::before,
+*::after {
+	box-sizing: border-box;
+}
+
+body {
+	margin: 0;
+	background: var(--bg) !important;
+	color: var(--ink) !important;
+	font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif !important;
+	font-size: 15px !important;
+	line-height: 1.5 !important;
+	-webkit-font-smoothing: antialiased;
+}
+
+/* Kill Bootstrap card styling */
+.card {
+	background: var(--panel) !important;
+	border: 1px solid var(--line) !important;
+	border-radius: 10px !important;
+	box-shadow: none !important;
+}
+
+.card-body {
+	padding: 16px 18px !important;
+}
+
+/* Kill Bootstrap nav-tabs — make them look like our nav-strip */
+.nav-tabs {
+	border-bottom: 1px solid var(--line) !important;
+	gap: 0 !important;
+	display: flex !important;
+	padding: 0 !important;
+	margin-bottom: 16px !important;
+}
+
+.nav-tabs .nav-link {
+	font-size: 13.5px !important;
+	font-weight: 600 !important;
+	color: var(--muted) !important;
+	background: transparent !important;
+	border: none !important;
+	border-bottom: 2px solid transparent !important;
+	border-radius: 0 !important;
+	padding: 10px 16px !important;
+	margin-bottom: -1px !important;
+	cursor: pointer !important;
+	transition: color 0.12s, border-color 0.12s !important;
+	white-space: nowrap !important;
+}
+
+.nav-tabs .nav-link:hover {
+	color: var(--ink) !important;
+	border-bottom-color: var(--line-2) !important;
+	background: transparent !important;
+}
+
+.nav-tabs .nav-link.active {
+	color: var(--navy) !important;
+	border-bottom-color: var(--navy) !important;
+	background: transparent !important;
+}
+
+.tab-content {
+	padding-top: 8px !important;
+}
+
+/* Kill Bootstrap container padding */
+.container-fluid {
+	padding-left: 0 !important;
+	padding-right: 0 !important;
+}
+
+/* Kill Bootstrap alert styling */
+.alert {
+	border-radius: 8px !important;
+	font-size: 13px !important;
+	border: 1px solid var(--line) !important;
+}
+
+.alert-warning {
+	background: #fffbf0 !important;
+	border-color: var(--amber) !important;
+	color: #6b4a00 !important;
+}
+
+.alert-danger {
+	background: #fef2f0 !important;
+	border-color: var(--terra) !important;
+	color: #7c2d26 !important;
+}
+
+/* Kill Bootstrap badge styling */
+.badge {
+	font-size: 11.5px !important;
+	font-weight: 600 !important;
+	padding: 3px 9px !important;
+	border-radius: 20px !important;
+}
+
+.badge.bg-success,
+.badge.text-bg-success {
+	background: #eaf5ee !important;
+	color: var(--up) !important;
+}
+
+.badge.bg-warning,
+.badge.text-bg-warning {
+	background: #fffbf0 !important;
+	color: #6b4a00 !important;
+}
+
+/* Kill Bootstrap button styling */
+.btn {
+	font-family: inherit !important;
+	font-size: 13px !important;
+	cursor: pointer !important;
+	border-radius: 7px !important;
+	border: 1px solid var(--line-2) !important;
+	background: var(--panel) !important;
+	color: var(--ink) !important;
+	padding: 7px 13px !important;
+	min-height: 34px !important;
+	box-shadow: none !important;
+}
+
+.btn:hover {
+	border-color: var(--navy) !important;
+	background: var(--panel) !important;
+	color: var(--ink) !important;
+}
+
+.btn:focus,
+.btn:focus-visible {
+	outline: 2px solid var(--teal) !important;
+	outline-offset: 2px !important;
+	box-shadow: none !important;
+}
+
+/* Kill Bootstrap row/col gutters */
+.row {
+	--bs-gutter-x: 14px !important;
+	margin-left: 0 !important;
+	margin-right: 0 !important;
+}
+
+.row > * {
+	padding-left: 7px !important;
+	padding-right: 7px !important;
+}
+
+/* Kill Bootstrap Offcanvas — restyle to Apex drawer */
+.offcanvas-end {
+	width: min(620px, 94vw) !important;
+	border-left: 1px solid var(--line-2) !important;
+	box-shadow: -12px 0 32px -18px rgba(20, 23, 32, 0.5) !important;
+	background: var(--panel) !important;
+}
+
+.offcanvas-header {
+	padding: 16px 20px 12px !important;
+	border-bottom: 1px solid var(--line) !important;
+}
+
+.offcanvas-title {
+	font-size: 16px !important;
+	font-weight: 700 !important;
+	color: var(--ink) !important;
+}
+
+.offcanvas-body {
+	padding: 16px 20px 40px !important;
+}
+
+.offcanvas-backdrop {
+	background: rgba(20, 23, 32, 0.34) !important;
+}
+
+/* Kill Bootstrap collapse borders */
+.collapse,
+.collapsing {
+	border: none !important;
+}
+
+/* ── Our design system ────────────────────────────────────────────────── */
+
+.app-shell {
+	min-height: 100vh;
+}
+
+.shell {
+	max-width: 1240px;
+	margin: 0 auto;
+	padding-left: 22px;
+	padding-right: 22px;
+}
+
+.dashboard-shell {
+	padding-bottom: 72px;
+}
+
+.grid-2 {
+	display: grid;
+	grid-template-columns: repeat(2, minmax(0, 1fr));
+	gap: 16px;
+	align-items: start;
+}
+
+.grid-3 {
+	display: grid;
+	grid-template-columns: repeat(3, minmax(0, 1fr));
+	gap: 14px;
+}
+
+.grid-4 {
+	display: grid;
+	grid-template-columns: repeat(4, minmax(0, 1fr));
+	gap: 14px;
+}
+
+.stack {
+	display: flex;
+	flex-direction: column;
+	gap: 16px;
+}
+
+/* ── Header ── */
+
+.page-header {
+	padding-top: 24px;
+}
+
+.page-title {
+	margin: 0;
+	font-size: 22px;
+	font-weight: 700;
+	color: var(--navy);
+}
+
+.page-subtitle {
+	margin: 4px 0 10px;
+	color: var(--muted);
+	font-size: 13.5px;
+}
+
+.chip-row {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+}
+
+.chip {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+	font-size: 11.5px;
+	font-weight: 600;
+	padding: 3px 9px;
+	border-radius: 20px;
+	border: 1px solid var(--line-2);
+	color: var(--ink-2);
+	background: var(--panel);
+	white-space: nowrap;
+}
+
+/* ── Panels & KPI tiles ── */
+
+.panel {
+	background: var(--panel);
+	border: 1px solid var(--line);
+	border-radius: 10px;
+	padding: 16px 18px;
+	min-width: 0;
+}
+
+.panel h3 {
+	margin: 0 0 2px;
+	font-size: 14.5px;
+	font-weight: 700;
+	letter-spacing: -0.006em;
+}
+
+.panel .sub {
+	margin: 0 0 12px;
+	font-size: 12.5px;
+	color: var(--muted);
+}
+
+.kpi-tile {
+	background: var(--panel);
+	border: 1px solid var(--line);
+	border-radius: 10px;
+	padding: 16px 18px;
+}
+
+.kpi-title {
+	font-size: 12px;
+	color: var(--muted);
+	text-transform: uppercase;
+	letter-spacing: 0.03em;
+	margin: 0;
+}
+
+.kpi-value {
+	margin: 4px 0 0;
+	font-size: 22px;
+	font-weight: 700;
+	color: var(--navy);
+}
+
+/* ── Showcase views ── */
+
+.showcase-hero {
+	background: linear-gradient(135deg, var(--navy), #303d85);
+	border-radius: 12px;
+	padding: 24px 26px;
+	color: #fff;
+	margin-bottom: 16px;
+}
+
+.showcase-eyebrow {
+	margin: 0 0 6px;
+	font-size: 11px;
+	font-weight: 700;
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+	color: #cbd4ff;
+}
+
+.showcase-headline {
+	margin: 0;
+	max-width: 850px;
+	font-size: 24px;
+	font-weight: 700;
+	line-height: 1.25;
+}
+
+.showcase-supporting {
+	margin: 10px 0 0;
+	font-size: 13px;
+	color: #e5e9ff;
+}
+
+.action-summary {
+	display: grid;
+	grid-template-columns: repeat(4, minmax(0, 1fr));
+	gap: 12px;
+	margin-bottom: 16px;
+}
+
+.action-summary-item {
+	padding: 12px 14px;
+	border: 1px solid var(--line);
+	border-radius: 8px;
+	background: var(--panel);
+}
+
+.action-summary-label {
+	font-size: 11px;
+	font-weight: 700;
+	letter-spacing: 0.04em;
+	text-transform: uppercase;
+	color: var(--muted);
+}
+
+.action-summary-value {
+	margin-top: 2px;
+	font-size: 22px;
+	font-weight: 700;
+	color: var(--navy);
+}
+
+/* ── Tables ── */
+
+.table-title {
+	font-size: 14px;
+	font-weight: 700;
+	color: var(--ink);
+	margin-bottom: 10px;
+}
+
+.table-scroll {
+	overflow-x: auto;
+	max-width: 100%;
+	-webkit-overflow-scrolling: touch;
+}
+
+/* ── Buttons ── */
+
+.btn-generate {
+	border-radius: 7px !important;
+	background: var(--navy) !important;
+	border: 1px solid var(--navy) !important;
+	color: #fff !important;
+	font-size: 13px !important;
+	font-weight: 600 !important;
+	min-height: 34px !important;
+}
+
+.btn-generate:hover {
+	background: #252f75 !important;
+	border-color: #252f75 !important;
+	color: #fff !important;
+}
+
+button {
+	font: inherit;
+	font-size: 13px;
+	cursor: pointer;
+	border-radius: 7px;
+	border: 1px solid var(--line-2);
+	background: var(--panel);
+	color: var(--ink);
+	padding: 7px 13px;
+	min-height: 34px;
+}
+
+button:hover {
+	border-color: var(--navy);
+}
+
+button:focus-visible {
+	outline: 2px solid var(--teal);
+	outline-offset: 2px;
+}
+
+.ghost {
+	font: inherit;
+	font-size: 13px;
+	cursor: pointer;
+	border-radius: 7px;
+	border: 1px dashed var(--line-2);
+	background: transparent;
+	color: var(--navy);
+	padding: 7px 13px;
+	min-height: 34px;
+	display: inline-block;
+	width: 100%;
+	text-align: center;
+}
+
+.ghost:hover {
+	border-color: var(--navy);
+	background: rgba(30, 39, 97, 0.03);
+}
+
+.ghost::-webkit-details-marker {
+	display: none;
+}
+
+.further-analysis {
+	width: 100%;
+}
+
+/* ── Monospace ── */
+
+.mono {
+	font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+	font-variant-numeric: tabular-nums;
+}
+
+/* ── Finding cards ── */
+
+article.panel {
+	transition: box-shadow 0.12s ease;
+}
+
+article.panel:hover {
+	box-shadow: 0 2px 12px rgba(30, 39, 97, 0.08);
+}
+
+article.panel button {
+	font-size: 13px;
+	padding: 6px 12px;
+}
+
+/* ── Filter row ── */
+
+.filter-row {
+	display: flex;
+	gap: 14px;
+	flex-wrap: wrap;
+	margin-bottom: 16px;
+}
+
+.filter-row > * {
+	flex: 1;
+	min-width: 180px;
+}
+
+/* ── Plotly charts ── */
+
+.panel .js-plotly-plot,
+.panel .plot-container {
+	max-width: 100%;
+}
+
+/* ── Dash DataTable reset ── */
+
+.dash-table-container .dash-spreadsheet-container .dash-spreadsheet-inner th {
+	font-size: 11px !important;
+	font-weight: 700 !important;
+	text-transform: uppercase !important;
+	letter-spacing: 0.5px !important;
+	color: var(--muted) !important;
+	border-bottom: 1px solid var(--line) !important;
+	padding: 8px 10px !important;
+	background: var(--bg) !important;
+}
+
+.dash-table-container .dash-spreadsheet-container .dash-spreadsheet-inner td {
+	font-size: 13px !important;
+	padding: 7px 10px !important;
+	border-bottom: 1px solid var(--bg) !important;
+	color: var(--ink) !important;
+}
+
+/* ── Warning banner ── */
+
+.runtime-warning {
+	background: #fffbf0;
+	border: 1px solid var(--amber);
+	border-radius: 8px;
+	padding: 10px 14px;
+	font-size: 13px;
+	color: #6b4a00;
+	margin-top: 10px;
+}
+
+/* ── Responsive ── */
+
+@media (max-width: 900px) {
+	.shell {
+		padding-left: 14px;
+		padding-right: 14px;
+	}
+
+	.grid-2 {
+		grid-template-columns: minmax(0, 1fr);
+	}
+
+	.grid-3,
+	.grid-4 {
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+	}
+
+	.action-summary {
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+	}
+
+	.dashboard-shell {
+		padding-bottom: 56px;
+	}
+
+	.filter-row {
+		flex-direction: column;
+	}
+
+	.nav-tabs .nav-link {
+		padding: 8px 10px !important;
+		font-size: 12px !important;
+	}
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   AI Audit Analyst — Platform shell & landing page
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ── Platform header ── */
+
+.plat-header {
+	padding-top: 20px;
+	padding-bottom: 12px;
+	border-bottom: 1px solid var(--line);
+	margin-bottom: 0;
+}
+
+.plat-logo {
+	margin: 0;
+	font-size: 20px;
+	font-weight: 800;
+	color: var(--navy);
+	letter-spacing: -0.02em;
+}
+
+.plat-tagline {
+	margin: 2px 0 0;
+	font-size: 12.5px;
+	color: var(--muted);
+}
+
+/* ── Platform navigation ── */
+
+.plat-nav-strip {
+	display: flex;
+	gap: 0;
+	border-bottom: 1px solid var(--line);
+}
+
+.plat-nav-link {
+	font-size: 13.5px;
+	font-weight: 600;
+	color: var(--muted);
+	text-decoration: none;
+	padding: 10px 16px;
+	border-bottom: 2px solid transparent;
+	transition: color 0.12s, border-color 0.12s;
+	white-space: nowrap;
+}
+
+.plat-nav-link:hover {
+	color: var(--ink);
+	border-bottom-color: var(--line-2);
+	text-decoration: none;
+}
+
+.plat-nav-active {
+	color: var(--navy) !important;
+	border-bottom-color: var(--navy) !important;
+}
+
+/* ── Two-column layout ── */
+
+.plat-two-col {
+	display: flex;
+	gap: 16px;
+	margin-top: 16px;
+}
+
+.plat-two-col > * {
+	flex: 1;
+	min-width: 0;
+}
+
+/* ── Skill grid ── */
+
+.plat-skill-grid {
+	display: grid;
+	grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+	gap: 14px;
+	margin-top: 14px;
+}
+
+/* ── Skill card hover ── */
+
+.skill-card:hover {
+	box-shadow: 0 2px 12px rgba(30, 39, 97, 0.08);
+}
+
+/* ── Mode card hover ── */
+
+.mode-card:hover {
+	box-shadow: 0 2px 12px rgba(30, 39, 97, 0.08);
+}
+
+/* ── Run card ── */
+
+.run-card {
+	transition: box-shadow 0.12s ease;
+}
+
+.run-card:hover {
+	box-shadow: 0 2px 12px rgba(30, 39, 97, 0.08);
+}
+
+/* ── Platform KPI row ── */
+
+.plat-kpi-row {
+	display: grid;
+	grid-template-columns: repeat(4, minmax(0, 1fr));
+	gap: 12px;
+	margin-top: 10px;
+}
+
+/* ── Platform table ── */
+
+.plat-table {
+	width: 100%;
+	border-collapse: collapse;
+	font-size: 13px;
+}
+
+.plat-table th {
+	font-size: 11px;
+	font-weight: 700;
+	text-transform: uppercase;
+	letter-spacing: 0.5px;
+	color: var(--muted);
+	border-bottom: 1px solid var(--line);
+	padding: 8px 10px;
+	background: var(--bg);
+	text-align: left;
+}
+
+.plat-table td {
+	padding: 8px 10px;
+	border-bottom: 1px solid var(--bg);
+	color: var(--ink);
+	vertical-align: top;
+}
+
+.plat-table tr:hover td {
+	background: rgba(28, 114, 147, 0.03);
+}
+
+/* ── Demo indicator ── */
+
+.demo-indicator {
+	background: #fffbf0;
+	border: 1px solid var(--amber);
+	border-radius: 8px;
+	padding: 8px 14px;
+	margin: 12px 0;
+	display: flex;
+	align-items: center;
+}
+
+/* ── Data asset card ── */
+
+.data-asset-card {
+	transition: box-shadow 0.12s ease;
+}
+
+.data-asset-card:hover {
+	box-shadow: 0 2px 8px rgba(30, 39, 97, 0.06);
+}
+
+/* ── Upload file row ── */
+
+.upload-file-row:last-child {
+	border-bottom: none;
+}
+
+/* ── Platform landing page ── */
+
+.plat-landing {
+	padding-top: 16px;
+}
+
+/* ── Responsive: platform ── */
+
+@media (max-width: 900px) {
+	.plat-two-col {
+		flex-direction: column;
+	}
+
+	.plat-skill-grid {
+		grid-template-columns: minmax(0, 1fr);
+	}
+
+	.plat-kpi-row {
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+	}
+
+	.plat-nav-strip {
+		overflow-x: auto;
+		-webkit-overflow-scrolling: touch;
+	}
+
+	.plat-nav-link {
+		padding: 8px 12px;
+		font-size: 12px;
+	}
+}
+
+
+/* ---------------------------------------------------------------------------
+   Skill Methodology Viewer
+   --------------------------------------------------------------------------- */
+
+.method-back-link {
+display: inline-block;
+font-size: 12.5px;
+color: var(--teal);
+text-decoration: none;
+margin-top: 12px;
+margin-bottom: 4px;
+}
+
+.method-back-link:hover {
+text-decoration: underline;
+}
+
+.method-layout {
+display: grid;
+grid-template-columns: 200px minmax(0, 1fr);
+gap: 24px;
+margin-top: 16px;
+}
+
+.method-nav-rail {
+position: sticky;
+top: 12px;
+align-self: start;
+display: flex;
+flex-direction: column;
+gap: 2px;
+padding: 6px 0;
+border-right: 1px solid var(--line);
+}
+
+.method-nav-link {
+display: block;
+padding: 8px 12px 8px 4px;
+font-size: 12.5px;
+font-weight: 600;
+color: var(--muted);
+text-decoration: none;
+border-left: 2px solid transparent;
+margin-left: -2px;
+transition: color 0.12s, border-color 0.12s;
+}
+
+.method-nav-link:hover {
+color: var(--ink);
+border-left-color: var(--line-2);
+text-decoration: none;
+}
+
+.method-nav-link.active {
+color: var(--navy);
+border-left-color: var(--navy);
+}
+
+.method-content {
+min-width: 0;
+display: flex;
+flex-direction: column;
+gap: 32px;
+}
+
+.method-section {
+scroll-margin-top: 20px;
+}
+
+.method-h3 {
+margin: 0 0 8px;
+font-size: 16px;
+font-weight: 700;
+color: var(--navy);
+letter-spacing: -0.01em;
+}
+
+.method-para {
+margin: 0 0 10px;
+font-size: 13.5px;
+color: var(--ink-2);
+line-height: 1.55;
+max-width: 780px;
+}
+
+.method-label {
+display: block;
+font-size: 10.5px;
+font-weight: 700;
+color: var(--muted);
+text-transform: uppercase;
+letter-spacing: 0.04em;
+margin-bottom: 4px;
+}
+
+.skill-card-link {
+font-size: 12px;
+font-weight: 600;
+color: var(--teal);
+text-decoration: none;
+}
+
+.skill-card-link:hover {
+text-decoration: underline;
+}
+
+@media (max-width: 900px) {
+.method-layout {
+grid-template-columns: minmax(0, 1fr);
+}
+
+.method-nav-rail {
+position: static;
+flex-direction: row;
+overflow-x: auto;
+border-right: none;
+border-bottom: 1px solid var(--line);
+padding-bottom: 6px;
+}
+
+.method-nav-link {
+white-space: nowrap;
+border-left: none;
+border-bottom: 2px solid transparent;
+margin-left: 0;
+padding: 8px 12px;
+}
+
+.method-nav-link.active {
+border-left: none;
+border-bottom-color: var(--navy);
+}
+}
