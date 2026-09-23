@@ -125,6 +125,15 @@ def _start_executor_once() -> None:
     if _STARTED:
         return
     ctx = adapters.get_context()
+    # Item 5 (CLAUDE.md §4.1, P2/P3 gate review): repair_projections() runs
+    # BEFORE the reaper, same "called at App start" contract its own
+    # docstring has always stated (persistence_delta.py/persistence_local.py
+    # repair_projections) but that was never actually wired into a real App
+    # start -- a `runs` row whose state_version lagged its `run_state` row
+    # (a save whose projection update failed and was swallowed) stayed
+    # stale forever, with nothing to notice or fix it. Runs first so the
+    # reaper's own `runs`-table reads (find_runs) see corrected rows.
+    ctx.persistence.repair_projections()
     # Reaper runs BEFORE the executor's admission loop starts (CLAUDE.md
     # §2.3 rule 2: "A reaper runs on App start... this is load-bearing").
     # reap_orphaned_runs_with_leases existed and was covered by
