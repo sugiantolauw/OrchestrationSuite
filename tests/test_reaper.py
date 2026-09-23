@@ -36,29 +36,41 @@ def _state(run_id, status="queued", **overrides):
     return RunState(**base)
 
 
-def test_reaper_marks_running_as_interrupted(persistence):
-    created = persistence.create_run(_state("RUN-R1"), _fingerprint("FP-RUN-R1"))
+# The `delta` backend of the `persistence` fixture shares one throwaway schema for the
+# whole pytest session (conftest.py's `delta_schema`), so every run_id here is suffixed
+# with `uid` to stay unique across the session -- local_memory/local_file get a fresh
+# database per test and never needed it, but the same ids now work identically on every
+# backend.
+
+
+def test_reaper_marks_running_as_interrupted(persistence, uid):
+    run_id = f"RUN-R1-{uid}"
+    created = persistence.create_run(_state(run_id), _fingerprint(f"FP-{run_id}"))
     running = transition(created, "running", now=canonical_ts(1))
     persistence.save_state(running)
 
     reaped = reap_orphaned_runs(persistence, now=canonical_ts(2))
-    assert "RUN-R1" in reaped
+    assert run_id in reaped
 
-    final = persistence.load_state("RUN-R1")
+    final = persistence.load_state(run_id)
     assert final.status == "interrupted"
     assert "orphaned" in (final.status_reason or "").lower()
 
 
-def test_reaper_leaves_non_running_untouched(persistence):
-    persistence.create_run(_state("RUN-Q1", status="queued"), _fingerprint("FP-RUN-Q1"))
+def test_reaper_leaves_non_running_untouched(persistence, uid):
+    run_q1 = f"RUN-Q1-{uid}"
+    run_c1 = f"RUN-C1-{uid}"
+    run_done = f"RUN-DONE-{uid}"
 
-    created2 = persistence.create_run(_state("RUN-C1"), _fingerprint("FP-RUN-C1"))
+    persistence.create_run(_state(run_q1, status="queued"), _fingerprint(f"FP-{run_q1}"))
+
+    created2 = persistence.create_run(_state(run_c1), _fingerprint(f"FP-{run_c1}"))
     running2 = transition(created2, "running", now=canonical_ts(1), phase="plan")
     saved2 = persistence.save_state(running2)
     confirmed2 = transition(saved2, "awaiting_confirmation", now=canonical_ts(2))
     persistence.save_state(confirmed2)
 
-    created3 = persistence.create_run(_state("RUN-DONE", phase="export"), _fingerprint("FP-RUN-DONE"))
+    created3 = persistence.create_run(_state(run_done, phase="export"), _fingerprint(f"FP-{run_done}"))
     running3 = transition(created3, "running", now=canonical_ts(1))
     saved3 = persistence.save_state(running3)
     completed3 = transition(saved3, "completed", now=canonical_ts(2))
@@ -75,9 +87,10 @@ def test_reaper_leaves_non_running_untouched(persistence):
         assert before_runs[run_id]["status"] == after_runs[run_id]["status"]
 
 
-def test_reaper_never_deletes_rows(persistence):
-    persistence.create_run(_state("RUN-KEEP"), _fingerprint("FP-RUN-KEEP"))
-    running = transition(persistence.load_state("RUN-KEEP"), "running", now=canonical_ts(1))
+def test_reaper_never_deletes_rows(persistence, uid):
+    run_id = f"RUN-KEEP-{uid}"
+    persistence.create_run(_state(run_id), _fingerprint(f"FP-{run_id}"))
+    running = transition(persistence.load_state(run_id), "running", now=canonical_ts(1))
     persistence.save_state(running)
 
     before_count = len(persistence.list_runs())
@@ -86,18 +99,19 @@ def test_reaper_never_deletes_rows(persistence):
     assert before_count == after_count
 
 
-def test_reaper_closes_open_node_attempts(persistence):
-    created = persistence.create_run(_state("RUN-OPEN"), _fingerprint("FP-RUN-OPEN"))
+def test_reaper_closes_open_node_attempts(persistence, uid):
+    run_id = f"RUN-OPEN-{uid}"
+    created = persistence.create_run(_state(run_id), _fingerprint(f"FP-{run_id}"))
     running = transition(created, "running", now=canonical_ts(1))
     persistence.save_state(running)
     persistence.begin_node_attempt(
-        run_id="RUN-OPEN", phase="plan", node_index=0, node_name="discover",
+        run_id=run_id, phase="plan", node_index=0, node_name="discover",
         state_version_before=2, now=canonical_ts(2),
     )
 
     reap_orphaned_runs(persistence, now=canonical_ts(3))
 
-    attempts = persistence.list_node_attempts("RUN-OPEN")
+    attempts = persistence.list_node_attempts(run_id)
     assert attempts[0]["outcome"] == "interrupted"
 
 

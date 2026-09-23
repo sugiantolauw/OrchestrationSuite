@@ -116,15 +116,17 @@ def test_write_ahead_recovery_node_not_re_executed(local_persistence):
 # ── (b) duplicate CAS: two saves with the same expected version ────────────────────────────
 
 
-def test_duplicate_cas_second_call_rejected(persistence):
+def test_duplicate_cas_second_call_rejected(persistence, uid):
+    run_id = f"RUN-DUPCAS-{uid}"
+    fp_id = f"FP-DUPCAS-{uid}"
     created = persistence.create_run(
         RunState(
-            run_id="RUN-DUPCAS", run_kind="fieldwork", mode="playbook", phase="plan",
+            run_id=run_id, run_kind="fieldwork", mode="playbook", phase="plan",
             audit_period=("2026-01-01", "2026-01-31"), objective="t", run_owner="alice",
-            fingerprint_id="FP-DUPCAS", created_at=canonical_ts(0), last_state_change_at=canonical_ts(0),
+            fingerprint_id=fp_id, created_at=canonical_ts(0), last_state_change_at=canonical_ts(0),
             status="queued", engagement_id="ENG-DEFAULT",
         ),
-        _fingerprint("FP-DUPCAS"),
+        _fingerprint(fp_id),
     )
     running = dataclasses.replace(created, status="running")
     persistence.save_state(running)  # first call succeeds (version 1 -> 2)
