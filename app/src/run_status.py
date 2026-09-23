@@ -35,6 +35,16 @@ def _request_actor() -> str:
     )
 
 
+def _signoff_text(run: dict) -> str:
+    signoff = run.get("signoff")
+    if not signoff:
+        return "Not yet signed off."
+    text = f"Signed off by {signoff['approver']} at {signoff['timestamp']}"
+    if signoff.get("self_approved"):
+        text += " (self-approved — segregation of duties not enforced)"
+    return text
+
+
 def _error_panel(exc: Exception) -> html.Div:
     return html.Div([
         html.H3("Action blocked", style={"margin": "0 0 6px", "color": "#b85042"}),
@@ -59,7 +69,7 @@ def run_page(run_id: str) -> html.Div:
         dcc.ConfirmDialog(
             id="run-signoff-confirm-dialog",
             message="Signing off records your identity and timestamp on the run and is "
-                    "required before export (CLAUDE.md §2.4).",
+                    "required before export.",
         ),
         html.Div(id="run-page-body"),
     ], className="shell dashboard-shell")
@@ -117,7 +127,7 @@ def _render_body(run: dict | None, run_id: str) -> html.Div:
         blocks.append(html.Div([
             html.H3("Findings are ready for sign-off", style={"margin": "0 0 6px"}),
             html.P(f"{len(findings)} finding(s), {n_high} High. Sign-off is required before export "
-                   "(CLAUDE.md §2.4) — this is the control that matters for a defensible workpaper.",
+                   "— this is the control that matters for a defensible workpaper.",
                    className="sub"),
             html.Button("Sign off findings", id="run-signoff-open-btn", className="btn-generate",
                         style={"width": "auto", "padding": "10px 24px"}),
@@ -138,7 +148,7 @@ def _render_body(run: dict | None, run_id: str) -> html.Div:
         blocks.append(html.Div([
             html.H3("This run was interrupted", style={"margin": "0 0 6px"}),
             html.P(run.get("status_reason") or
-                   "The container restarted mid-run (CLAUDE.md §2.3) — resume to continue from where it left off.",
+                   "The container restarted mid-run — resume to continue from where it left off.",
                    className="sub"),
             html.Button("Resume", id="run-resume-btn", className="btn-generate",
                         style={"width": "auto", "padding": "10px 24px"}),
@@ -153,6 +163,7 @@ def _render_body(run: dict | None, run_id: str) -> html.Div:
     elif status == "completed":
         blocks.append(html.Div([
             html.H3("Run complete", style={"margin": "0 0 6px"}),
+            html.P(_signoff_text(run), className="sub"),
             html.Div([
                 dcc.Link("Open /workspace/tne", href=f"/workspace/tne?run_id={run_id}",
                          className="btn-generate", style={"display": "inline-block", "width": "auto", "padding": "10px 24px"}),

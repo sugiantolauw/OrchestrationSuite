@@ -45,10 +45,9 @@ import yaml as _yaml
 from dash import ALL, Input, Output, State, ctx, dash_table, dcc, html
 from dash.exceptions import PreventUpdate
 
-from orchestrator.signoff_policy import SELF_APPROVED_LABEL
 from src import charts
 from src.platform import adapters
-from src.platform.components import demo_indicator, kpi_card
+from src.platform.components import kpi_card
 
 # ── Per-run cache — CLAUDE.md §2.1: "a small per-run cache keyed by
 # (run_id, state_version) is fine". Holds at most one run's bundle: a
@@ -164,7 +163,7 @@ def _empty_state() -> html.Div:
     return html.Div([
         html.Div([
             html.H2("No completed run yet", className="page-title"),
-            html.P("Start one from Home — pick SKILL-001, bind its sources and run the audit.",
+            html.P("Start one from Home — select the ExCo T&E Skill and run the audit.",
                    className="page-subtitle"),
             dcc.Link("Go to Home", href="/", className="btn-generate",
                      style={"display": "inline-block", "width": "auto", "padding": "10px 24px", "marginTop": 12}),
@@ -388,10 +387,6 @@ def _build_header(run: dict, payload: dict | None = None) -> html.Div:
     if months_covered is not None:
         scope_chips.append(html.Span(f"{_fmt_count(months_covered)} months covered", className="chip"))
 
-    self_approved_banner = (
-        demo_indicator(SELF_APPROVED_LABEL) if (run.get("signoff") or {}).get("self_approved") else None
-    )
-
     return html.Div(
         html.Header([
             html.Div([
@@ -422,7 +417,6 @@ def _build_header(run: dict, payload: dict | None = None) -> html.Div:
                 html.Span(f"Status: {run.get('status_label') or run.get('status', '—')}", className="chip"),
                 *scope_chips,
             ], className="chip-row", style={"marginTop": 8}),
-            *([self_approved_banner] if self_approved_banner is not None else []),
         ], className="page-header", style={"marginBottom": 16}),
         className="shell",
     )
@@ -451,31 +445,17 @@ def _exposure_summary(findings: list[dict], payload: dict | None = None) -> str:
         return f"${headline:,.0f}" + (f" — {label}" if label else "")
     if not findings:
         return "No findings"
-    return "Not available — the run's de-duplicated exposure headline has not been computed (CLAUDE.md §0.3)"
+    return "Not available — the run's de-duplicated exposure headline has not been computed"
 
 
-def _exposure_methodology_note(payload: dict | None) -> html.Div | None:
-    """B2 (CLAUDE.md P2/P3 gate review): the methodology note shown beside
-    the headline -- what is and is not included, that per-finding figures
-    overlap and must never be summed, and the separately-reported
-    approved-not-spent total. Returns None when there is nothing to show
-    (no run payload yet), never a blank/misleading panel."""
-    exposure = (payload or {}).get("exposure") or {}
-    basis = exposure.get("basis")
-    approved_not_spent = exposure.get("approved_not_spent_total")
-    if not basis and approved_not_spent is None:
-        return None
-    parts = []
-    if basis:
-        parts.append(html.P(basis, style={"margin": "0 0 6px", "fontSize": 11.5, "color": "#6b7283", "lineHeight": 1.5}))
-    if approved_not_spent is not None:
-        parts.append(html.P(
-            f"Separately: ${approved_not_spent:,.0f} approved but never actually spent "
-            f"(e.g. travel requests with no linked expense claim) -- not flagged spend, "
-            f"never included in the headline above.",
-            style={"margin": 0, "fontSize": 11.5, "color": "#6b7283", "lineHeight": 1.5},
-        ))
-    return html.Div(parts, style={"marginTop": 4})
+def _signoff_text(run: dict) -> str:
+    signoff = run.get("signoff")
+    if not signoff:
+        return "Not yet signed off."
+    text = f"Signed off by {signoff['approver']} at {signoff['timestamp']}"
+    if signoff.get("self_approved"):
+        text += " (self-approved — segregation of duties not enforced)"
+    return text
 
 
 def _executive_tab(run: dict, findings: list[dict], payload: dict | None, actions: list[dict], frames: dict | None = None) -> html.Div:
@@ -531,7 +511,6 @@ def _executive_tab(run: dict, findings: list[dict], payload: dict | None, action
                 "Every number below is read from this run's persisted results.",
                 className="showcase-supporting",
             ),
-            _exposure_methodology_note(payload),
         ], className="showcase-hero"),
 
         html.Div([
@@ -580,12 +559,7 @@ def _executive_tab(run: dict, findings: list[dict], payload: dict | None, action
 
         html.Div([
             html.H3("Run signoff", style={"margin": "0 0 6px", "fontSize": 14.5, "fontWeight": 700}),
-            html.P(
-                (f"Signed off by {run['signoff']['approver']} at {run['signoff']['timestamp']}"
-                 if run.get("signoff") else "Not yet signed off."),
-                className="sub",
-            ),
-            demo_indicator(SELF_APPROVED_LABEL) if (run.get("signoff") or {}).get("self_approved") else None,
+            html.P(_signoff_text(run), className="sub"),
         ], className="panel", style={"marginTop": 16}),
     ])
 
@@ -616,23 +590,9 @@ def _finding_card(idx: int, finding: dict) -> html.Article:
         html.Span(severity, className="chip", style={"color": color, "borderColor": color}),
         html.Span(test_id, className="chip mono", style={"color": "#6b7283"}),
     ]
-    # Item 7 (CLAUDE.md P2/P3 gate review): the chip's own text names a
-    # THRESHOLD ("Analyst-set threshold") -- it must not render for a fixed
-    # severity (severity_basis == "fixed", e.g. a bare `else: Medium` rule
-    # with no `when` at all), which consulted no threshold whatsoever.
-    # analyst_set_severity is True for BOTH cases by design (findings.py: a
-    # fixed severity is analyst-set by definition, just not by a threshold
-    # lookup) -- gating on severity_basis too is what keeps the chip's own
-    # wording honest about what actually happened.
-    if finding["analyst_set_severity"] and finding.get("severity_basis") == "threshold":
-        summary_items.append(html.Span(
-            "Analyst-set threshold — pending policy confirmation", className="chip",
-            style={"color": "#6b4a00", "borderColor": "#e0952a", "fontSize": 10.5},
-        ))
-
     exposure_line = (
         f"Exposure: ${exposure:,.0f}" if exposure is not None
-        else "Exposure: not yet computed (pending de-duplicated exposure figure, P3)"
+        else "Exposure: not yet computed"
     )
 
     detail = html.Div([
@@ -1320,7 +1280,7 @@ def _reconciliation_panel(reconciliation: dict | None) -> html.Div | None:
         text = f"{source}: {' · '.join(parts)} · {'reconciled' if ok else 'VARIANCE'}" if parts else f"{source}: n/a"
         chips.append(html.Span(text, className="chip", style={"color": "#2c7a4b" if ok else "#b85042"}))
     return html.Div([
-        html.Div("Population reconciliation (G6)", style={"fontWeight": 700, "fontSize": 11, "color": "#1e2761", "marginBottom": 4}),
+        html.Div("Population reconciliation", style={"fontWeight": 700, "fontSize": 11, "color": "#1e2761", "marginBottom": 4}),
         html.Div(chips, className="chip-row"),
     ], className="panel", style={"marginBottom": 12})
 
@@ -1367,8 +1327,8 @@ def _namesake_disclosure_text(payload: dict | None) -> str:
     amount = _metric_value(payload, "exco_namesake_excluded_claims_amount")
     base = (
         "Employee ID 50040 (\"Delacroix, Marie\") is excluded from the ExCo population "
-        "as a namesake of ExCo ID 52472 — an accepted default pending auditor confirmation "
-        "(CLAUDE.md §11), not a verified identity match."
+        "as a namesake of ExCo ID 52472 — an accepted default pending auditor confirmation, "
+        "not a verified identity match."
     )
     if rows is None:
         return base
@@ -1388,10 +1348,10 @@ def _methodology_panel(payload: dict | None) -> html.Details:
                 html.Table([
                     html.Thead(html.Tr([html.Th("Layer"), html.Th("What it proves")])),
                     html.Tbody([
-                        html.Tr([html.Td("Population reconciliation"), html.Td("Source row count, total amount and min/max date reconciled against an independently obtained figure, wherever the source declares an amount/date column (CLAUDE.md G6)")]),
+                        html.Tr([html.Td("Population reconciliation"), html.Td("Source row count, total amount and min/max date reconciled against an independently obtained figure, wherever the source declares an amount/date column")]),
                         html.Tr([html.Td("Deterministic rule"), html.Td("The test was applied consistently to every record — the same plan.yaml primitive, every run")]),
                         html.Tr([html.Td("Evidence citation"), html.Td("Each metric links to its source table/file version and row keys (source_ref)")]),
-                        html.Tr([html.Td("Auditor judgement"), html.Td("Sign-off is required before a finding leaves the system (CLAUDE.md §2.4)")]),
+                        html.Tr([html.Td("Auditor judgement"), html.Td("Sign-off is required before a finding leaves the system")]),
                     ]),
                 ], style={"fontSize": 12, "borderCollapse": "collapse", "width": "100%"}),
             ], className="panel", style={"marginBottom": 12}),
@@ -1400,7 +1360,7 @@ def _methodology_panel(payload: dict | None) -> html.Details:
             html.Div([
                 html.Div("Limitations", style={"fontWeight": 700, "fontSize": 11, "color": "#1e2761", "marginBottom": 4}),
                 html.Ul([
-                    html.Li("Source data completeness has not been independently verified beyond the G6 row/amount/date reconciliation."),
+                    html.Li("Source data completeness has not been independently verified beyond the row/amount/date reconciliation."),
                     html.Li(_namesake_disclosure_text(payload)),
                     html.Li("Thresholds carrying provenance 'analyst-set' are pending policy confirmation — flagged wherever they drive a severity."),
                     html.Li("Tests marked 'Not testable' are declared gaps (e.g. no preferred-hotel list, no classification endpoint yet), never a silent zero."),
