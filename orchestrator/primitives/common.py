@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass, field
-from typing import Any
+from decimal import Decimal, InvalidOperation
+from typing import Any, Iterable
 
 import pandas as pd
 
@@ -204,6 +207,55 @@ def _format_key_component(v: Any) -> str:
 
 def group_id_from_key(key_values: tuple) -> str:
     return "|".join(_format_key_component(v) for v in key_values)
+
+
+def _normalise_scalar(v: Any) -> Any:
+    """Normalises one key-tuple value for canonical_json (CLAUDE.md build brief
+    N1): a numeric value is rendered via Decimal(repr(v)) so 810 and 810.0 --
+    the int-in-YAML vs. engine-coerced-float difference that made the old
+    delimiter-joined group_id_from_key fragile -- hash identically, and a date
+    normalises to its ISO form regardless of Timestamp vs. str input."""
+    if v is None:
+        return None
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, pd.Timestamp):
+        return v.date().isoformat()
+    if isinstance(v, int):
+        return v
+    if isinstance(v, float):
+        try:
+            return format(Decimal(repr(v)).normalize(), "f")
+        except InvalidOperation:
+            return repr(v)
+    return str(v)
+
+
+def canonical_json(value: Any) -> str:
+    """A deterministic JSON encoding: sorted keys, fixed separators, used as the
+    hash input for both keyed-unit and group-unit ids (N1) so the id never
+    depends on float/Decimal repr drift or an unescaped delimiter in a value."""
+    return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
+def keyed_unit_id(kind: str, key_values: tuple) -> str:
+    """A scoring-unit id for a unit identified by a natural key tuple (e.g. T6.1d's
+    employee-day-country, T3.3b's entertainment entry, T5.2's duplicate key) --
+    N1: f"{kind}:{sha256(canonical_json(normalised key tuple))[:24]}"."""
+    normalised = [_normalise_scalar(v) for v in key_values]
+    digest = hashlib.sha256(canonical_json(normalised).encode("utf-8")).hexdigest()[:24]
+    return f"{kind}:{digest}"
+
+
+def member_group_id(kind: str, row_keys: Iterable[str]) -> str:
+    """A scoring-unit id for a unit identified by its ROW MEMBERSHIP rather than a
+    key tuple (N1) -- e.g. a split_detection claim group, where two detections
+    (same-day and window) that cover the identical set of rows are the same
+    claim regardless of how each was found. f"{kind}:{sha256(canonical_json(sorted
+    member row keys))[:24]}"."""
+    ordered = sorted(str(k) for k in row_keys)
+    digest = hashlib.sha256(canonical_json(ordered).encode("utf-8")).hexdigest()[:24]
+    return f"{kind}:{digest}"
 
 
 def _base_source_ref(population: PopulationResult, columns: list[str], grain: str) -> dict:

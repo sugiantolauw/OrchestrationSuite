@@ -11,7 +11,7 @@ from orchestrator.primitives.common import (
     build_metrics,
     direction_mask,
     flags_from_rows,
-    group_id_from_key,
+    keyed_unit_id,
     resolve_limit_spec,
 )
 
@@ -26,6 +26,7 @@ PARAMS_SCHEMA: dict = {
         "direction": {"type": "string", "enum": ["above", "below", "at_or_above", "at_or_below"]},
         "limit": LIMIT_SCHEMA,
         "limit_selector_column": {"type": "string"},
+        "limit_selector_aggregate": {"type": "string", "enum": ["any", "all", "first"]},
         "limit_cases": {"type": "object", "additionalProperties": LIMIT_SCHEMA},
         "flag": {"type": "string"},
         "metrics": METRICS_PROPERTY_SCHEMA,
@@ -45,6 +46,30 @@ def _resolved_limit_value(spec: dict, row: pd.Series):
     return row[spec["column"]]
 
 
+def _aggregate_selector(values: pd.Series, cases_order: list[str], aggregate: str):
+    """Resolves ONE group's per-row `limit_selector_column` values down to the
+    single case that decides its limit (B5). `cases_order` is `limit_cases`'
+    declaration order, read as ascending precedence. 'first' (default,
+    unchanged): the group's first row's raw value -- one attendee's status
+    stands for the whole group, wrong for T3.3b (spec: "$80 if ANY attendee is
+    external"). 'any': the highest-precedence declared case present anywhere in
+    the group (declaring `external` after `internal` in limit_cases makes one
+    external attendee select the external limit for the whole entry). 'all':
+    the dual -- the lower-precedence case only if literally every row agrees;
+    otherwise the highest-precedence case present, same as 'any'."""
+    if aggregate == "first":
+        return values.iloc[0]
+    present = set(values.astype(str))
+    ordered_present = [c for c in cases_order if c in present]
+    if not ordered_present:
+        return values.iloc[0]
+    if aggregate == "any":
+        return ordered_present[-1]
+    if aggregate == "all":
+        return ordered_present[0] if len(ordered_present) == 1 else ordered_present[-1]
+    raise PrimitiveParamsError(f"unknown limit_selector_aggregate: {aggregate!r}")
+
+
 def run(ctx: PrimitiveContext, params: dict) -> PrimitiveResult:
     population = ctx.population(params["population"])
     df = population.df.copy()
@@ -58,9 +83,16 @@ def run(ctx: PrimitiveContext, params: dict) -> PrimitiveResult:
         num_agg = params.get("numerator_aggregate", "sum")
         agg_kwargs = {"__num": (num_col, num_agg), "__den": (den_col, "first")}
         selector_col = params.get("limit_selector_column")
-        if selector_col:
-            agg_kwargs["__selector"] = (selector_col, "first")
         work = df.groupby(group_by, dropna=False).agg(**agg_kwargs).reset_index()
+        if selector_col:
+            selector_aggregate = params.get("limit_selector_aggregate", "first")
+            cases_order = list(params.get("limit_cases", {}).keys())
+            selector_series = (
+                df.groupby(group_by, dropna=False)[selector_col]
+                .apply(lambda s: _aggregate_selector(s, cases_order, selector_aggregate))
+                .reset_index(name="__selector")
+            )
+            work = work.merge(selector_series, on=group_by, how="left")
     else:
         work = df.copy()
         work["__num"] = work[num_col]
@@ -89,9 +121,9 @@ def run(ctx: PrimitiveContext, params: dict) -> PrimitiveResult:
     values = {"population_size": population.rows}
 
     if group_by:
-        group_ids = exceeded[group_by].apply(lambda r: group_id_from_key(tuple(r)), axis=1)
+        group_ids = exceeded[group_by].apply(lambda r: keyed_unit_id("ratio", tuple(r)), axis=1)
         exceeded = exceeded.assign(group_id=group_ids.to_numpy())
-        row_group_ids = df[group_by].apply(lambda r: group_id_from_key(tuple(r)), axis=1)
+        row_group_ids = df[group_by].apply(lambda r: keyed_unit_id("ratio", tuple(r)), axis=1)
         row_mask = row_group_ids.isin(set(exceeded["group_id"]))
         row_df = df[row_mask].copy()
         flags = flags_from_rows(row_df, flag=flag, group_ids=row_group_ids[row_mask])

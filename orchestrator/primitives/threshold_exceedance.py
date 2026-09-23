@@ -11,7 +11,7 @@ from orchestrator.primitives.common import (
     build_metrics,
     direction_mask,
     flags_from_rows,
-    group_id_from_key,
+    keyed_unit_id,
     resolve_limit_spec,
     row_condition_mask,
 )
@@ -80,10 +80,10 @@ def run(ctx: PrimitiveContext, params: dict) -> PrimitiveResult:
         group_df["__excess"] = excess[exceed_mask]
         group_df[column] = group_df["__agg_value"]
 
-        group_ids = group_df[group_by].apply(lambda r: group_id_from_key(tuple(r)), axis=1)
+        group_ids = group_df[group_by].apply(lambda r: keyed_unit_id("thr", tuple(r)), axis=1)
         group_df = group_df.assign(group_id=group_ids.to_numpy())
 
-        row_group_ids = df[group_by].apply(lambda r: group_id_from_key(tuple(r)), axis=1)
+        row_group_ids = df[group_by].apply(lambda r: keyed_unit_id("thr", tuple(r)), axis=1)
         row_mask = row_group_ids.isin(set(group_df["group_id"]))
         row_df = df[row_mask].copy()
         row_group_ids_flagged = row_group_ids[row_mask]

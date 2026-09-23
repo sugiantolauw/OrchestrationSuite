@@ -9,7 +9,8 @@ from orchestrator.primitives.common import (
     PrimitiveResult,
     build_metrics,
     flags_from_rows,
-    group_id_from_key,
+    keyed_unit_id,
+    member_group_id,
     resolve_scalar_threshold,
 )
 
@@ -60,6 +61,11 @@ def run(ctx: PrimitiveContext, params: dict) -> PrimitiveResult:
     df[date_col] = pd.to_datetime(df[date_col])
 
     # --- same-day groups: exact (entity_keys + date) match ---
+    # B3: `group_id` here is the per-detection id ("sd:" + a canonical hash of
+    # the key tuple, N1) -- it identifies THIS detection, not the claim.
+    # `claim_id` ("claim:" + a hash of the member row-key SET, N1) is the
+    # claim's true identity: a window group whose members are the identical
+    # row set as a same-day group is the same claim, however each was found.
     same_day_row_group = pd.Series([None] * len(df), index=df.index, dtype=object)
     same_day_records: list[dict] = []
     for key, group in df.groupby(entity_keys + [date_col], dropna=False):
@@ -71,9 +77,13 @@ def run(ctx: PrimitiveContext, params: dict) -> PrimitiveResult:
         if max_line is not None and (group[amount_col] > max_line).any():
             continue
         key_tuple = key if isinstance(key, tuple) else (key,)
-        gid = group_id_from_key(key_tuple)
-        same_day_row_group.loc[group.index] = gid
-        same_day_records.append({"group_id": gid, "__lines": len(group), "__amount": float(total)})
+        member_keys = group["__row_key"].tolist()
+        gid = keyed_unit_id("sd", key_tuple)
+        claim_id = member_group_id("claim", member_keys)
+        same_day_row_group.loc[group.index] = claim_id
+        same_day_records.append(
+            {"group_id": gid, "claim_id": claim_id, "__lines": len(group), "__amount": float(total)}
+        )
 
     same_day_group_df = pd.DataFrame(same_day_records)
     same_day_row_df = df[same_day_row_group.notna()].copy()
@@ -113,11 +123,18 @@ def run(ctx: PrimitiveContext, params: dict) -> PrimitiveResult:
         key_tuple = key if isinstance(key, tuple) else (key,)
         for members in components.values():
             member_rows = df.loc[members]
+            member_keys = member_rows["__row_key"].tolist()
             start = member_rows[date_col].min().date().isoformat()
-            gid = group_id_from_key(key_tuple + (start,))
-            window_row_group.loc[members] = gid
+            gid = keyed_unit_id("win", key_tuple + (start,))
+            claim_id = member_group_id("claim", member_keys)
+            window_row_group.loc[members] = claim_id
             window_records.append(
-                {"group_id": gid, "__lines": len(members), "__amount": float(member_rows[amount_col].sum())}
+                {
+                    "group_id": gid,
+                    "claim_id": claim_id,
+                    "__lines": len(members),
+                    "__amount": float(member_rows[amount_col].sum()),
+                }
             )
 
     window_group_df = pd.DataFrame(window_records)
@@ -131,15 +148,22 @@ def run(ctx: PrimitiveContext, params: dict) -> PrimitiveResult:
     )
     flags = pd.concat([flags_same_day, flags_window], ignore_index=True)
 
+    # B3: the claim-group POPULATION is distinct claim ids -- a window
+    # detection whose member set equals a same-day detection's is the same
+    # claim, counted once. split_same_day_groups/split_window_groups (below)
+    # stay kind-specific (how many detections each method made, undeduplicated
+    # against each other); split_groups is this distinct set.
+    same_day_claim_ids = set(same_day_group_df["claim_id"]) if len(same_day_group_df) else set()
+    window_claim_ids = set(window_group_df["claim_id"]) if len(window_group_df) else set()
+    distinct_claim_ids = same_day_claim_ids | window_claim_ids
+
     flagged_idx = set(same_day_row_group.index[same_day_row_group.notna()]) | set(
         window_row_group.index[window_row_group.notna()]
     )
+    split_lines = len(flagged_idx)
     split_amount_total = float(df.loc[list(flagged_idx), amount_col].sum()) if flagged_idx else 0.0
 
-    scored_units = (
-        (same_day_group_df["group_id"].tolist() if len(same_day_group_df) else [])
-        + (window_group_df["group_id"].tolist() if len(window_group_df) else [])
-    )
+    scored_units = sorted(distinct_claim_ids)
 
     metrics = build_metrics(
         params.get("metrics", {}),
@@ -152,9 +176,9 @@ def run(ctx: PrimitiveContext, params: dict) -> PrimitiveResult:
         values={
             "population_size": population.rows,
             "same_day_groups": len(same_day_group_df),
-            "same_day_lines": len(same_day_row_df),
             "window_groups": len(window_group_df),
-            "window_lines": len(window_row_df),
+            "split_groups": len(distinct_claim_ids),
+            "split_lines": split_lines,
             "split_amount": split_amount_total,
         },
     )

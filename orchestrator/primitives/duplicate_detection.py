@@ -8,7 +8,7 @@ from orchestrator.primitives.common import (
     PrimitiveResult,
     build_metrics,
     flags_from_rows,
-    group_id_from_key,
+    keyed_unit_id,
 )
 
 PARAMS_SCHEMA: dict = {
@@ -60,7 +60,7 @@ def run(ctx: PrimitiveContext, params: dict) -> PrimitiveResult:
                 # these are itemisations of one entry, not independent duplicates.
                 continue
 
-        gid = group_id_from_key(key_tuple)
+        gid = keyed_unit_id("dup", key_tuple)
         row_group_id.loc[group.index] = gid
 
         rec = dict(zip(key_cols, key_tuple))
