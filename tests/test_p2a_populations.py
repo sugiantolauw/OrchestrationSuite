@@ -207,3 +207,42 @@ def test_amount_and_date_reconciliation_summary():
     summary = result.reconciliation_summary()
     assert summary["rows"] == 2
     assert summary["amount"] == 300.0
+
+
+def test_declared_amount_column_missing_from_data_raises_population_error():
+    """Item 3 (CLAUDE.md NN14, P2/P3 gate review): a DECLARED amount_column
+    absent from the population's own columns is a contract mismatch, not an
+    empty population -- must raise, never silently reconcile to a fabricated
+    0.0."""
+    from orchestrator.populations import PopulationError
+
+    df = pd.DataFrame({"Transaction Date": pd.to_datetime(["2025-01-01"])})
+    ctx = _ctx({"src": _src(df)})
+    pop_cfg = {"source": "src", "amount_column": "Amount"}  # no "Amount" column in df
+    with pytest.raises(PopulationError):
+        build_population("pop", pop_cfg, ctx)
+
+
+def test_declared_date_column_missing_from_data_raises_population_error():
+    from orchestrator.populations import PopulationError
+
+    df = pd.DataFrame({"Amount": [100.0]})
+    ctx = _ctx({"src": _src(df)})
+    pop_cfg = {"source": "src", "date_column": "Transaction Date"}  # no such column in df
+    with pytest.raises(PopulationError):
+        build_population("pop", pop_cfg, ctx)
+
+
+def test_declared_amount_column_on_empty_population_is_a_real_zero_not_an_error():
+    # A genuinely empty population (the column exists, no rows survive
+    # filtering) legitimately reconciles to 0.0/no dates -- this must NOT
+    # raise, only a declared-but-absent COLUMN should.
+    df = pd.DataFrame({"Amount": [100.0], "Employee ID": [1]})
+    ctx = _ctx({"src": _src(df)})
+    pop_cfg = {
+        "source": "src", "amount_column": "Amount",
+        "filters": [{"column": "Employee ID", "op": "eq", "value": 999}],
+    }
+    result = build_population("pop", pop_cfg, ctx)
+    assert result.rows == 0
+    assert result.amount == 0.0

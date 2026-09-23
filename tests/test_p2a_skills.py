@@ -112,6 +112,23 @@ def test_population_unknown_source_fails():
         _skill(plan=plan).validate()
 
 
+def test_population_amount_column_not_in_contract_fails():
+    """Item 3 (CLAUDE.md NN14, P2/P3 gate review): a population's declared
+    amount_column must be a real column of its contract source -- caught at
+    Skill load, not silently zeroed at run time."""
+    plan = _base_plan()
+    plan["populations"]["pop"]["amount_column"] = "Not A Real Column"
+    with pytest.raises(SkillValidationError, match="amount_column"):
+        _skill(plan=plan).validate()
+
+
+def test_population_date_column_not_in_contract_fails():
+    plan = _base_plan()
+    plan["populations"]["pop"]["date_column"] = "Not A Real Column"
+    with pytest.raises(SkillValidationError, match="date_column"):
+        _skill(plan=plan).validate()
+
+
 def test_plan_unknown_reference_fails():
     plan = _base_plan()
     plan["populations"]["pop"]["filters"] = [{"column": "Amount", "op": "in", "value": {"ref": "no_such_ref"}}]

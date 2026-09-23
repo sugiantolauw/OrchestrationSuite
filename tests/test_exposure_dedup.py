@@ -440,3 +440,49 @@ def test_finding_citing_a_sibling_sub_tests_metrics_is_not_dropped(local_persist
 
     headline = h.persistence.get_run_metrics(state.run_id)["run_exposure_headline"]
     assert headline["value"] == 1444.93, "the headline must include the sibling sub-test's flagged row too"
+
+
+def test_amount_column_population_with_no_binding_raises(local_persistence, tmp_path):
+    """Item 2 (CLAUDE.md P2/P3 gate review): a population declaring
+    amount_column for a source that has no binding in state.data_assets --
+    an invariant discover() should already guarantee -- must fail loudly,
+    never silently skip that source's contribution to the headline."""
+    h = _rig(
+        local_persistence, tmp_path,
+        populations={"ghost_pop": {"source": "ghost", "amount_column": "Amount"}},
+        tests=[{"test_id": "TA", "flag": "RF_A", "primitive": "threshold_exceedance"}],
+        read_population=lambda source, **k: pd.DataFrame({"__row_key": [], "Amount": []}),
+    )
+    h.persistence.write_flagged_rows(h.state.run_id, [])
+    h.persistence.write_findings(
+        h.state.run_id, [_finding("FA", test_id="TA")],
+        engagement_id=h.state.engagement_id, skill_id=h.state.skill_id,
+        skill_version=h.state.skill_version, now="2026-01-01T00:00:00.000000Z",
+    )
+
+    with pytest.raises(ContractViolation):
+        prioritise(h.ctx, h.state)
+
+
+def test_amount_column_not_in_read_data_raises(local_persistence, tmp_path):
+    """Item 2 (CLAUDE.md P2/P3 gate review): a population's declared
+    amount_column absent from the data actually read must fail loudly,
+    never silently skip that source's contribution to the headline."""
+    def read_population(source, *, version=None):
+        return pd.DataFrame({"__row_key": ["r1"]})  # no "Amount" column
+
+    h = _rig(
+        local_persistence, tmp_path,
+        populations={"pop": {"source": "claims", "amount_column": "Amount"}},
+        tests=[{"test_id": "TA", "flag": "RF_A", "primitive": "threshold_exceedance"}],
+        read_population=read_population,
+    )
+    h.persistence.write_flagged_rows(h.state.run_id, [_flagged_row("claims", "r1", "RF_A")])
+    h.persistence.write_findings(
+        h.state.run_id, [_finding("FA", test_id="TA")],
+        engagement_id=h.state.engagement_id, skill_id=h.state.skill_id,
+        skill_version=h.state.skill_version, now="2026-01-01T00:00:00.000000Z",
+    )
+
+    with pytest.raises(ContractViolation):
+        prioritise(h.ctx, h.state)

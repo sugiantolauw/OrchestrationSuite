@@ -303,6 +303,22 @@ def validate_skill(skill: Skill) -> None:
         src = pop_cfg.get("source")
         if src not in skill.contract.get("sources", {}):
             violations.append(f"populations.{source_name}: unknown source {src!r}")
+            continue
+        # Item 3 (CLAUDE.md NN14, P2/P3 gate review): amount_column/
+        # date_column drive G6 reconciliation and the run headline -- a typo
+        # or a renamed contract column here would otherwise surface only at
+        # run time as a silently zeroed/None reconciliation figure
+        # (orchestrator.populations.build_population). Caught at Skill load
+        # instead, against the contract's OWN declared columns for this
+        # population's source.
+        contract_columns = skill.contract["sources"][src].get("columns", {})
+        for col_key in ("amount_column", "date_column"):
+            col = pop_cfg.get(col_key)
+            if col and col not in contract_columns:
+                violations.append(
+                    f"populations.{source_name}.{col_key} {col!r} is not a column of "
+                    f"contract source {src!r}"
+                )
 
     plan_refs = _collect_all(populations, "ref") - {"audit_period"}
     for ref in plan_refs:

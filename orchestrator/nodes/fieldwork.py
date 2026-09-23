@@ -494,11 +494,27 @@ def prioritise(ctx: NodeContext, state: RunState) -> RunState:
     row_amount: dict[tuple[str, str], float] = {}
     for source, col in amount_col_by_source.items():
         version = bindings.get(source)
+        # Item 2 (CLAUDE.md P2/P3 gate review): a source a population
+        # declares an amount_column for must have a real binding and a real
+        # amount column in the data it reads -- discover() already required
+        # every contract source to have a binding, so a missing one here
+        # means that invariant was violated somewhere upstream. Silently
+        # skipping this source would silently drop its rows from the
+        # headline's entry-grain de-duplication -- fail loudly instead
+        # (CLAUDE.md NN14).
         if version is None:
-            continue
+            raise ContractViolation(
+                [f"population for source {source!r} declares amount_column {col!r} but "
+                 f"state.data_assets has no binding for {source!r} -- discover() should "
+                 f"have required one"]
+            )
         df = ctx.data_source.read_population(source, version=version)
         if col not in df.columns:
-            continue
+            raise ContractViolation(
+                [f"{source}: declared amount_column {col!r} is not a column in the data read "
+                 f"at version {version!r} -- the contract's column declaration should have "
+                 f"caught this before execute() ran"]
+            )
         for row_key, amount in zip(df["__row_key"], df[col]):
             if pd.isna(amount):
                 raise ContractViolation(

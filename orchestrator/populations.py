@@ -296,12 +296,29 @@ def build_population(name: str, pop_config: dict, ctx: PopulationContext) -> Pop
     amount_col = pop_config.get("amount_column")
     date_col = pop_config.get("date_column")
 
+    # Item 3 (CLAUDE.md NN14, P2/P3 gate review): a DECLARED amount_column/
+    # date_column absent from the population's own columns (after
+    # filter/derive) is a contract mismatch -- fail loudly. This is distinct
+    # from an amount_column that IS present on a genuinely empty population,
+    # whose amount legitimately reconciles to 0.0/no dates -- that is real
+    # data, not a missing column, and must not raise.
+    if amount_col and amount_col not in df.columns:
+        raise PopulationError(
+            f"population {name!r}: declared amount_column {amount_col!r} is not a column in "
+            f"this population after filtering/deriving"
+        )
+    if date_col and date_col not in df.columns:
+        raise PopulationError(
+            f"population {name!r}: declared date_column {date_col!r} is not a column in "
+            f"this population after filtering/deriving"
+        )
+
     amount = None
     if amount_col:
-        amount = float(df[amount_col].sum()) if len(df) and amount_col in df.columns else 0.0
+        amount = float(df[amount_col].sum()) if len(df) else 0.0
 
     min_date = max_date = None
-    if date_col and date_col in df.columns and len(df):
+    if date_col and len(df):
         dates = pd.to_datetime(df[date_col])
         if dates.notna().any():
             min_date = dates.min().date().isoformat()
