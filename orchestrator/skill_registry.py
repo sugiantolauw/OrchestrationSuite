@@ -16,6 +16,7 @@ from typing import Any
 
 import yaml
 
+from orchestrator.fingerprint import skill_content_entries
 from orchestrator.skills import Skill
 
 
@@ -36,12 +37,23 @@ def register_skill(skill: Skill, persistence, *, actor: str, now: str) -> dict[s
     change under the same version -- CLAUDE.md §3 NN8, a Skill's content hash
     is what a run fingerprint pins to), and `upsert_risks`/`upsert_controls`
     are themselves idempotent upserts keyed on risk_id/control_id."""
+    # P2/P3 gate review item 9: `files` is the FULL raw-text content this
+    # Skill's skill_content_hash is built from (orchestrator.fingerprint.
+    # skill_content_entries -- the single enumeration both this and the run
+    # fingerprint use, so they cannot drift), so any past run's Skill can be
+    # reconstructed exactly from the ledger: manifest, contract, plan,
+    # findings, thresholds, catalogue, risk_control, custom.py, workspace.py,
+    # every prompts/ override and every reference/ lookup table -- not just
+    # the five parsed keys below (kept for the callers that already read them
+    # structured, e.g. row["content"]["manifest"]["id"]).
+    files = {path: content.decode("utf-8") for path, content in skill_content_entries(skill.skill_dir)}
     content = {
         "manifest": skill.manifest,
         "contract": skill.contract,
         "plan": skill.plan,
         "findings": skill.findings,
         "thresholds": skill.thresholds,
+        "files": files,
     }
     skill_version_row = persistence.record_skill_version(
         skill_id=skill.skill_id,

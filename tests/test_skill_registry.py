@@ -63,6 +63,45 @@ def test_register_skill_seeds_every_risk_and_control_from_risk_control_yaml(pers
     assert controls["CTL-TNE-01"]["engagement_id"] is None
 
 
+def test_stored_content_covers_every_file_hashed_into_skill_content_hash(persistence, tne_skill):
+    # CLAUDE.md P2/P3 gate review item 9: skill_versions must store the FULL
+    # hashed Skill content -- manifest, contract, plan, findings, thresholds,
+    # catalogue, risk_control, prompts, custom.py, workspace.py, and every
+    # reference data file -- not just the five structured keys most callers
+    # read. `files` is that full set, as raw text.
+    result = register_skill(tne_skill, persistence, actor="auditor@example.com", now=canonical_ts(0))
+    files = result["skill_version"]["content"]["files"]
+
+    for name in ("manifest.yaml", "contract.yaml", "plan.yaml", "findings.yaml",
+                 "thresholds.yaml", "risk_control.yaml", "catalogue.yaml",
+                 "custom.py", "workspace.py"):
+        assert name in files, f"{name} missing from stored skill_versions content"
+        assert files[name] == (SKILL_DIR / name).read_text()
+
+    reference_files = [p for p in (SKILL_DIR / "reference").rglob("*") if p.is_file()]
+    assert reference_files  # the Skill really does have reference data to cover
+    for p in reference_files:
+        rel = str(p.relative_to(SKILL_DIR))
+        assert rel in files
+        assert files[rel] == p.read_text()
+
+
+def test_rehashing_stored_content_reproduces_skill_content_hash(persistence, tne_skill):
+    # The point of storing `files` at all (item 9): the Skill this run used
+    # can be reconstructed and VERIFIED from the ledger alone, with no
+    # dependency on skills/tne_exco/ still existing on disk in its
+    # then-current form.
+    from orchestrator.fingerprint import hash_skill_content_entries
+
+    result = register_skill(tne_skill, persistence, actor="auditor@example.com", now=canonical_ts(0))
+    files = result["skill_version"]["content"]["files"]
+
+    entries = [(path, text.encode("utf-8")) for path, text in files.items()]
+    rehashed = hash_skill_content_entries(entries)
+    assert rehashed == result["skill_version"]["content_hash"]
+    assert rehashed == tne_skill.content_hash
+
+
 def test_register_skill_is_idempotent(persistence, tne_skill):
     first = register_skill(tne_skill, persistence, actor="alice", now=canonical_ts(0))
     second = register_skill(tne_skill, persistence, actor="alice", now=canonical_ts(1))

@@ -62,34 +62,65 @@ def _hash_entries(entries: list[tuple[str, bytes]]) -> str:
     return h.hexdigest()
 
 
-def _skill_content_hash(skill_dir: Path | None) -> str | None:
+def skill_content_entries(skill_dir: Path | None) -> list[tuple[str, bytes]]:
+    """Every file that is part of a Skill's CONTENT (CLAUDE.md §3 NN7/NN8,
+    P2/P3 gate review item 9) -- {relative path: raw bytes}, as a list of
+    (path, content) pairs. The SINGLE enumeration both `_skill_content_hash`
+    (below, the run fingerprint) and orchestrator.skill_registry.register_skill
+    (the skill_versions row) use, so the two can never drift: whatever this
+    lists is exactly what is hashed AND exactly what is stored, which is what
+    makes "re-hashing the stored content reproduces skill_content_hash" true
+    by construction rather than by two independently-maintained file lists
+    happening to agree.
+
+    manifest/contract/plan/thresholds/findings/risk_control/catalogue (all of
+    `_SKILL_FILES`), custom.py and workspace.py (the Skill protocol's own
+    two escape-hatch/render modules, CLAUDE.md §4.4), and every file under
+    prompts/ and reference/ (Skill-authored prompt overrides and reference
+    lookup tables) -- a change to any of these must change both the run
+    fingerprint and what a past run's ledger entry can reconstruct, just as a
+    plan.yaml edit already does."""
     if skill_dir is None:
-        return None
+        return []
     skill_dir = Path(skill_dir)
     entries: list[tuple[str, bytes]] = []
     for name in _SKILL_FILES:
         p = skill_dir / name
         if p.is_file():
             entries.append((name, p.read_bytes()))
-    custom_py = skill_dir / "custom.py"
-    if custom_py.is_file():
-        entries.append(("custom.py", custom_py.read_bytes()))
-    # prompts/ and reference/ (Skill-authored prompt overrides and reference lookup
-    # tables, orchestrator/skills.py) are both part of a Skill's content: a change to
-    # either must change the run fingerprint just as a plan.yaml edit would.
+    for name in ("custom.py", "workspace.py"):
+        p = skill_dir / name
+        if p.is_file():
+            entries.append((name, p.read_bytes()))
     for dirname in ("prompts", "reference"):
         d = skill_dir / dirname
         if d.is_dir():
             for p in d.rglob("*"):
                 if p.is_file():
                     entries.append((str(p.relative_to(skill_dir)), p.read_bytes()))
-    return _hash_entries(entries)
+    return entries
+
+
+def _skill_content_hash(skill_dir: Path | None) -> str | None:
+    if skill_dir is None:
+        return None
+    return _hash_entries(skill_content_entries(skill_dir))
 
 
 def skill_content_hash(skill_dir: Path | None) -> str | None:
     """Public entry point for orchestrator.skills -- reuses the same hashing the run
     fingerprint uses (CLAUDE.md P2a) rather than duplicating it."""
     return _skill_content_hash(skill_dir)
+
+
+def hash_skill_content_entries(entries: list[tuple[str, bytes]]) -> str:
+    """Public wrapper over the same hashing skill_content_hash uses, over an
+    already-built {path: bytes} entry list rather than a directory -- lets a
+    caller verify a STORED skill_versions.content snapshot re-hashes to the
+    same skill_content_hash it was recorded with (CLAUDE.md P2/P3 gate review
+    item 9), without re-reading the Skill's files from disk (which may no
+    longer exist at that version by the time the check runs)."""
+    return _hash_entries(entries)
 
 
 def _reference_data_hashes(reference_files: list[Path] | None) -> dict[str, str]:
