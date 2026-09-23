@@ -31,10 +31,14 @@ _SKILL = {
 
 _TEST_CATALOGUE = [
     {"test_id": "T4.1", "category": "Documentation", "test_name": "Missing receipts",
-     "threshold": "0", "flag": "RF_CS_MissingReceipt"},
+     "threshold": "0", "flag": "RF_CS_MissingReceipt",
+     "plan_tests": [{"test_id": "T4.1", "flag": "RF_CS_MissingReceipt", "primitive": "anti_join_gap"}]},
     {"test_id": "T5.1", "category": "Split claims", "test_name": "Split claims same day",
-     "threshold": "n/a", "flag": "RF_CS_SplitClaims_SameDay"},
+     "threshold": "n/a", "flag": "RF_CS_SplitClaims_SameDay",
+     "plan_tests": [{"test_id": "T5.1", "flag": "RF_CS_SplitClaims_SameDay", "primitive": "split_detection"}]},
 ]
+
+_FLAG_TO_TEST = {"RF_CS_MissingReceipt": "T4.1", "RF_CS_SplitClaims_SameDay": "T5.1"}
 
 _GOVERNED_TABLES = [
     {"name": "expense_report", "table_fqn": "test_catalog.tne_source.expense_report",
@@ -82,7 +86,7 @@ def list_skills(ctx) -> list:
 def get_skill(ctx, skill_id: str):
     if skill_id != _SKILL["skill_id"]:
         return None
-    return {**_SKILL, "tests": _TEST_CATALOGUE}
+    return {**_SKILL, "tests": _TEST_CATALOGUE, "flag_to_test": _FLAG_TO_TEST}
 
 
 def list_governed_tables(ctx) -> list:
@@ -199,7 +203,29 @@ def list_trace_events(ctx, run_id=None) -> list:
 
 
 def list_management_actions(ctx, filters=None) -> list:
-    return []
+    out = []
+    for run_id, run in ctx.runs.items():
+        for f in run.get("findings", []):
+            out.append({
+                "action_id": f"MA-{f['finding_id']}",
+                "finding_id": f["finding_id"],
+                "finding_title": f["title"],
+                "run_id": run_id,
+                "skill_id": run.get("skill_id"),
+                "risk": f.get("severity"),
+                "owner": None,
+                "status": "draft",
+                "target_date": None,
+                "potential_exposure": f.get("exposure_amount"),
+                "evidence_link": f.get("test_id"),
+                "description": f.get("recommendation"),
+                "last_updated": "2026-09-23T00:00:00",
+            })
+    if filters:
+        run_id = filters.get("run_id")
+        if run_id:
+            out = [a for a in out if a.get("run_id") == run_id]
+    return out
 
 
 def confirm_plan(ctx, run_id, actor) -> None:
@@ -229,24 +255,82 @@ def get_run_payload(ctx, run_id) -> dict:
     return {
         "run_id": run_id,
         "status": run.get("status"),
-        "metrics": {},
+        "metrics": {
+            "total_records": {"value": 12, "unit": "count", "source_ref": {}},
+            "total_files": {"value": 2, "unit": "count", "source_ref": {}},
+            "months_covered": {"value": 5, "unit": "count", "source_ref": {}},
+            "claims_prepared_rows": {"value": 5, "unit": "count", "source_ref": {}},
+            "claims_prepared_amount": {"value": 3000.0, "unit": "AUD", "source_ref": {}},
+            "claims_approved_rows": {"value": 4, "unit": "count", "source_ref": {}},
+            "claims_approved_amount": {"value": 2500.0, "unit": "AUD", "source_ref": {}},
+            "claims_combined_rows": {"value": 6, "unit": "count", "source_ref": {}},
+            "claims_combined_amount": {"value": 6825.0, "unit": "AUD", "source_ref": {}},
+        },
         "test_results": run.get("test_results", []),
         "findings": run.get("findings", []),
-        "reconciliation": None,
-        "exposure": {"headline": None, "basis": None},
+        "reconciliation": {
+            "expense_report": {"engine_rows": 6, "independent_rows": 6, "variance": 0,
+                               "amount": 6825.0, "min_date": "2025-02-01", "max_date": "2025-06-15"},
+        },
+        "exposure": {"headline": 1725.0, "basis": "sum of amount over the union of distinct flagged rows"},
     }
 
 
 def get_run_frames(ctx, run_id) -> dict:
-    df = pd.DataFrame({
-        "Employee": ["Alice", "Bob", "Alice"],
-        "Transaction Date": ["2025-02-01", "2025-02-03", "2025-03-01"],
-        "Expense Type": ["Airfare", "Meals", "Meals"],
-        "Vendor": ["Qantas", "Cafe", "Cafe"],
-        "Expense Amount (reimbursement currency)": [1200.0, 45.0, 60.0],
-        "RF_CS_MissingReceipt": [1, 0, 1],
+    """Realistic multi-source frames -- real contract column names
+    (skills/tne_exco/contract.yaml) and RF_* flags from the real Skill's
+    plan.yaml, so app/'s own workspace_tne.py exercises the same flag ->
+    catalogue-test mapping it uses against a live backend."""
+    expense = pd.DataFrame({
+        "Employee": ["Alice Wu", "Bob Chen", "Alice Wu", "Carol Ng", "Bob Chen", "Alice Wu"],
+        "Transaction Date": ["2025-02-01", "2025-02-03", "2025-03-01", "2025-03-15", "2025-04-02", "2025-06-15"],
+        "Expense Type": ["Airfares - Domestic Travel", "Meals - Domestic Travel", "Meals - Domestic Travel",
+                          "Staff/Client Function: Offsite Food/Drink", "Accommodation - Domestic Travel",
+                          "Meals - Domestic Travel"],
+        "Vendor": ["Qantas", "Cafe One", "Cafe One", "The Grill", "Hilton", "Cafe Two"],
+        "Expense Amount (reimbursement currency)": [1200.0, 45.0, 60.0, 5500.0, 420.0, 1600.0],
+        "RF_CS_MissingReceipt": [1, 0, 1, 0, 0, 1],
+        "RF_CS_Reimbursement_GT_5K": [0, 0, 0, 1, 0, 0],
+        "RF_ATT_Missing": [0, 0, 0, 1, 0, 0],
     })
-    return {"expense_report": df}
+    approval = pd.DataFrame({
+        "Report ID": ["R-1", "R-2", "R-3", "R-4"],
+        "Approver ID": [101, 102, 101, 103],
+        "Approver Name": ["Dana Price", "Evan Cole", "Dana Price", "Farah Khan"],
+        "Step": ["Manager", "Manager", "Finance", "Manager"],
+        "Approved Date/Time": ["2025-02-02T09:00:00", "2025-02-04T14:00:00",
+                                "2025-03-02T08:00:00", "2025-04-03T11:00:00"],
+        "Approver Received Date": ["2025-02-02T08:55:00", "2025-02-04T13:00:00",
+                                    "2025-03-02T07:00:00", "2025-04-03T10:00:00"],
+        "Report Receipt Viewed": ["Y", "N", "Y", "N"],
+        "All Entry Receipts Viewed": ["N", "N", "Y", "N"],
+        "Minutes of Approval from Receipt View": [5, 0, 60, 0],
+        "Receipts Viewed Date": ["2025-02-02T08:56:00", None, "2025-03-02T06:00:00", None],
+        "RF_APR_InsufficientReview": [0, 1, 0, 1],
+    })
+    travel_requests = pd.DataFrame({
+        "Employee": ["Alice Wu", "Bob Chen"],
+        "Travel Request ID": ["TR-1", "TR-2"],
+        "Approval Status": ["Approved", "Approved"],
+        "Start Date": ["2025-01-20", "2025-01-28"],
+        "Total Approved Amount (rpt)": [1500.0, 300.0],
+        "RF_PRE_Unlinked": [0, 0],
+    })
+    booking = pd.DataFrame({
+        "Lead Traveller Name": ["Alice Wu", "Bob Chen"],
+        "Booking ID": [9001, 9002],
+        "Dom | Int": ["Domestic", "Domestic"],
+        "Advance Purchase Days": [2, 21],
+        "Booking Status": ["Confirmed", "Confirmed"],
+        "Depart Date": ["2025-01-30", "2025-02-01"],
+        "RF_CS_LateBooking": [1, 0],
+    })
+    return {
+        "expense_report": expense,
+        "approval_aging": approval,
+        "travel_requests_no_expense": travel_requests,
+        "booking_detail": booking,
+    }
 
 
 def get_export(ctx, run_id, kind: str):
