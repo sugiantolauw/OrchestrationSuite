@@ -1,0 +1,139 @@
+# One control per distinct reference_app/src/test_catalogue.py control_objective,
+# one risk per control (CLAUDE.md §4.9). Seeds the P1B `risks`/`controls` tables
+# in P2 proper; here it is the source of truth plan.yaml's control_id/risk_id
+# fields reference. category matches the catalogue's CATEGORY_ORDER.
+
+controls:
+  - control_id: CTL-TNE-01
+    risk_id: RSK-TNE-01
+    category: Pre-travel
+    title: All travel should be pre-approved before expenses are incurred
+    tests: [T3.1a, T3.1b]
+
+  - control_id: CTL-TNE-02
+    risk_id: RSK-TNE-02
+    category: Pre-travel
+    title: Preferred suppliers should be used to maximise negotiated rates
+    tests: [T3.2a_air_dom, T3.2a_air_int, T3.2a_car_dom, T3.2a_car_int, T3.2a_accom]
+
+  - control_id: CTL-TNE-03
+    risk_id: RSK-TNE-03
+    category: Pre-travel
+    title: Travel should be booked in advance to obtain best fares
+    tests: [T3.3a_dom, T3.3a_int, T3.3a_very_late]
+
+  - control_id: CTL-TNE-04
+    risk_id: RSK-TNE-04
+    category: Pre-travel
+    title: Entertainment spend should comply with per-head limits
+    tests: [T3.3b]
+
+  - control_id: CTL-TNE-05
+    risk_id: RSK-TNE-05
+    category: Spend compliance
+    title: All claims must have supporting receipt documentation
+    tests: [T4.1]
+
+  - control_id: CTL-TNE-06
+    risk_id: RSK-TNE-06
+    category: Spend compliance
+    title: Entertainment claims must list attendees and business purpose
+    tests: [T4.2]
+
+  - control_id: CTL-TNE-07
+    risk_id: RSK-TNE-07
+    category: Spend compliance
+    title: Business claims should not include personal expenses
+    tests: [T4.3]
+
+  - control_id: CTL-TNE-08
+    risk_id: RSK-TNE-08
+    category: Spend compliance
+    title: High-value claims require enhanced review
+    tests: [T4.4]
+
+  - control_id: CTL-TNE-09
+    risk_id: RSK-TNE-09
+    category: Fraud risk
+    title: Claims should not be split to circumvent approval thresholds
+    tests: [T5.1]
+
+  - control_id: CTL-TNE-10
+    risk_id: RSK-TNE-10
+    category: Fraud risk
+    title: Duplicate claims should be detected and prevented
+    tests: [T5.2]
+
+  - control_id: CTL-TNE-11
+    risk_id: RSK-TNE-11
+    category: Approval effectiveness
+    title: Approvers should review receipts and spend adequate time on approval
+    tests: [T6.1a]
+
+  - control_id: CTL-TNE-12
+    risk_id: RSK-TNE-12
+    category: Approval effectiveness
+    title: Entertainment attendees should not be direct reports of the claimant
+    tests: [T6.1c]
+
+  - control_id: CTL-TNE-13
+    risk_id: RSK-TNE-13
+    category: Approval effectiveness
+    title: Daily spend per employee should not exceed policy limits
+    tests: [T6.1d_dom, T6.1d_int]
+
+risks:
+  - risk_id: RSK-TNE-01
+    control_id: CTL-TNE-01
+    title: Unapproved travel is undertaken and reimbursed
+    category: Pre-travel
+  - risk_id: RSK-TNE-02
+    control_id: CTL-TNE-02
+    title: Negotiated corporate rates are foregone through non-preferred bookings
+    category: Pre-travel
+  - risk_id: RSK-TNE-03
+    control_id: CTL-TNE-03
+    title: Late bookings increase travel cost through avoidable urgency premiums
+    category: Pre-travel
+  - risk_id: RSK-TNE-04
+    control_id: CTL-TNE-04
+    title: Entertainment spend exceeds reasonable per-head limits
+    category: Pre-travel
+  - risk_id: RSK-TNE-05
+    control_id: CTL-TNE-05
+    title: Unsupported claims are reimbursed without evidence of a legitimate business expense
+    category: Spend compliance
+  - risk_id: RSK-TNE-06
+    control_id: CTL-TNE-06
+    title: Entertainment claims lack the attendee detail needed to evidence business purpose
+    category: Spend compliance
+  - risk_id: RSK-TNE-07
+    control_id: CTL-TNE-07
+    title: Personal expenses are reimbursed as business expenses
+    category: Spend compliance
+  - risk_id: RSK-TNE-08
+    control_id: CTL-TNE-08
+    title: High-value claims are reimbursed without proportionate scrutiny
+    category: Spend compliance
+  - risk_id: RSK-TNE-09
+    control_id: CTL-TNE-09
+    title: Claims are split to circumvent approval thresholds
+    category: Fraud risk
+  - risk_id: RSK-TNE-10
+    control_id: CTL-TNE-10
+    title: The same expense is reimbursed more than once
+    category: Fraud risk
+  - risk_id: RSK-TNE-11
+    control_id: CTL-TNE-11
+    title: Approvers rubber-stamp claims without meaningful review
+    category: Approval effectiveness
+  - risk_id: RSK-TNE-12
+    control_id: CTL-TNE-12
+    title: >
+      Entertainment attendee lists include the claimant's own direct reports,
+      undermining independence
+    category: Approval effectiveness
+  - risk_id: RSK-TNE-13
+    control_id: CTL-TNE-13
+    title: Daily spend on travel and meals exceeds policy allowances
+    category: Approval effectiveness

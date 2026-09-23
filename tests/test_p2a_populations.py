@@ -48,6 +48,21 @@ def test_filters_in_and_between_audit_period_ref():
     assert result.excluded_counts["filter[1]:Transaction Date:between"] == 1  # employee 3, Feb date
 
 
+def test_between_filter_includes_full_last_day_for_datetime_columns():
+    # Regression: a datetime column (not just a date) compared against a bare
+    # date upper bound must include the whole last day, not just its midnight.
+    df = pd.DataFrame(
+        {"Approved At": pd.to_datetime(["2025-01-31 09:00:00", "2025-01-31 23:59:00", "2025-02-01 00:00:01"])}
+    )
+    ctx = _ctx({"src": _src(df)}, audit_period=("2025-01-01", "2025-01-31"))
+    pop_cfg = {
+        "source": "src",
+        "filters": [{"column": "Approved At", "op": "between", "value": {"ref": "audit_period"}}],
+    }
+    result = build_population("pop", pop_cfg, ctx)
+    assert result.rows == 2  # both 2025-01-31 rows included, the 2025-02-01 row excluded
+
+
 def test_any_of_and_all_of_filters():
     df = pd.DataFrame({"A": [1, 1, 2], "B": [1, 2, 2]})
     ctx = _ctx({"src": _src(df)})
@@ -115,6 +130,30 @@ def test_derive_fx_rate_and_multiply():
     }
     result = build_population("pop", pop_cfg, ctx)
     assert result.df["Amount AUD"].iloc[0] == pytest.approx(115.0)
+
+
+def test_pre_filter_derive_lets_a_filter_key_on_a_cleaned_up_value():
+    # Cross Change Approver-shaped scenario: a column mixes numeric ids with a
+    # non-numeric sentinel ("Concur System") -- coerce to numeric BEFORE the `in`
+    # filter runs, so the sentinel value fails to match rather than crashing or
+    # being silently included.
+    df = pd.DataFrame({"Approver": ["52725", "Concur System", "52394", None]})
+    ctx = _ctx({"src": _src(df)}, references={"exco": [52725, 52394]})
+
+    def to_numeric_approver(frame, params, ctx):
+        numeric = pd.to_numeric(frame["Approver"], errors="coerce")
+        non_numeric = numeric.isna() & frame["Approver"].notna()
+        return numeric, {"approver_non_numeric_rows": int(non_numeric.sum())}
+
+    ctx.custom_derivations["to_numeric_approver"] = to_numeric_approver
+    pop_cfg = {
+        "source": "src",
+        "pre_filter_derive": [{"op": "custom", "name": "to_numeric_approver", "as": "approver_id"}],
+        "filters": [{"column": "approver_id", "op": "in", "value": {"ref": "exco"}}],
+    }
+    result = build_population("pop", pop_cfg, ctx)
+    assert result.rows == 2
+    assert result.derivation_counters["approver_non_numeric_rows"] == 1
 
 
 def test_amount_and_date_reconciliation_summary():

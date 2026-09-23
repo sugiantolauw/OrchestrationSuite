@@ -1,0 +1,221 @@
+# Every threshold plan.yaml or findings.yaml references. None has a real policy
+# source yet (CLAUDE.md §0.4) -- all analyst-set, pending_policy_confirmation: true,
+# recorded 2026-09-23 (P2b-1). G8 (tests/test_g8_thresholds.py) asserts every one
+# is referenced somewhere and every reference resolves to an entry here.
+
+high_value_limit:
+  value: 5000
+  unit: AUD
+  description: >
+    High-value claim threshold (T4.4), and the per-line ceiling ("no single line
+    may itself exceed this") in the T5.1 split-claim test.
+  used_by: [T4.4, T5.1]
+  effective_date: "2026-09-23"
+  provenance:
+    type: analyst-set
+    pending_policy_confirmation: true
+
+split_aggregate_threshold:
+  value: 5000
+  unit: AUD
+  description: Aggregate group/window sum threshold for T5.1 split-claim detection.
+  used_by: [T5.1]
+  effective_date: "2026-09-23"
+  provenance:
+    type: analyst-set
+    pending_policy_confirmation: true
+
+split_window_days:
+  value: 3
+  unit: days
+  description: T5.1 sliding-window length [d, d+2] (3 calendar days inclusive).
+  used_by: [T5.1]
+  effective_date: "2026-09-23"
+  provenance:
+    type: analyst-set
+    pending_policy_confirmation: true
+
+entertainment_internal_limit:
+  value: 40
+  unit: AUD
+  description: T3.3b per-head entertainment limit when every attendee is internal.
+  used_by: [T3.3b]
+  effective_date: "2026-09-23"
+  provenance:
+    type: analyst-set
+    pending_policy_confirmation: true
+
+entertainment_external_limit:
+  value: 80
+  unit: AUD
+  description: T3.3b per-head entertainment limit when any attendee is external.
+  used_by: [T3.3b]
+  effective_date: "2026-09-23"
+  provenance:
+    type: analyst-set
+    pending_policy_confirmation: true
+
+late_booking_domestic_days:
+  value: 7
+  unit: days
+  description: T3.3a domestic-travel "late booking" advance-purchase threshold.
+  used_by: [T3.3a_dom]
+  effective_date: "2026-09-23"
+  provenance:
+    type: analyst-set
+    pending_policy_confirmation: true
+
+late_booking_international_days:
+  value: 14
+  unit: days
+  description: T3.3a international/Trans-Tasman "late booking" advance-purchase threshold.
+  used_by: [T3.3a_int]
+  effective_date: "2026-09-23"
+  provenance:
+    type: analyst-set
+    pending_policy_confirmation: true
+
+very_late_booking_days:
+  value: 3
+  unit: days
+  description: T3.3a "very late booking" advance-purchase threshold, any travel class.
+  used_by: [T3.3a_very_late]
+  effective_date: "2026-09-23"
+  provenance:
+    type: analyst-set
+    pending_policy_confirmation: true
+
+instant_approval_minutes:
+  value: 1
+  unit: minutes
+  description: T6.1a "instant approval" threshold (minutes from receipt view to approval).
+  used_by: [T6.1a]
+  effective_date: "2026-09-23"
+  provenance:
+    type: analyst-set
+    pending_policy_confirmation: true
+
+# --- severity thresholds, ported from reference_app/app.py build_all_findings ---
+# (CLAUDE.md §0.4: these numbers were invented by the authoring model, not from
+# any T&E policy -- every one carries provenance: analyst-set here, unchanged.)
+
+missing_receipt_high_pct:
+  value: 10
+  unit: "%"
+  description: T4.1 finding severity -- High when missing-receipt rate exceeds this.
+  used_by: [findings.T4_1]
+  effective_date: "2026-09-23"
+  provenance:
+    type: analyst-set
+    pending_policy_confirmation: true
+
+missing_receipt_medium_pct:
+  value: 5
+  unit: "%"
+  description: T4.1 finding severity -- Medium when missing-receipt rate exceeds this.
+  used_by: [findings.T4_1]
+  effective_date: "2026-09-23"
+  provenance:
+    type: analyst-set
+    pending_policy_confirmation: true
+
+att_missing_high_pct:
+  value: 20
+  unit: "%"
+  description: T4.2 finding severity -- High when missing-attendee rate exceeds this.
+  used_by: [findings.T4_2]
+  effective_date: "2026-09-23"
+  provenance:
+    type: analyst-set
+    pending_policy_confirmation: true
+
+approver_no_receipt_high_pct:
+  value: 30
+  unit: "%"
+  description: T6.1a finding severity -- High when the no-receipt-viewed rate exceeds this.
+  used_by: [findings.T6_1a]
+  effective_date: "2026-09-23"
+  provenance:
+    type: analyst-set
+    pending_policy_confirmation: true
+
+approver_instant_high_pct:
+  value: 40
+  unit: "%"
+  description: T6.1a finding severity -- High when the instant-approval rate exceeds this.
+  used_by: [findings.T6_1a]
+  effective_date: "2026-09-23"
+  provenance:
+    type: analyst-set
+    pending_policy_confirmation: true
+
+split_high_count:
+  value: 20
+  unit: count
+  description: >
+    T5.1 finding severity -- High when either the same-day or the window group
+    count exceeds this. Adapted from app.py's `split_same_day + split_window > 20`
+    (a sum) to an either-count comparison: the restricted evaluator (CLAUDE.md
+    §4.6) has no arithmetic operator, only comparisons and boolean ops.
+  used_by: [findings.T5_1]
+  effective_date: "2026-09-23"
+  provenance:
+    type: analyst-set
+    pending_policy_confirmation: true
+
+duplicate_high_count:
+  value: 10
+  unit: count
+  description: >
+    T5.2 finding severity -- High when either the duplicate-group count or the
+    OOP/card duplicate-group count exceeds this. Same either-count adaptation as
+    split_high_count.
+  used_by: [findings.T5_2]
+  effective_date: "2026-09-23"
+  provenance:
+    type: analyst-set
+    pending_policy_confirmation: true
+
+pref_supplier_medium_count:
+  value: 20
+  unit: count
+  description: >
+    T3.2a finding severity -- Medium when any one non-preferred-supplier sub-count
+    (airline or car, domestic or international) exceeds this.
+  used_by: [findings.T3_2a]
+  effective_date: "2026-09-23"
+  provenance:
+    type: analyst-set
+    pending_policy_confirmation: true
+
+very_late_booking_high_count:
+  value: 10
+  unit: count
+  description: T3.3a finding severity -- High when the very-late booking count exceeds this.
+  used_by: [findings.T3_3a]
+  effective_date: "2026-09-23"
+  provenance:
+    type: analyst-set
+    pending_policy_confirmation: true
+
+t31b_employee_medium_count:
+  value: 5
+  unit: count
+  description: T3.1b finding severity -- Medium when the affected-employee count exceeds this.
+  used_by: [findings.T3_1b]
+  effective_date: "2026-09-23"
+  provenance:
+    type: analyst-set
+    pending_policy_confirmation: true
+
+daily_over_high_count:
+  value: 50
+  unit: count
+  description: >
+    T6.1d finding severity -- High when either the domestic or the international
+    employee-day exceedance count exceeds this.
+  used_by: [findings.T6_1d]
+  effective_date: "2026-09-23"
+  provenance:
+    type: analyst-set
+    pending_policy_confirmation: true

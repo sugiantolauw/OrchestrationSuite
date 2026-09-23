@@ -1,0 +1,272 @@
+timezone: Australia/Sydney
+sources:
+  expense_report:
+    format: xlsx
+    sheet: data
+    file: Expense_Report_Combined.xlsx
+    header_trim: false
+    columns:
+      Employee:
+        type: string
+        nullable: false
+        pii: true
+      Employee ID:
+        type: integer
+        nullable: false
+        pii: true
+      Employee ID(Cross Change Approver):
+        type: string
+        nullable: true
+        pii: true
+      Report Legacy Key:
+        type: integer
+        nullable: false
+      Report Name:
+        type: string
+        nullable: false
+      Transaction Date:
+        type: date
+        nullable: false
+      Expense Type:
+        type: string
+        nullable: false
+        trim_values: true
+      Vendor:
+        type: string
+        nullable: true
+        trim_values: true
+      Parent Key:
+        type: integer
+        nullable: false
+      Payment Type:
+        type: string
+        nullable: false
+        trim_values: true
+      Reimbursement Currency:
+        type: string
+        nullable: false
+        trim_values: true
+        required_values: [AUD]
+      Expense Amount (reimbursement currency):
+        type: number
+        nullable: false
+      Transaction Currency:
+        type: string
+        nullable: false
+        trim_values: true
+      City/Location:
+        type: string
+        nullable: true
+        trim_values: true
+
+  attendee_validity:
+    format: xlsx
+    sheet: Sheet1
+    file: Attendee_Validity_Report.xlsx
+    header_trim: false
+    columns:
+      Employee ID:
+        type: integer
+        nullable: false
+        pii: true
+      Report Name:
+        type: string
+        nullable: false
+      Attendee Name:
+        type: string
+        nullable: false
+        pii: true
+      Expense Type:
+        type: string
+        nullable: false
+        trim_values: true
+      Vendor:
+        type: string
+        nullable: false
+        trim_values: true
+      Transaction Date:
+        type: date
+        nullable: false
+      Is Attendee also in Hierarchy?:
+        type: string
+        nullable: false
+        trim_values: true
+      Number of Attendees:
+        type: integer
+        nullable: false
+      Entry Amount:
+        type: number
+        nullable: false
+      External ID:
+        type: integer
+        nullable: false
+      Company:
+        type: string
+        nullable: true
+
+  missing_receipt:
+    format: xlsx
+    sheet: Sheet1
+    file: Claims_Missing_Receipt_Affidavit.xlsx
+    header_trim: false
+    columns:
+      Employee ID:
+        type: integer
+        nullable: false
+        pii: true
+      Report Legacy Key:
+        type: integer
+        nullable: false
+      Transaction Date:
+        type: date
+        nullable: false
+      Expense Type:
+        type: string
+        nullable: false
+        trim_values: true
+      Expense Amount (reimbursement currency):
+        type: number
+        nullable: false
+      Reimbursement Currency:
+        type: string
+        nullable: false
+        trim_values: true
+        required_values: [AUD]
+      Has Affidavit:
+        type: string
+        nullable: false
+        trim_values: true
+
+  approval_aging:
+    format: xlsx
+    sheet: Sheet1
+    file: Approval_Aging_Receipt_Viewed.xlsx
+    header_trim: false
+    columns:
+      Report ID:
+        type: string
+        nullable: false
+      Approver ID:
+        type: integer
+        nullable: false
+        pii: true
+      Approver Name:
+        type: string
+        nullable: false
+        pii: true
+      Step:
+        type: string
+        nullable: false
+        trim_values: true
+      Approved Date/Time:
+        type: datetime
+        nullable: false
+      Approver Received Date:
+        type: datetime
+        nullable: false
+      Report Receipt Viewed:
+        type: string
+        nullable: false
+        trim_values: true
+      All Entry Receipts Viewed:
+        type: string
+        nullable: false
+        trim_values: true
+      Minutes of Approval from Receipt View:
+        type: integer
+        nullable: false
+      Receipts Viewed Date:
+        type: datetime
+        nullable: true
+      Reimbursement Currency:
+        type: string
+        nullable: false
+        trim_values: true
+        required_values: [AUD]
+
+  travel_requests_no_expense:
+    format: xlsx
+    sheet: Sheet1
+    file: Travel_Requests_Without_Expense.xlsx
+    header_trim: false
+    columns:
+      Employee:
+        type: string
+        nullable: false
+        trim_values: true
+        pii: true
+      Travel Request ID:
+        type: string
+        nullable: false
+      Approval Status:
+        type: string
+        nullable: false
+        trim_values: true
+      Start Date:
+        type: date
+        nullable: false
+      Total Approved Amount (rpt):
+        type: number
+        nullable: false
+
+  travel_request_segment:
+    format: xlsx
+    sheet: Sheet1
+    file: Travel_Request_by_Segment.xlsx
+    header_trim: false
+    columns:
+      Employee:
+        type: string
+        nullable: false
+        trim_values: true
+        pii: true
+      Expense Type:
+        type: string
+        nullable: false
+        trim_values: true
+
+  booking_detail:
+    format: xlsx
+    sheet: Sheet1
+    file: Booking_Detail_Report.xlsx
+    header_trim: true
+    columns:
+      Lead Traveller Name:
+        type: string
+        nullable: false
+        trim_values: true
+        pii: true
+      Booking ID:
+        type: integer
+        nullable: false
+      Dom | Int:
+        type: string
+        nullable: false
+        trim_values: true
+      Advance Purchase Days:
+        type: integer
+        nullable: false
+      Booking Status:
+        type: string
+        nullable: false
+        trim_values: true
+      Depart Date:
+        type: date
+        nullable: false
+      Currency:
+        type: string
+        nullable: false
+        trim_values: true
+        required_values: [AUD]
+
+  per_diem_rates:
+    format: csv
+    file: Complete_Per_Diem_Rates_by_Country_Region.csv
+    header_trim: false
+    columns:
+      Country/Region:
+        type: string
+        nullable: false
+      Rate Per Day (S$):
+        type: number
+        nullable: false

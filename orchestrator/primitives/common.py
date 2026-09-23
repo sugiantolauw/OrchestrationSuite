@@ -33,11 +33,26 @@ METRICS_PROPERTY_SCHEMA: dict = {
                     "excess",
                     "match_rate",
                     "value",
+                    "count_where",
+                    "sum_where",
                 ],
             },
             "column": {"type": "string"},
             "key": {"type": "string"},
             "unit": {"type": "string"},
+            "where": {
+                "type": "object",
+                "properties": {
+                    "column": {"type": "string"},
+                    "op": {
+                        "type": "string",
+                        "enum": ["eq", "ne", "gt", "gte", "lt", "lte", "in", "not_in"],
+                    },
+                    "value": {},
+                },
+                "required": ["column", "op"],
+                "additionalProperties": False,
+            },
         },
         "required": ["kind"],
         "additionalProperties": False,
@@ -262,6 +277,25 @@ def build_metrics(
             if key not in values:
                 raise PrimitiveParamsError(f"metric {name!r}: no computed value named {key!r}")
             metric = Metric(value=values[key], unit=unit or "count", source_ref=_base_source_ref(population, columns, grain))
+        elif kind == "count_where":
+            frame = row_df
+            where = spec["where"]
+            n = int(row_condition_mask(frame, where).sum()) if frame is not None and len(frame) else 0
+            metric = Metric(
+                value=n, unit=unit or "count", source_ref=_base_source_ref(population, [where["column"]], grain)
+            )
+        elif kind == "sum_where":
+            col = spec["column"]
+            where = spec["where"]
+            frame = row_df
+            if frame is not None and len(frame):
+                mask = row_condition_mask(frame, where)
+                v = float(frame.loc[mask, col].sum())
+            else:
+                v = 0.0
+            metric = Metric(
+                value=v, unit=unit or "AUD", source_ref=_base_source_ref(population, [col, where["column"]], grain)
+            )
         else:
             raise PrimitiveParamsError(f"unknown metric kind: {kind!r}")
         out[name] = metric.to_dict()

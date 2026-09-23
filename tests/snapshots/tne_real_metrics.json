@@ -1,0 +1,282 @@
+{
+  "metrics": {
+    "approver_count": 11,
+    "approver_detail": [
+      {
+        "Approver Name": "Chen, Alex",
+        "instant_pct": 0.0,
+        "no_receipt_pct": 28.6,
+        "receipt_viewed_pct": 71.4,
+        "reports": 7
+      },
+      {
+        "Approver Name": "Nakamura, Yuki",
+        "instant_pct": 11.5,
+        "no_receipt_pct": 56.4,
+        "receipt_viewed_pct": 43.6,
+        "reports": 156
+      },
+      {
+        "Approver Name": "van den Berg, Lucas",
+        "instant_pct": 10.0,
+        "no_receipt_pct": 70.0,
+        "receipt_viewed_pct": 30.0,
+        "reports": 10
+      },
+      {
+        "Approver Name": "Mendes, Sofia",
+        "instant_pct": 1.8,
+        "no_receipt_pct": 82.8,
+        "receipt_viewed_pct": 17.2,
+        "reports": 163
+      },
+      {
+        "Approver Name": "Johansson, Erik",
+        "instant_pct": 1.9,
+        "no_receipt_pct": 88.6,
+        "receipt_viewed_pct": 11.4,
+        "reports": 158
+      },
+      {
+        "Approver Name": "Okonkwo, Emeka",
+        "instant_pct": 11.1,
+        "no_receipt_pct": 88.9,
+        "receipt_viewed_pct": 11.1,
+        "reports": 18
+      },
+      {
+        "Approver Name": "Delacroix, Marie",
+        "instant_pct": 3.1,
+        "no_receipt_pct": 93.8,
+        "receipt_viewed_pct": 6.2,
+        "reports": 128
+      },
+      {
+        "Approver Name": "Kowalski, Jan",
+        "instant_pct": 0.0,
+        "no_receipt_pct": 95.2,
+        "receipt_viewed_pct": 4.8,
+        "reports": 42
+      },
+      {
+        "Approver Name": "Thompson, Sarah",
+        "instant_pct": 1.9,
+        "no_receipt_pct": 96.2,
+        "receipt_viewed_pct": 3.8,
+        "reports": 104
+      },
+      {
+        "Approver Name": "Fitzgerald, Aoife",
+        "instant_pct": 0.0,
+        "no_receipt_pct": 100.0,
+        "receipt_viewed_pct": 0.0,
+        "reports": 1
+      },
+      {
+        "Approver Name": "Ramirez, Carlos",
+        "instant_pct": 0.0,
+        "no_receipt_pct": 100.0,
+        "receipt_viewed_pct": 0.0,
+        "reports": 12
+      }
+    ],
+    "approver_instant_pct": 4.1,
+    "approver_no_receipt_pct": 82.7,
+    "approver_total_reports": 799,
+    "approver_worst_case_n": 1,
+    "approver_worst_case_pct": 0.1,
+    "att_hierarchy_invalid": 3,
+    "att_hierarchy_total": 4,
+    "att_missing_count": 198,
+    "att_missing_pct": 84.6,
+    "att_total": 234,
+    "daily_over_amount_dom": 446.39761341999997,
+    "daily_over_amount_int": 998.52770732,
+    "daily_over_count_dom": 2,
+    "daily_over_count_int": 2,
+    "daily_over_employees_dom": 1,
+    "daily_over_max_dom": 437.92,
+    "daily_over_max_int": 814.25,
+    "duplicate_amount": 1994.7900000000004,
+    "duplicate_groups": 29,
+    "duplicate_lines": 60,
+    "duplicate_oop_card_groups": 1,
+    "ent_assessed": 4,
+    "ent_over_amount": 1384.27,
+    "ent_over_external_count": 1,
+    "ent_over_internal_count": 0,
+    "hv_amount": 318785.6000000001,
+    "hv_count": 38,
+    "hv_employees": 10,
+    "late_booking_count_dom": 0,
+    "late_booking_count_int": 0,
+    "late_booking_employees_dom": 0,
+    "late_booking_employees_int": 0,
+    "missing_receipt_amount": 1009.26,
+    "missing_receipt_count": 27,
+    "missing_receipt_no_affidavit_count": 0,
+    "missing_receipt_pct": 0.7,
+    "no_preapproval_bookings": 8,
+    "no_preapproval_employees": 2,
+    "preapproval_employees": 10,
+    "preapproval_unlinked_amount": 182552.31999999998,
+    "preapproval_unlinked_count": 85,
+    "pref_dom_airline": 1,
+    "pref_dom_car": 1,
+    "pref_int_airline": 20,
+    "pref_int_car": 0,
+    "split_amount": 0.0,
+    "split_same_day_groups": 0,
+    "split_same_day_lines": 0,
+    "split_window_groups": 0,
+    "split_window_lines": 0,
+    "t31b_name_match_rate": 33.3,
+    "t41_unmatched_register_rows": 844,
+    "very_late_booking_count": 0
+  },
+  "populations": {
+    "missing_receipt_pop": {
+      "amount": null,
+      "rows": 871
+    },
+    "p_exp": {
+      "amount": 1032127.93,
+      "rows": 3628
+    },
+    "p_exp_approved_all": {
+      "amount": 467063.73,
+      "rows": 2317
+    },
+    "p_exp_both_all": {
+      "amount": 1420.9400000000003,
+      "rows": 23
+    },
+    "p_exp_dup": {
+      "amount": 1049631.06,
+      "rows": 3589
+    },
+    "p_exp_pref_air_dom": {
+      "amount": 165698.96,
+      "rows": 276
+    },
+    "p_exp_pref_air_int": {
+      "amount": 147947.24,
+      "rows": 30
+    },
+    "p_exp_pref_car_dom": {
+      "amount": 613.3499999999999,
+      "rows": 3
+    },
+    "p_exp_pref_car_int": {
+      "amount": 0.0,
+      "rows": 0
+    },
+    "p_exp_prepared": {
+      "amount": 576632.28,
+      "rows": 1399
+    },
+    "p_exp_prepared_all": {
+      "amount": 590037.34,
+      "rows": 1417
+    },
+    "p_exp_split": {
+      "amount": 911454.1499999999,
+      "rows": 3114
+    },
+    "raw_approval_aging": {
+      "amount": null,
+      "rows": 29103
+    },
+    "raw_attendee_validity": {
+      "amount": null,
+      "rows": 1394
+    },
+    "raw_booking_detail": {
+      "amount": null,
+      "rows": 7019
+    },
+    "raw_expense_report": {
+      "amount": null,
+      "rows": 92798
+    },
+    "raw_missing_receipt": {
+      "amount": null,
+      "rows": 871
+    },
+    "raw_per_diem_rates": {
+      "amount": null,
+      "rows": 205
+    },
+    "raw_travel_request_segment": {
+      "amount": null,
+      "rows": 16747
+    },
+    "raw_travel_requests_no_expense": {
+      "amount": null,
+      "rows": 4784
+    },
+    "t31a_pop": {
+      "amount": 182552.31999999998,
+      "rows": 85
+    },
+    "t31b_bookings_pop": {
+      "amount": null,
+      "rows": 12
+    },
+    "t31b_requests_pop": {
+      "amount": null,
+      "rows": 271
+    },
+    "t33b_pop": {
+      "amount": 2702.7,
+      "rows": 4
+    },
+    "t42_pop": {
+      "amount": 75076.29999999999,
+      "rows": 234
+    },
+    "t61a_pop": {
+      "amount": null,
+      "rows": 799
+    },
+    "t61c_pop": {
+      "amount": null,
+      "rows": 4
+    },
+    "t61d_pop": {
+      "amount": 6202.099999999999,
+      "rows": 136
+    },
+    "t61d_pop_dom": {
+      "amount": 2375.85,
+      "rows": 88
+    },
+    "t61d_pop_int": {
+      "amount": 3826.25,
+      "rows": 48
+    }
+  },
+  "test_statuses": {
+    "T3.1a": "exception",
+    "T3.1b": "exception",
+    "T3.2a_accom": "not_testable",
+    "T3.2a_air_dom": "exception",
+    "T3.2a_air_int": "exception",
+    "T3.2a_car_dom": "exception",
+    "T3.2a_car_int": "pass",
+    "T3.3a_dom": "pass",
+    "T3.3a_int": "pass",
+    "T3.3a_very_late": "pass",
+    "T3.3b": "exception",
+    "T4.1": "exception",
+    "T4.2": "exception",
+    "T4.3": "not_testable",
+    "T4.4": "exception",
+    "T5.1": "pass",
+    "T5.2": "exception",
+    "T6.1a": "exception",
+    "T6.1c": "exception",
+    "T6.1d_dom": "exception",
+    "T6.1d_int": "exception"
+  }
+}

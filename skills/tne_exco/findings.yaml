@@ -1,0 +1,326 @@
+# Ported from reference_app/app.py build_all_findings (lines 528-895) into
+# CLAUDE.md §4.6 shape. Same finding set, titles, severity logic, observation/
+# recommendation/management-question text as the reference app, with every
+# numeric literal replaced by a thresholds.<id> ref and every metric name
+# updated to match plan.yaml's real, computed metrics (CLAUDE.md §0.4). T4.3 is
+# omitted: its metric (personal_expense_count) is not produced by any test while
+# T4.3 stays not_testable (P6 wires it) -- validate_skill would reject a finding
+# citing a metric no test produces, and authoring one now would be exactly the
+# kind of forward-reference the restricted evaluator's load-time checks exist
+# to catch.
+findings:
+  - id: T3_1a
+    test_id: T3.1a
+    title: Travel Requests Without Linked Expense Reports
+    trigger: preapproval_unlinked_count > 0
+    severity:
+      - else: Medium
+    metrics_cited: [preapproval_unlinked_count, preapproval_unlinked_amount, preapproval_employees]
+    observation: >
+      {preapproval_unlinked_count} pre-approved travel requests totalling
+      {preapproval_unlinked_amount} across {preapproval_employees} employees do not
+      have linked expense reports. This may indicate travel that was approved but
+      not taken, or expense reports that were not properly linked to pre-approvals.
+    recommendation: >
+      Reconcile unlinked travel requests with actual travel records. Implement
+      automated matching between pre-approvals and expense reports.
+    management_questions:
+      - Is there a follow-up process for pre-approved travel that doesn't result in an expense report?
+      - What percentage of these represent cancelled travel vs missing expense reports?
+
+  - id: T3_1b
+    test_id: T3.1b
+    title: Employees Submitting Claims Without Pre-Approval
+    # app.py scored this at claim-employee grain (claim employees minus
+    # pre-approval employees); spec T3.1b redefines the scoring unit as the
+    # booking (anti-join on booking vs travel request), so the trigger now reads
+    # no_preapproval_bookings while the severity threshold still applies to the
+    # affected-employee count, unchanged in meaning.
+    trigger: no_preapproval_bookings > 0
+    severity:
+      - when: no_preapproval_employees > thresholds.t31b_employee_medium_count
+        then: Medium
+      - else: Low
+    metrics_cited: [no_preapproval_bookings, no_preapproval_employees, t31b_name_match_rate]
+    observation: >
+      {no_preapproval_bookings} bookings ({no_preapproval_employees} employees) have
+      no matching travel request on file (name match rate {t31b_name_match_rate}).
+      Policy requires travel pre-approval before incurring expenses to ensure
+      budgetary control and management oversight.
+    recommendation: >
+      Enforce pre-approval requirements in the expense system by blocking
+      submission without a linked travel request. Review non-compliant claims for
+      policy violations.
+    management_questions:
+      - Are all ExCo members and their delegates aware of the pre-approval requirement?
+      - Should certain expense types (e.g., local meals) be exempt from pre-approval?
+
+  - id: T3_2a
+    test_id: T3.2a_air_dom
+    title: Non-Preferred Supplier Usage
+    # app.py summed all six pref_* metrics (including accommodation) into one
+    # pref_total and keyed severity on that sum; the accommodation sub-tests are
+    # not_testable here (no preferred-hotel list supplied), so this finding
+    # covers airline and car only, and severity is an either-count comparison
+    # (no arithmetic in the restricted evaluator -- CLAUDE.md §4.6).
+    trigger: pref_dom_airline > 0 or pref_int_airline > 0 or pref_dom_car > 0 or pref_int_car > 0
+    severity:
+      - when: >
+          pref_dom_airline > thresholds.pref_supplier_medium_count or
+          pref_int_airline > thresholds.pref_supplier_medium_count or
+          pref_dom_car > thresholds.pref_supplier_medium_count or
+          pref_int_car > thresholds.pref_supplier_medium_count
+        then: Medium
+      - else: Low
+    metrics_cited: [pref_dom_airline, pref_int_airline, pref_dom_car, pref_int_car]
+    observation: >
+      {pref_dom_airline} domestic and {pref_int_airline} international airline
+      bookings, and {pref_dom_car} domestic and {pref_int_car} international car
+      rental bookings, used non-preferred suppliers (accommodation not assessed --
+      no preferred-hotel list supplied). Use of non-preferred suppliers foregoes
+      negotiated corporate rates and volume discounts, increasing travel costs.
+    recommendation: >
+      Reinforce preferred supplier policy and ensure the corporate booking tool
+      defaults to preferred suppliers. Require justification for non-preferred
+      bookings exceeding a cost threshold.
+    management_questions:
+      - What is the estimated cost impact of non-preferred supplier usage?
+      - Are there legitimate reasons (e.g., route availability) for the non-preferred bookings?
+
+  - id: T3_3a
+    test_id: T3.3a_dom
+    title: Late and Urgent Travel Bookings
+    trigger: late_booking_count_dom > 0 or late_booking_count_int > 0
+    severity:
+      - when: very_late_booking_count > thresholds.very_late_booking_high_count
+        then: High
+      - else: Medium
+    metrics_cited: [late_booking_count_dom, late_booking_count_int, very_late_booking_count, late_booking_employees_dom, late_booking_employees_int]
+    observation: >
+      {late_booking_count_dom} domestic bookings were made less than the applicable
+      advance-purchase threshold before departure, and {late_booking_count_int}
+      international/Trans-Tasman bookings likewise, of which
+      {very_late_booking_count} were very late (any class, under the very-late
+      threshold). Late bookings typically incur premium fares and reduce access to
+      preferred supplier inventory.
+    recommendation: >
+      Enforce advance booking requirements through the travel management system.
+      Require manager justification for late bookings. Track late-booking patterns
+      by employee and escalate repeat offenders.
+    management_questions:
+      - What business reasons drive last-minute travel for ExCo members?
+      - Is there a formal exception process for urgent travel needs?
+      - What is the estimated cost premium of late bookings vs advance bookings?
+
+  - id: T3_3b
+    test_id: T3.3b
+    title: Entertainment Spend Exceeding Per-Head Thresholds
+    # app.py compared the full claim amount against $40/$80 (a documented defect,
+    # CLAUDE.md §0.2); the primitive now compares per-head spend (Entry Amount /
+    # Number of Attendees), so the finding's numbers are the corrected ones.
+    trigger: ent_over_internal_count > 0 or ent_over_external_count > 0
+    severity:
+      - else: Low
+    metrics_cited: [ent_over_internal_count, ent_over_external_count, ent_over_amount, ent_assessed]
+    observation: >
+      Of {ent_assessed} entertainment entries assessed, {ent_over_internal_count}
+      exceeded the internal per-head threshold and {ent_over_external_count}
+      exceeded the external per-head threshold, totalling {ent_over_amount} in
+      over-threshold spend.
+    recommendation: >
+      Review entries exceeding per-head limits to determine if business
+      justification is adequate. Consider implementing real-time alerts in the
+      expense system when per-head limits are breached.
+    management_questions:
+      - Are the current per-head thresholds still appropriate?
+      - Are there specific event types that legitimately exceed the thresholds?
+
+  - id: T4_1
+    test_id: T4.1
+    title: Missing Receipt Documentation
+    trigger: missing_receipt_count > 0
+    severity:
+      - when: missing_receipt_pct > thresholds.missing_receipt_high_pct
+        then: High
+      - when: missing_receipt_pct > thresholds.missing_receipt_medium_pct
+        then: Medium
+      - else: Low
+    metrics_cited: [missing_receipt_count, missing_receipt_pct, missing_receipt_amount, missing_receipt_no_affidavit_count]
+    observation: >
+      {missing_receipt_count} claims ({missing_receipt_pct}% of total) are missing
+      receipt documentation, representing {missing_receipt_amount} in unsupported
+      spend, of which {missing_receipt_no_affidavit_count} have no affidavit on
+      file. Without receipts, the business purpose and legitimacy of these
+      expenses cannot be independently verified.
+    recommendation: >
+      Enforce mandatory receipt attachment before expense report submission.
+      Implement automated rejection for claims exceeding $50 without supporting
+      documentation.
+    management_questions:
+      - What is the current policy for handling claims without receipts?
+      - Are there legitimate reasons for the volume of missing receipts (e.g., system issues)?
+
+  - id: T4_2
+    test_id: T4.2
+    title: Entertainment Claims Missing Attendee Details
+    trigger: att_missing_count > 0
+    severity:
+      - when: att_missing_pct > thresholds.att_missing_high_pct
+        then: High
+      - else: Medium
+    metrics_cited: [att_missing_count, att_total, att_missing_pct]
+    observation: >
+      {att_missing_count} of {att_total} entertainment-related claims
+      ({att_missing_pct}%) are missing attendee information. Policy requires
+      attendee names and business purpose for all entertainment and hospitality
+      expenses to demonstrate legitimate business use.
+    recommendation: >
+      Mandate attendee fields as required for entertainment expense types in the
+      expense system. Reject submissions without completed attendee details.
+    management_questions:
+      - Is there a process to retrospectively obtain attendee details for flagged claims?
+      - Are staff aware of the requirement to document attendees for entertainment expenses?
+
+  - id: T4_4
+    test_id: T4.4
+    title: High-Value Claims Requiring Enhanced Scrutiny
+    trigger: hv_count > 0
+    severity:
+      - else: Medium
+    metrics_cited: [hv_count, hv_amount, hv_employees]
+    observation: >
+      {hv_count} claims exceed the high-value threshold, totalling {hv_amount}
+      across {hv_employees} employees. High-value claims carry elevated risk of
+      misuse and warrant additional review beyond standard approval workflows.
+    recommendation: >
+      Implement tiered approval for high-value claims, requiring secondary
+      sign-off from finance. Conduct periodic deep-dive reviews of high-value
+      transactions.
+    management_questions:
+      - What additional controls exist for high-value expense claims?
+      - Have any of these high-value claims been subject to post-approval review?
+
+  - id: T5_1
+    test_id: T5.1
+    title: Potential Split Claims to Circumvent Approval Thresholds
+    trigger: split_same_day_groups > 0 or split_window_groups > 0
+    severity:
+      - when: split_same_day_groups > thresholds.split_high_count or split_window_groups > thresholds.split_high_count
+        then: High
+      - else: Medium
+    metrics_cited: [split_same_day_groups, split_same_day_lines, split_window_groups, split_window_lines, split_amount]
+    observation: >
+      {split_same_day_groups} same-day split-claim groups ({split_same_day_lines}
+      lines) and {split_window_groups} windowed split-claim groups
+      ({split_window_lines} lines) were identified, totalling {split_amount} at
+      risk. Split claims may indicate intentional structuring of expenses below
+      approval thresholds or policy limits.
+    recommendation: >
+      Investigate flagged split claims to determine if they represent legitimate
+      separate expenses or intentional structuring. Implement automated detection
+      rules in the expense system.
+    management_questions:
+      - Are employees aware that splitting claims to avoid thresholds violates policy?
+      - Have similar patterns been identified in prior audit cycles?
+
+  - id: T5_2
+    test_id: T5.2
+    title: Duplicate Expense Claims Identified
+    trigger: duplicate_groups > 0 or duplicate_oop_card_groups > 0
+    severity:
+      - when: duplicate_groups > thresholds.duplicate_high_count or duplicate_oop_card_groups > thresholds.duplicate_high_count
+        then: High
+      - else: Medium
+    metrics_cited: [duplicate_groups, duplicate_lines, duplicate_amount, duplicate_oop_card_groups]
+    observation: >
+      {duplicate_groups} potential duplicate claim groups ({duplicate_lines} lines,
+      {duplicate_amount} at risk) were identified, of which
+      {duplicate_oop_card_groups} groups contain both an out-of-pocket and a
+      corporate-card line for the same claim. Duplicate claims result in double
+      reimbursement and direct financial loss.
+    recommendation: >
+      Review all flagged duplicates and recover any confirmed double payments.
+      Enhance duplicate detection logic in the expense system to prevent
+      submission.
+    management_questions:
+      - What is the current process for detecting and resolving duplicate claims?
+      - Have any of these duplicates already been identified and reversed?
+
+  - id: T6_1a
+    test_id: T6.1a
+    title: Inadequate Approver Review of Expense Reports
+    trigger: approver_no_receipt_pct > 0 or approver_instant_pct > 0
+    severity:
+      - when: approver_no_receipt_pct > thresholds.approver_no_receipt_high_pct or approver_instant_pct > thresholds.approver_instant_high_pct
+        then: High
+      - else: Medium
+    metrics_cited: [approver_total_reports, approver_count, approver_no_receipt_pct, approver_instant_pct, approver_worst_case_n, approver_worst_case_pct]
+    observation: >
+      Of {approver_total_reports} expense reports reviewed by {approver_count}
+      approvers, {approver_no_receipt_pct}% were approved without the approver
+      viewing the receipt. Additionally, {approver_instant_pct}% of reports
+      assessed as instant (among steps where a receipt was viewed) received
+      approval in under the instant-approval threshold. {approver_worst_case_n}
+      reports ({approver_worst_case_pct}%) received both instant approval and no
+      receipt review, representing the highest-risk approval behaviour.
+    recommendation: >
+      Implement minimum review time controls in the expense system. Require
+      mandatory receipt viewing before approval submission. Establish approver
+      review KPIs and include in performance discussions.
+    management_questions:
+      - Are approvers aware of their obligation to review receipts before approving?
+      - What training has been provided to approvers on their T&E oversight responsibilities?
+      - Is there a mechanism to flag approvers who consistently approve without receipt review?
+
+  - id: T6_1c
+    test_id: T6.1c
+    title: Attendee Hierarchy Validity Exceptions
+    # app.py's compute_test_6_1c returned a hardcoded 0 ("based on audit
+    # findings"); this is now genuinely computed via list_membership on "Is
+    # Attendee also in Hierarchy?" (spec T6.1c).
+    trigger: att_hierarchy_invalid > 0
+    severity:
+      - else: Medium
+    metrics_cited: [att_hierarchy_invalid, att_hierarchy_total]
+    observation: >
+      {att_hierarchy_invalid} of {att_hierarchy_total} entertainment-entry
+      attendee records have attendees who are direct reports of the claimant.
+      Policy requires that entertainment of direct reports be approved by the
+      claimant's own manager to prevent self-serving approvals.
+    recommendation: >
+      Implement hierarchical validation in the expense system to flag claims
+      where attendees report directly to the claimant. Require next-level-up
+      approval for such claims.
+    management_questions:
+      - Is team entertainment (e.g., team lunches) a legitimate and expected expense for ExCo?
+      - Should direct-report entertainment require separate approval from the next level?
+
+  - id: T6_1d
+    test_id: T6.1d_dom
+    title: Daily Spend Limit Exceedances
+    # app.py used a hardcoded flat daily-spend limit (CLAUDE.md §0.2); the limit is
+    # now the per-diem rate for the employee-day's country, converted SGD->AUD at
+    # the transaction month's RBA rate (spec T6.1d), and split domestic/
+    # international rather than app.py's single combined count.
+    trigger: daily_over_count_dom > 0 or daily_over_count_int > 0
+    severity:
+      - when: daily_over_count_dom > thresholds.daily_over_high_count or daily_over_count_int > thresholds.daily_over_high_count
+        then: High
+      - else: Medium
+    metrics_cited: [daily_over_count_dom, daily_over_amount_dom, daily_over_count_int, daily_over_amount_int, daily_over_max_dom, daily_over_max_int]
+    observation: >
+      {daily_over_count_dom} domestic and {daily_over_count_int} international
+      employee-days exceeded the applicable per-diem daily spend threshold,
+      totalling {daily_over_amount_dom} and {daily_over_amount_int} respectively
+      in excess spend. The highest single domestic day was {daily_over_max_dom}
+      and the highest single international day was {daily_over_max_int}.
+      Concentrated daily spend may indicate bulk personal purchases or policy
+      non-compliance.
+    recommendation: >
+      Review high daily-spend instances to verify business purpose. Consider
+      implementing real-time daily spend caps with automatic escalation for
+      amounts exceeding policy limits.
+    management_questions:
+      - Are there legitimate business scenarios that would exceed the daily per-diem in a single day?
+      - Should the daily limit be adjusted for international travel days?
+      - What controls exist to prevent excessive single-day spend?

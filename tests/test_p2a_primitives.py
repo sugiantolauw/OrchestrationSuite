@@ -347,6 +347,84 @@ def test_anti_join_gap_semi_mode_flags_matched_rows():
     assert res.metrics["match_count"]["value"] == 2
 
 
+def test_anti_join_gap_semi_mode_count_where_and_sum_where_on_matched_rows():
+    # T4.1-shaped scenario: among the semi-join matches (register rows found),
+    # a secondary condition (no affidavit on file) needs its own count/sum --
+    # this is the gap the count_where/sum_where kinds close.
+    left = pd.DataFrame(
+        {
+            "Name": ["Alice", "Bob", "Carol"],
+            "Class": ["Dom", "Dom", "Int"],
+            "Has Affidavit": ["Yes", "No", "No"],
+            "Amount": [100.0, 200.0, 300.0],
+        }
+    )
+    right = pd.DataFrame({"EmpName": ["Alice", "Carol"], "ReqClass": ["Dom", "Int"]})
+    ctx = _ctx({"left": _pop("left", left), "right": _pop("right", right)})
+    params = {
+        "left_population": "left",
+        "right_population": "right",
+        "left_keys": ["Name", "Class"],
+        "right_keys": ["EmpName", "ReqClass"],
+        "mode": "semi",
+        "metrics": {
+            "match_count": {"kind": "count"},
+            "no_affidavit_count": {
+                "kind": "count_where",
+                "where": {"column": "Has Affidavit", "op": "ne", "value": "Yes"},
+            },
+            "no_affidavit_amount": {
+                "kind": "sum_where",
+                "column": "Amount",
+                "where": {"column": "Has Affidavit", "op": "ne", "value": "Yes"},
+                "unit": "AUD",
+            },
+        },
+    }
+    res = run_primitive("anti_join_gap", ctx, params)
+    # Matches: Alice (Dom, has affidavit) and Carol (Int, no affidavit). Bob has no
+    # affidavit either but never matched the register, so he is out of scope.
+    assert sorted(res.scored_units) == ["k:1", "k:3"]
+    assert res.metrics["match_count"]["value"] == 2
+    assert res.metrics["no_affidavit_count"]["value"] == 1
+    assert res.metrics["no_affidavit_amount"]["value"] == 300.0
+
+
+def test_anti_join_gap_carry_right_columns_for_count_where_on_a_right_side_attribute():
+    # T4.1's real shape: "Has Affidavit" lives on the RIGHT population (the
+    # missing-receipt register), not on the matched left (expense) rows --
+    # carry_right_columns brings it across so count_where/sum_where can see it.
+    left = pd.DataFrame({"Name": ["Alice", "Bob", "Carol"], "Amount": [100.0, 200.0, 300.0]})
+    right = pd.DataFrame({"EmpName": ["Alice", "Carol"], "Has Affidavit": ["Yes", "No"]})
+    ctx = _ctx({"left": _pop("left", left), "right": _pop("right", right)})
+    params = {
+        "left_population": "left",
+        "right_population": "right",
+        "left_keys": ["Name"],
+        "right_keys": ["EmpName"],
+        "mode": "semi",
+        "carry_right_columns": ["Has Affidavit"],
+        "metrics": {
+            "match_count": {"kind": "count"},
+            "no_affidavit_count": {
+                "kind": "count_where",
+                "where": {"column": "Has Affidavit", "op": "ne", "value": "Yes"},
+            },
+            "no_affidavit_amount": {
+                "kind": "sum_where",
+                "column": "Amount",
+                "where": {"column": "Has Affidavit", "op": "ne", "value": "Yes"},
+                "unit": "AUD",
+            },
+        },
+    }
+    res = run_primitive("anti_join_gap", ctx, params)
+    assert sorted(res.scored_units) == ["k:1", "k:3"]
+    assert res.metrics["match_count"]["value"] == 2
+    assert res.metrics["no_affidavit_count"]["value"] == 1
+    assert res.metrics["no_affidavit_amount"]["value"] == 300.0
+
+
 def test_anti_join_gap_params_schema_rejects_unknown_mode():
     with pytest.raises(PrimitiveParamsError):
         run_primitive(
@@ -415,6 +493,27 @@ def test_list_membership_allowed_values_from_reference():
     assert res.metrics["n"]["value"] == 1
 
 
+def test_list_membership_whole_word_upper_on_empty_population_does_not_drop_columns():
+    # Regression: df[mask] where mask comes from .apply() on an empty Series has
+    # dtype=object (nothing to infer bool from), and pandas then silently treats
+    # an empty object-dtype mask as a column selector rather than a row filter --
+    # dropping every column, including __row_key, instead of returning zero rows.
+    df = pd.DataFrame({"Vendor": pd.Series([], dtype=object)})
+    ctx = _ctx({"pop": _pop("pop", df)})
+    params = {
+        "population": "pop",
+        "column": "Vendor",
+        "allowed_values": ["QANTAS"],
+        "negate": True,
+        "match": "whole_word_upper",
+        "metrics": {"n": {"kind": "count"}},
+    }
+    res = run_primitive("list_membership", ctx, params)
+    assert res.metrics["n"]["value"] == 0
+    assert res.scored_units == []
+    assert list(res.flags.columns) == ["__source", "__row_key", "flag", "group_id"]
+
+
 def test_list_membership_params_schema_rejects_unknown_keys():
     with pytest.raises(PrimitiveParamsError):
         run_primitive(
@@ -479,6 +578,35 @@ def test_ratio_per_group_per_row_limit_selection():
     assert res.metrics["over_internal"]["value"] == 0
     assert res.metrics["over_external"]["value"] == 1
     assert res.scored_units == ["k:2"]
+
+
+def test_ratio_per_group_numerator_aggregate_first_for_denormalised_amount():
+    # T3.3b-shaped scenario: Entry Amount is already an entry-level total, repeated
+    # on every attendee row of that entry -- summing it across the group (the
+    # default) would multiply it by the attendee count. numerator_aggregate:
+    # first avoids that.
+    df = pd.DataFrame(
+        {
+            "Entry": ["E1", "E1", "E1", "E2"],
+            "Entry Amount": [120.0, 120.0, 120.0, 50.0],
+            "Number of Attendees": [3, 3, 3, 1],
+        }
+    )
+    ctx = _ctx({"pop": _pop("pop", df)}, thresholds={"limit": {"value": 40, "unit": "AUD"}})
+    params = {
+        "population": "pop",
+        "numerator_column": "Entry Amount",
+        "denominator_column": "Number of Attendees",
+        "group_by": ["Entry"],
+        "numerator_aggregate": "first",
+        "direction": "above",
+        "limit": {"threshold": "limit"},
+        "metrics": {"over_count": {"kind": "groups"}},
+    }
+    res = run_primitive("ratio_per_group", ctx, params)
+    # E1: 120/3=40, not >40 -> not flagged. E2: 50/1=50 >40 -> flagged.
+    assert res.metrics["over_count"]["value"] == 1
+    assert res.scored_units == ["E2"]
 
 
 def test_ratio_per_group_requires_limit_or_selector():

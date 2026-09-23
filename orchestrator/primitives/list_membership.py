@@ -68,7 +68,12 @@ def run(ctx: PrimitiveContext, params: dict) -> PrimitiveResult:
         member_mask = df[column].isin(allowed)
     elif match == "whole_word_upper":
         allowed_upper = [a.upper() for a in allowed]
-        member_mask = df[column].apply(lambda v: _whole_word_match(v, allowed_upper))
+        # .astype(bool): .apply() over an empty Series infers dtype=object (there
+        # are no results to infer bool from), and indexing a DataFrame with an
+        # empty object-dtype mask silently drops every column rather than every
+        # row -- an empty population must produce an empty *result*, not a
+        # frame missing __row_key.
+        member_mask = df[column].apply(lambda v: _whole_word_match(v, allowed_upper)).astype(bool)
     else:
         raise PrimitiveParamsError(f"unknown match mode: {match!r}")
 

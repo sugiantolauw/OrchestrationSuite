@@ -8,6 +8,7 @@
         "properties": {
           "source": {"type": "string"},
           "filters": {"type": "array", "items": {"type": "object"}},
+          "pre_filter_derive": {"type": "array", "items": {"type": "object"}},
           "derive": {"type": "array", "items": {"type": "object"}},
           "amount_column": {"type": "string"},
           "date_column": {"type": "string"}

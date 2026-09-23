@@ -1,0 +1,50 @@
+# ExCo employee identity -- CLAUDE.md §11 data decision 1;
+# docs/specs/SKILL-001_test_specification.md §0 "ExCo identity".
+#
+# DATA-QUALITY NOTE (recorded at P2b-1, confirm with the auditor): the spec's own
+# stated P_EXP headline counts (3,738 rows before the period filter / 3,654 in
+# period / prepared 1,444 / approved 2,317) can only be reproduced by INCLUDING
+# 50040 in the active population -- that contradicts the same spec's stated
+# default of excluding it ("52472 is taken to be the executive and 50040 a
+# namesake"). This Skill follows the spec's explicit reasoning (52472 only,
+# 50040 excluded) rather than its unreconciled headline counts. On the real
+# synthetic_data/ files this produces: 3,711 rows before the period filter,
+# 3,628 in period, prepared 1,417, approved 2,317, both 23 -- see
+# tests/test_skill_tne.py and the P2b-1 report for the full accounting.
+#
+# reference/exco_employee_ids.yaml and reference/exco_display_names.yaml are
+# flat lists mechanically derived from `active` below (the engine's population
+# filters need a flat list, not this richer record shape) -- kept in sync by
+# tests/test_skill_tne.py::test_exco_reference_files_stay_in_sync.
+active:
+  - employee_id: 52725
+    display_name: "Chen, Alex"
+  - employee_id: 52394
+    display_name: "Nakamura, Yuki"
+  - employee_id: 52622
+    display_name: "Okonkwo, Emeka"
+  - employee_id: 52424
+    display_name: "Johansson, Erik"
+  - employee_id: 51867
+    display_name: "Mendes, Sofia"
+  - employee_id: 52660
+    display_name: "Kowalski, Jan"
+  - employee_id: 51606
+    display_name: "Thompson, Sarah"
+  - employee_id: 52472
+    display_name: "Delacroix, Marie"
+  - employee_id: 52674
+    display_name: "van den Berg, Lucas"
+  - employee_id: 52703
+    display_name: "Ramirez, Carlos"
+  - employee_id: 50079
+    display_name: "Fitzgerald, Aoife"
+
+excluded_pending_confirmation:
+  - employee_id: 50040
+    display_name: "Delacroix, Marie"
+    reason: >
+      Shares a display name with 52472 (443 claims vs 27 for 50040); 52472 is the
+      ID that appears as an approver in both the expense and approval data, so it
+      is taken to be the executive and 50040 a namesake. Excluded by default --
+      confirm with the auditor before including it.

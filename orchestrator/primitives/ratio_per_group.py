@@ -22,6 +22,7 @@ PARAMS_SCHEMA: dict = {
         "numerator_column": {"type": "string"},
         "denominator_column": {"type": "string"},
         "group_by": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+        "numerator_aggregate": {"type": "string", "enum": ["sum", "first"]},
         "direction": {"type": "string", "enum": ["above", "below", "at_or_above", "at_or_below"]},
         "limit": LIMIT_SCHEMA,
         "limit_selector_column": {"type": "string"},
@@ -54,7 +55,8 @@ def run(ctx: PrimitiveContext, params: dict) -> PrimitiveResult:
     group_by = params.get("group_by")
 
     if group_by:
-        agg_kwargs = {"__num": (num_col, "sum"), "__den": (den_col, "first")}
+        num_agg = params.get("numerator_aggregate", "sum")
+        agg_kwargs = {"__num": (num_col, num_agg), "__den": (den_col, "first")}
         selector_col = params.get("limit_selector_column")
         if selector_col:
             agg_kwargs["__selector"] = (selector_col, "first")
