@@ -607,6 +607,23 @@ Per-LLM-call provenance (actual served model version, token counts, latency) is 
 `llm_calls` (P6), not here. The fingerprint answers "was the setup identical?"; `llm_calls`
 answers "did the model behave identically?".
 
+#### Additions from the P1A gate review (2026-09-23)
+
+- **`RunState.phase_epoch: int`** (after `state_version`) — the state version at which the run
+  entered its current phase. Node execution keys are `run_id:phase:phase_epoch:node_name:attempt`,
+  so a phase entered again (Explorer re-plan, Regenerate, re-run after rejection) executes fresh
+  instead of replaying stale attempts.
+- **Node output ownership.** RunState fields are partitioned into node-owned (results and
+  narration) and lifecycle (identity, status, phase, timestamps, gates). A node may change only
+  node-owned fields; `events`/`errors` are append-only. A node that touches a lifecycle field fails.
+- **Phase-change gates in the state machine** — plan→execute requires `plan_confirmed` (or a
+  Playbook `auto_confirm_plan`), execute→export requires `signoff`, resume never changes phase.
+- **`run_state.status`** is written in the same single-row CAS as `state_json`; the reaper and all
+  status queries read it. `runs` is a best-effort projection repaired at App start.
+- **`run_fingerprints.reference_data_hashes`** — `{path: sha256}` of pinned reference files (the RBA
+  exchange-rate snapshot, city→country and supplier lists).
+- **Fingerprint verified at every executor pass,** not only at resume.
+
 ### 4.2 Nodes
 
 | Node | LLM | Writes | Event |
