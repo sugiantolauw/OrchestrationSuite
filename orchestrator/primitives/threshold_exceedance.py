@@ -16,6 +16,12 @@ from orchestrator.primitives.common import (
     row_condition_mask,
 )
 
+DESCRIPTION = (
+    "Flags rows -- or groups, when group_by aggregates them first -- where a "
+    "numeric column is above, below, at-or-above or at-or-below a limit: a "
+    "fixed threshold value, or another column's value on the same row."
+)
+
 PARAMS_SCHEMA: dict = {
     "type": "object",
     "properties": {

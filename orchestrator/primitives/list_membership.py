@@ -13,6 +13,12 @@ from orchestrator.primitives.common import (
     flags_from_rows,
 )
 
+DESCRIPTION = (
+    "Flags rows whose column value is (or, negated, is not) a member of an "
+    "allowed list -- an exact match, or a whole-word match against an "
+    "upper-cased term list."
+)
+
 PARAMS_SCHEMA: dict = {
     "type": "object",
     "properties": {

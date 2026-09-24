@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import string
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -171,6 +172,59 @@ def load_skill(skill_dir: str | Path) -> Skill:
         workspace_fn=workspace_fn,
         content_hash=skill_content_hash(skill_dir),
     )
+
+
+# The Explorer materialiser (orchestrator.explorer.materialise) writes
+# exactly these seven files -- the six required Skill files plus
+# catalogue.yaml (CLAUDE.md §4.11's "Files" table). Nothing else may come
+# out of a ledger row: `custom.py`/`workspace.py` are explicitly never
+# written by Explorer (§4.4/§4.5 "Explorer does not generate code"), so
+# `load_skill_from_ledger` refuses them by name, not merely by omission --
+# defence in depth against a `skill_versions` row a compromised/mistaken
+# writer path could otherwise smuggle code through.
+_LEDGER_ALLOWED_FILES = _REQUIRED_FILES + ("catalogue.yaml",)
+
+
+def load_skill_from_ledger(row: dict) -> Skill:
+    """Loads a Skill from a `skill_versions` row (CLAUDE.md §4.11;
+    docs/specs/P6_P8_explorer_llm_design.md §4.11 "Ledger content and
+    loading"): an Explorer-confirmed run's materialised Skill, or a saved
+    Explorer draft, neither of which lives in `skills/` on disk.
+
+    1. Rejects any file entry ending in `.py`, or outside
+       `_LEDGER_ALLOWED_FILES` -- code never executes from the database.
+    2. Writes the files to a process-local cache directory keyed by
+       `content_hash` (idempotent: a repeat call for the same hash reuses
+       the directory rather than re-writing it).
+    3. Calls `load_skill(dir)`.
+    4. Asserts `skill.content_hash == row["content_hash"]`.
+    """
+    skill_id = row.get("skill_id", "?")
+    content_hash = row["content_hash"]
+    files: dict[str, str] = row["content"]["files"]
+
+    violations = [
+        f"ledger Skill {skill_id!r} contains a disallowed file: {path!r} "
+        f"(only {sorted(_LEDGER_ALLOWED_FILES)} may be loaded from the ledger)"
+        for path in files
+        if path.endswith(".py") or path not in _LEDGER_ALLOWED_FILES
+    ]
+    if violations:
+        raise SkillValidationError(violations)
+
+    cache_root = Path(tempfile.gettempdir()) / "orchestrator_skill_ledger_cache" / content_hash
+    if not cache_root.is_dir():
+        cache_root.mkdir(parents=True, exist_ok=True)
+        for path, text in files.items():
+            (cache_root / path).write_text(text)
+
+    skill = load_skill(cache_root)
+    if skill.content_hash != content_hash:
+        raise SkillValidationError([
+            f"ledger Skill {skill_id!r} content_hash mismatch: stored {content_hash!r}, "
+            f"re-hashed to {skill.content_hash!r} -- the cache directory may have been tampered with"
+        ])
+    return skill
 
 
 def plan_test_flags(plan_tests: list[dict]) -> list[dict]:

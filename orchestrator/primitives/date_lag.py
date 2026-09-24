@@ -13,6 +13,11 @@ from orchestrator.primitives.common import (
     resolve_limit_spec,
 )
 
+DESCRIPTION = (
+    "Flags rows where the number of days between two date columns is above, "
+    "below, at-or-above or at-or-below a threshold."
+)
+
 PARAMS_SCHEMA: dict = {
     "type": "object",
     "properties": {

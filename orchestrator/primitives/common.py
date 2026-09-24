@@ -62,6 +62,58 @@ METRICS_PROPERTY_SCHEMA: dict = {
     },
 }
 
+# Plain-English meaning of each `metrics[].kind` (CLAUDE.md §4.3/§4.5,
+# docs/specs/P6_P8_explorer_llm_design.md §4.4: "metric_kinds: {kind:
+# meaning} ... written from build_metrics' actual semantics"). One shared
+# dict for every primitive -- build_metrics' own kind handling below is
+# identical for all eight, and a kind a given primitive cannot actually
+# populate (e.g. "excess" on a primitive that never sets values["excess"])
+# is caught at proposal time by V-T7's schema-only dry run, not by
+# per-primitive filtering of this description set.
+METRIC_KIND_DESCRIPTIONS: dict[str, str] = {
+    "count": (
+        "The number of scored exception units -- rows, groups or claims, "
+        "whichever this test's scoring unit is."
+    ),
+    "rows": "The number of exception ROWS, before any row-to-group de-duplication.",
+    "groups": (
+        "The number of exception GROUPS -- e.g. duplicate sets, split-claim "
+        "groups, or threshold-breaching aggregates."
+    ),
+    "sum": (
+        "The sum of a named column over the exception rows or groups -- an "
+        "additive dollar total when unit is a currency code."
+    ),
+    "distinct": "The count of distinct values of a named column over the exception rows.",
+    "max": (
+        "The maximum value of a named column over the exception rows or "
+        "groups. Undefined (not_testable) when there are no exceptions."
+    ),
+    "pct_of_population": (
+        "The exception count as a percentage of the population's row count, "
+        "rounded to 1 decimal place. Undefined (not_testable) when the "
+        "population is empty."
+    ),
+    "excess": (
+        "The total amount by which exceeded values exceed their limit, "
+        "summed across every exception -- only available from a primitive "
+        "that computes this running total itself."
+    ),
+    "match_rate": (
+        "The percentage of the left population's rows that found a matching "
+        "row in the right population (anti_join_gap only)."
+    ),
+    "value": (
+        "A named scalar the primitive computed itself (e.g. a population-"
+        "level counter), referenced by its `key`."
+    ),
+    "count_where": "The count of rows matching an additional row condition, over the exception rows.",
+    "sum_where": (
+        "The sum of a named column, restricted to rows matching an "
+        "additional row condition, over the exception rows."
+    ),
+}
+
 THRESHOLD_ONLY_SCHEMA: dict = {
     "type": "object",
     "properties": {"threshold": {"type": "string"}},
