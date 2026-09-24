@@ -1862,6 +1862,45 @@ User decisions on those findings (2026-09-24):
   configuration.
 - **Request a dedicated schema for the ledger at Optus.** The schema is configuration either way.
 
+### Build-here directive (user decision, 2026-09-24)
+
+**Build everything in the full vision here, fully tested against stand-ins, so Genie Code at the
+corporate workspace only has to supply configuration, real data mapping and governance values.**
+Genie Code there can edit files but cannot execute code, so nothing that needs an iterate-and-test
+loop may be left for it. Build order, after the current deploy/test round and the user's
+acceptance testing:
+1. Fixes from both test rounds, then a final independent gate review closing P2–P5.
+2. **Column mapping at run setup** (Skill reuse): explicit, recorded in the fingerprint, never
+   fuzzy.
+3. **Surface 1 harness**: drop in the auditor-confirmed exception list at the corporate workspace.
+4. **Explorer Mode + LLM narration layer** (P6/P8): G11, G14, G15 and degraded mode.
+5. **Skill authoring kit**: scaffold, validator runnable from a notebook, and a planted-fixture
+   generator, so new Skills are YAML-only work.
+6. **P7 review workflow**: preparer → reviewer → approver with segregation of duties, driven by
+   configured group names; review notes; narrative edit trail. This replaces self sign-off.
+7. **Lifecycle modules** per `docs/specs/LIFECYCLE_design.md` and the user-approved mockups:
+   - research foundation;
+   - Risk Assessment + impact analysis;
+   - Audit Planning + template library;
+   - Reporting & ServiceNow;
+   - continuous monitoring;
+   - control design assessment;
+   - evidence & workpapers;
+   - engagement home.
+
+   Connectors are built against published APIs with recorded fixtures: ServiceNow REST, Glean
+   REST + MCP transports (MCP off until approved), and a guardrail-endpoint hook for prompts.
+8. **SKILL-002 GST** on planted synthetic AP data.
+9. **Governance switches as configuration:**
+   - export classification label/watermark;
+   - run retraction (`runs.superseded_by`);
+   - retention/VACUUM job;
+   - on-behalf-of-user identity option.
+10. **Operations as code**: health/queue/cost dashboard, alerts, and the nightly Tier A job.
+11. **Porting kit last**: pre-flight checker, bootstrap, environment profiles, offline wheelhouse,
+    `.gitlab-ci.yml`, a test-runner notebook, `docs/PORTING.md`, and a Genie Code runbook listing
+    exactly which values and decisions remain.
+
 ### Further decisions from the user (2026-09-23)
 
 - **UI is the prototype's, exactly.** Every page matches `reference_app/src/platform/pages.py` and
