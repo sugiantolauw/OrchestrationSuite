@@ -834,6 +834,17 @@ def _write_str(ws, row: int, col: int, value, fmt=None) -> None:
     ws.write_string(row, col, _safe_str(value), fmt)
 
 
+def _write_recon_value(ws, row: int, col: int, value, fmt=None) -> None:
+    """A Reconciliation-sheet cell whose value genuinely was not computed
+    (None) writes as "—", never a fabricated 0/0.0 (independent review
+    2026-09-24 item 4, CLAUDE.md NN14 / the "—" decision, §11) -- a real
+    computed 0 still writes as the number 0."""
+    if value is None:
+        _write_str(ws, row, col, "—")
+    else:
+        ws.write_number(row, col, value, fmt)
+
+
 def _build_ticket_previews(findings: list[dict]) -> list[dict]:
     """One issue-tracker ticket preview per finding (CLAUDE.md §8: submission
     to any tracker -- Jira, ServiceNow, whichever the audit team is on -- is
@@ -963,23 +974,29 @@ def _write_xlsx_workpaper(
     reconciliation = state.reconciliation or {}
     for r, (source, rec) in enumerate(sorted(reconciliation.items()), start=1):
         _write_str(ws4, r, 0, source)
-        ws4.write_number(r, 1, rec.get("engine_rows") or 0)
-        ws4.write_number(r, 2, rec.get("independent_rows") or 0)
-        ws4.write_number(r, 3, rec.get("variance") or 0)
-        # B4 (CLAUDE.md NN14): a source whose raw_<source> population declares
-        # no amount_column has no amount to reconcile at all -- `rec["amount"]`
-        # is None (orchestrator.populations.build_population), never a real
-        # 0.0. Writing 0.0 here would read as "this source's amounts
-        # reconcile to zero", which is a fabricated claim, not an absence.
-        # Explicit text, never a number, when the column was never declared.
+        # Independent review 2026-09-24 item 4 (CLAUDE.md NN14, the "—"
+        # decision, §11): `rec.get(...) or 0` wrote a real 0 for a value
+        # that was never computed at all -- e.g. `engine_rows`/`variance`
+        # are None when this source's raw_<source> population was never
+        # bound (fieldwork.py's own per-source loop above), which reads on
+        # the sheet as "reconciled with zero variance", a fabricated pass,
+        # not an absence. "—", never a written 0, when the value is None;
+        # an actually-computed 0 still writes as the number 0.
+        _write_recon_value(ws4, r, 1, rec.get("engine_rows"))
+        _write_recon_value(ws4, r, 2, rec.get("independent_rows"))
+        _write_recon_value(ws4, r, 3, rec.get("variance"))
         if rec.get("amount") is None:
+            # No amount_column was declared for this source at all -- not
+            # just "not computed this run" -- so the more specific reason
+            # stays, rather than the bare "—" used when a column WAS
+            # declared but one side of it individually came back empty.
             _write_str(ws4, r, 4, "n/a — no amount column declared")
             _write_str(ws4, r, 5, "n/a — no amount column declared")
             _write_str(ws4, r, 6, "n/a — no amount column declared")
         else:
             ws4.write_number(r, 4, rec["amount"], money)
-            ws4.write_number(r, 5, rec.get("independent_amount") or 0.0, money)
-            ws4.write_number(r, 6, rec.get("amount_variance") or 0.0, money)
+            _write_recon_value(ws4, r, 5, rec.get("independent_amount"), fmt=money)
+            _write_recon_value(ws4, r, 6, rec.get("amount_variance"), fmt=money)
         _write_str(ws4, r, 7, rec.get("min_date"))
         _write_str(ws4, r, 8, rec.get("independent_min_date"))
         _write_str(ws4, r, 9, str(rec.get("min_date_match")))

@@ -526,3 +526,144 @@ def test_g13_every_xlsx_number_equals_the_persisted_value(local_persistence, uid
         assert row[2].value == test_results_by_id[test_id]["exception_units"]
         checked_tests += 1
     assert checked_tests == len(test_results_by_id)
+
+    # Independent review 2026-09-24 item 7: G6/G13 covered the Findings/
+    # Metrics/Test Results sheets above, but not Reconciliation or Flagged
+    # Row Counts -- extended here, against this same run's own state.
+    reconciliation_sheet = wb["Reconciliation"]
+    recon_header = [c.value for c in reconciliation_sheet[1]]
+    recon_col = {name: i for i, name in enumerate(recon_header)}
+    checked_sources = 0
+    for row in reconciliation_sheet.iter_rows(min_row=2):
+        source = row[recon_col["source"]].value
+        if source not in state.reconciliation:
+            continue  # the footer row
+        rec = state.reconciliation[source]
+        for col_name, key in (
+            ("engine_rows", "engine_rows"), ("independent_rows", "independent_rows"),
+            ("row_variance", "variance"),
+        ):
+            expected = rec.get(key)
+            actual = row[recon_col[col_name]].value
+            # NN14 / the "—" decision (§11): a value this run never
+            # measured writes as "—", never a fabricated 0 -- see also
+            # test_xlsx_reconciliation_writes_dash_not_zero_for_unmeasured_values
+            # below, which exercises the None case directly (this
+            # fixture's own 8 sources are all bound, so None never occurs
+            # naturally here).
+            if expected is None:
+                assert actual == "—", f"{source}.{col_name}: expected '—', got {actual!r}"
+            else:
+                assert actual == expected, f"{source}.{col_name}: {actual!r} != {expected!r}"
+        if rec.get("amount") is None:
+            assert row[recon_col["amount"]].value == "n/a — no amount column declared"
+        else:
+            assert row[recon_col["amount"]].value == pytest.approx(round(rec["amount"], 2))
+            for col_name, key in (
+                ("independent_amount", "independent_amount"), ("amount_variance", "amount_variance"),
+            ):
+                expected = rec.get(key)
+                actual = row[recon_col[col_name]].value
+                if expected is None:
+                    assert actual == "—", f"{source}.{col_name}: expected '—', got {actual!r}"
+                else:
+                    assert actual == pytest.approx(round(expected, 2)), f"{source}.{col_name}: {actual!r} != {expected!r}"
+        checked_sources += 1
+    assert checked_sources == len(state.reconciliation)
+
+    flagged_rows = ctx.persistence.list_flagged_rows(state.run_id)
+    expected_flag_counts: dict[str, int] = {}
+    for row in flagged_rows:
+        expected_flag_counts[row["flag"]] = expected_flag_counts.get(row["flag"], 0) + 1
+    frc_sheet = wb["Flagged Row Counts"]
+    checked_flags = 0
+    for row in frc_sheet.iter_rows(min_row=2):
+        flag = row[0].value
+        if flag not in expected_flag_counts:
+            continue  # the footer row
+        assert row[1].value == expected_flag_counts[flag], f"{flag}: {row[1].value!r} != {expected_flag_counts[flag]!r}"
+        checked_flags += 1
+    assert checked_flags == len(expected_flag_counts)
+    assert checked_flags > 0, "no flagged rows on this fixture -- test is not exercising anything"
+
+    # Every sheet's own footer (§9A.2): run_id + generation timestamp, so an
+    # exported workpaper is traceable to the run that produced it.
+    expected_footer_prefix = f"run_id={state.run_id} | generated_at="
+    for sheet_name in wb.sheetnames:
+        sheet = wb[sheet_name]
+        footer_cell = sheet.cell(row=sheet.max_row, column=1).value
+        assert isinstance(footer_cell, str) and footer_cell.startswith(expected_footer_prefix), (
+            f"{sheet_name}: missing/incorrect footer row, got {footer_cell!r}"
+        )
+
+
+def test_xlsx_reconciliation_writes_dash_not_zero_for_unmeasured_values(local_persistence, uid):
+    """Independent review 2026-09-24 item 4 (CLAUDE.md NN14 / the "—"
+    decision, §11): a Reconciliation-sheet value this run never MEASURED --
+    a source's raw_<source> population was never bound, so `engine_rows`/
+    `variance` are None; an amount column IS declared but the independent
+    side individually came back empty, so `independent_amount`/
+    `amount_variance` are None -- must write as "—", never a fabricated
+    0/0.0. Writing 0 there reads as "reconciled with zero variance", a
+    false claim of a clean reconciliation, not an absence. A genuinely
+    computed 0 still writes as the number 0. Calls
+    orchestrator.nodes.fieldwork._write_xlsx_workpaper directly with a
+    hand-built reconciliation dict (this fixture's real 8 sources are all
+    bound, so the None case never occurs naturally in the G13 test above)."""
+    import io
+
+    import openpyxl
+
+    from orchestrator.nodes.fieldwork import _write_xlsx_workpaper
+
+    ctx, state = _make_ctx_and_state(local_persistence, DATA_DIR, run_id=f"RUN-RECON-DASH-{uid}")
+    reconciliation = {
+        "unmeasured_source": {
+            "engine_rows": None, "independent_rows": 40, "variance": None,
+            "amount": None, "independent_amount": None, "amount_variance": None,
+            "min_date": None, "independent_min_date": None, "min_date_match": None,
+            "max_date": None, "independent_max_date": None, "max_date_match": None,
+        },
+        "amount_declared_but_independent_missing": {
+            "engine_rows": 12, "independent_rows": 12, "variance": 0,
+            "amount": 500.0, "independent_amount": None, "amount_variance": None,
+            "min_date": "2025-01-01", "independent_min_date": "2025-01-01", "min_date_match": True,
+            "max_date": "2025-01-31", "independent_max_date": "2025-01-31", "max_date_match": True,
+        },
+        "clean_zero_variance": {
+            "engine_rows": 0, "independent_rows": 0, "variance": 0,
+            "amount": 0.0, "independent_amount": 0.0, "amount_variance": 0.0,
+            "min_date": None, "independent_min_date": None, "min_date_match": None,
+            "max_date": None, "independent_max_date": None, "max_date_match": None,
+        },
+    }
+    state = dataclasses.replace(state, reconciliation=reconciliation)
+    content = _write_xlsx_workpaper(state, findings=[], metrics={}, flagged_rows=[], now=canonical_ts(9))
+
+    wb = openpyxl.load_workbook(io.BytesIO(content), data_only=True)
+    sheet = wb["Reconciliation"]
+    header = [c.value for c in sheet[1]]
+    col = {name: i for i, name in enumerate(header)}
+    rows_by_source = {}
+    for row in sheet.iter_rows(min_row=2):
+        source = row[col["source"]].value
+        if source in reconciliation:
+            rows_by_source[source] = row
+
+    unmeasured = rows_by_source["unmeasured_source"]
+    assert unmeasured[col["engine_rows"]].value == "—"
+    assert unmeasured[col["row_variance"]].value == "—"
+    assert unmeasured[col["independent_rows"]].value == 40
+    assert unmeasured[col["amount"]].value == "n/a — no amount column declared"
+
+    partial = rows_by_source["amount_declared_but_independent_missing"]
+    assert partial[col["amount"]].value == pytest.approx(500.0)
+    assert partial[col["independent_amount"]].value == "—"
+    assert partial[col["amount_variance"]].value == "—"
+
+    clean = rows_by_source["clean_zero_variance"]
+    assert clean[col["engine_rows"]].value == 0
+    assert clean[col["row_variance"]].value == 0
+    assert clean[col["amount"]].value == pytest.approx(0.0)
+    assert clean[col["independent_amount"]].value == pytest.approx(0.0)
+    assert clean[col["amount_variance"]].value == pytest.approx(0.0)
