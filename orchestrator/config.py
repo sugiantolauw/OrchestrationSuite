@@ -57,15 +57,27 @@ class Settings:
     admission_backoff_max_s: float = 60.0
     # Executor admission-loop cadence (found-live cost review: the loop was
     # polling the warehouse every 2s unconditionally, ~3,000 queries/hour with
-    # nothing queued or running). "Active" applies while this worker has any
-    # run in flight or backing off a lease retry; "idle" is the slow safety
-    # sweep the rest of the time -- the loop otherwise wakes only from an
-    # in-process signal (start_audit_run/confirm_plan/sign_off/resume_run all
-    # call executor.start(run_id, phase) directly). Operational knobs, not
-    # computation -- excluded from the runtime config hash, same as the
-    # admission-backoff fields above.
+    # nothing queued or running; a follow-up review found even a 10-minute
+    # idle sweep still woke a 1-minute-auto-stop warehouse ~6x/hour, a
+    # 15-20% duty cycle worth tens of dollars/day for a single-container
+    # deployment where every real transition already wakes the executor
+    # directly). "Active" applies while this worker has any run in flight or
+    # is backing off a lease retry. "Idle" is a periodic safety sweep for the
+    # rest of the time -- 0 (the default) disables it entirely: the loop
+    # still reaps orphans and admits any already-queued run once, immediately,
+    # on every start() (so nothing is missed at App start), and otherwise
+    # blocks until an in-process signal wakes it (start_audit_run/
+    # confirm_plan/sign_off/resume_run all call executor.start(run_id, phase)
+    # directly, which admits that run itself and also nudges the loop).
+    # A single-container deployment never needs this sweep for anything else.
+    # Set EXECUTOR_IDLE_POLL_INTERVAL_S to a positive number ONLY for a
+    # multi-container deployment, where a run admitted by one container must
+    # still be noticed (queued/orphaned) by another that never itself
+    # received a direct wake for it. Operational knobs, not computation --
+    # excluded from the runtime config hash, same as the admission-backoff
+    # fields above.
     executor_active_poll_interval_s: float = 30.0
-    executor_idle_poll_interval_s: float = 600.0
+    executor_idle_poll_interval_s: float = 0.0
 
     def __post_init__(self) -> None:
         _validate_identifier("catalog", self.catalog)
@@ -114,7 +126,7 @@ def load_settings(env: dict | None = None) -> Settings:
         admission_backoff_base_s=_parse_float(env.get("ADMISSION_BACKOFF_BASE_S"), 2.0),
         admission_backoff_max_s=_parse_float(env.get("ADMISSION_BACKOFF_MAX_S"), 60.0),
         executor_active_poll_interval_s=_parse_float(env.get("EXECUTOR_ACTIVE_POLL_INTERVAL_S"), 30.0),
-        executor_idle_poll_interval_s=_parse_float(env.get("EXECUTOR_IDLE_POLL_INTERVAL_S"), 600.0),
+        executor_idle_poll_interval_s=_parse_float(env.get("EXECUTOR_IDLE_POLL_INTERVAL_S"), 0.0),
         # P2/P3 gate review item 4 (MLflow per-node spans, CLAUDE.md §2.3).
         # Unset -- never hardcoded here -- means mlflow's own default
         # resolution: MLFLOW_TRACKING_URI if the process environment already

@@ -173,6 +173,137 @@ def test_idle_admission_loop_backs_off_to_the_idle_interval(local_persistence):
     assert calls["n"] <= 4, calls["n"]
 
 
+def test_idle_sweep_disabled_makes_zero_persistence_calls_after_startup(local_persistence):
+    """CLAUDE.md P3 fix (2026-09-24): EXECUTOR_IDLE_POLL_INTERVAL_S now
+    defaults to 0 (off) -- even a 10-minute sweep still woke a 1-minute-
+    auto-stop warehouse ~6x/hour with nothing queued or running. With the
+    idle sweep disabled, the loop's first tick (always immediate on
+    start()) must still find no work, but must then BLOCK on _wake_event
+    rather than polling on any timer -- so it must make no further
+    persistence calls at all over a simulated idle period, however long."""
+    persistence = local_persistence
+    calls = {"n": 0}
+    orig_find_runs = persistence.find_runs
+
+    def counting_find_runs(statuses):
+        calls["n"] += 1
+        return orig_find_runs(statuses)
+
+    persistence.find_runs = counting_find_runs
+
+    executor = ThreadExecutor(
+        persistence=persistence, settings=_Settings(), worker_id="worker-idle-off",
+        ctx_factory=lambda rid: object(),
+        fingerprint_factory=lambda rid: _fingerprint(f"FP-{rid}"),
+        clock=_make_clock(), nodes_for={"fieldwork": {"plan": [], "execute": [], "export": []}},
+        poll_interval_s=0.05, idle_poll_interval_s=0.0,
+    )
+    try:
+        executor.start()
+        # Would be ~10 ticks' worth of find_runs calls if the loop never
+        # blocked and instead kept polling at the (fast, 0.05s) ACTIVE cadence.
+        time.sleep(0.5)
+        assert executor._next_poll_interval() is None
+    finally:
+        executor.stop()
+
+    # _reap_orphans + _admit_all_queued each call find_runs once per tick, so
+    # 2 calls = the one tick the loop must still take immediately on
+    # start(); anything beyond that means the loop never actually blocked.
+    assert calls["n"] <= 2, calls["n"]
+
+
+def test_queued_at_startup_runs_are_still_admitted_with_idle_sweep_disabled(local_persistence):
+    """A run already `queued` before the loop starts must still be admitted
+    on the loop's first (always-immediate) tick, even with the idle safety
+    sweep fully disabled -- disabling the periodic sweep must never mean
+    disabling the one-time startup sweep."""
+    persistence = local_persistence
+    run_id = "RUN-STARTUP-IDLE-OFF"
+    _create(persistence, run_id, _make_clock())
+
+    done = threading.Event()
+
+    def quick_node(ctx, state):
+        done.set()
+        return state
+
+    nodes_for = {"fieldwork": {"plan": [("quick", quick_node)], "execute": [], "export": []}}
+    executor = ThreadExecutor(
+        persistence=persistence, settings=_Settings(), worker_id="worker-startup-idle-off",
+        ctx_factory=lambda rid: object(),
+        fingerprint_factory=lambda rid: _fingerprint(f"FP-{rid}"),
+        clock=_make_clock(), nodes_for=nodes_for,
+        poll_interval_s=0.05, idle_poll_interval_s=0.0,
+    )
+    try:
+        executor.start()  # background-loop start, not a direct start_audit_run wake
+        assert done.wait(timeout=5)
+    finally:
+        executor.stop()
+
+
+def test_stop_unblocks_a_loop_parked_on_the_disabled_idle_wake(local_persistence):
+    """stop() must not be bounded by the (disabled, effectively infinite)
+    idle wait -- it sets _wake_event as well as _stop_event, so a loop
+    currently blocked with nothing to do still shuts down promptly."""
+    persistence = local_persistence
+    executor = ThreadExecutor(
+        persistence=persistence, settings=_Settings(), worker_id="worker-stop-idle-off",
+        ctx_factory=lambda rid: object(),
+        fingerprint_factory=lambda rid: _fingerprint(f"FP-{rid}"),
+        clock=_make_clock(), nodes_for={"fieldwork": {"plan": [], "execute": [], "export": []}},
+        poll_interval_s=0.05, idle_poll_interval_s=0.0,
+    )
+    executor.start()
+    time.sleep(0.2)  # let the loop reach its blocked idle-wait
+    start = time.time()
+    executor.stop()
+    assert time.time() - start < 3, "stop() waited on the disabled idle sweep instead of _wake_event"
+
+
+def test_direct_wake_lets_a_parked_loop_take_another_tick(local_persistence):
+    """With the idle sweep disabled, the ONLY thing that should ever make the
+    background loop call find_runs again after its first startup tick is a
+    direct start(run_id, phase) call (the same entry point start_audit_run/
+    confirm_plan/sign_off/resume_run all use) -- proving the wake is real,
+    not merely that the loop happens to still be running."""
+    persistence = local_persistence
+    calls = {"n": 0}
+    orig_find_runs = persistence.find_runs
+
+    def counting_find_runs(statuses):
+        calls["n"] += 1
+        return orig_find_runs(statuses)
+
+    persistence.find_runs = counting_find_runs
+
+    executor = ThreadExecutor(
+        persistence=persistence, settings=_Settings(), worker_id="worker-wake-nudge",
+        ctx_factory=lambda rid: object(),
+        fingerprint_factory=lambda rid: _fingerprint(f"FP-{rid}"),
+        clock=_make_clock(), nodes_for={"fieldwork": {"plan": [], "execute": [], "export": []}},
+        poll_interval_s=0.05, idle_poll_interval_s=0.0,
+    )
+    try:
+        executor.start()
+        time.sleep(0.2)  # let the loop finish its one startup tick and park
+        before = calls["n"]
+        assert before <= 2
+
+        # Isolate the wake signal itself from _try_admit's own persistence
+        # calls (acquire_lease etc., already covered by other tests) --
+        # start(run_id, phase) is the exact entry point start_audit_run/
+        # confirm_plan/sign_off/resume_run all call.
+        executor._try_admit = lambda rid: None
+        executor.start("RUN-ANY", "plan")
+        time.sleep(0.2)  # give the nudged loop a moment to take its extra tick
+
+        assert calls["n"] > before, "the wake signal never reached the parked loop"
+    finally:
+        executor.stop()
+
+
 def test_busy_admission_loop_keeps_the_active_interval(local_persistence):
     """The counterpart of the idle test above: while this worker has a run
     admitted (in `_active_runs`), the loop must keep polling at the fast

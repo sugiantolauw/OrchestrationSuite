@@ -141,20 +141,32 @@ class ThreadExecutor:
         self._nodes_for = nodes_for or NODES_FOR
         self._tracing = tracing or NullTracing()
         # "Active" cadence (poll_interval_s) applies while this worker has any
-        # run in flight or is backing off a lease retry; "idle" is the slow
-        # safety sweep the rest of the time -- the loop otherwise wakes only
-        # from an in-process signal (start()/_try_admit called directly by
-        # start_audit_run/confirm_plan/sign_off/resume_run). Defaulting
-        # idle_poll_interval_s to poll_interval_s when not given keeps every
-        # existing caller (tests that pass only poll_interval_s) at its prior
-        # constant cadence; production wiring (orchestrator/service.py) passes
-        # both explicitly from Settings.
+        # run in flight or is backing off a lease retry; "idle" is an OPT-IN
+        # periodic safety sweep the rest of the time, for a multi-container
+        # deployment where a run admitted elsewhere must still be noticed by
+        # a worker that received no direct wake for it. idle_poll_interval_s
+        # <= 0 (the default -- CLAUDE.md P3 cost fix) disables that sweep
+        # entirely: the loop still reaps + admits once, immediately, on every
+        # start() (nothing queued or orphaned at App start is ever missed),
+        # then BLOCKS on `_wake_event` -- no timer, no persistence call --
+        # until stop() or a direct start(run_id, phase) call (the same one
+        # start_audit_run/confirm_plan/sign_off/resume_run already make to
+        # admit that run itself) nudges it. Defaulting idle_poll_interval_s to
+        # poll_interval_s when not given keeps every existing caller (tests
+        # that pass only poll_interval_s) at its prior constant cadence;
+        # production wiring (orchestrator/service.py) passes both explicitly
+        # from Settings.
         self._poll_interval_s = poll_interval_s
         self._idle_poll_interval_s = (
             idle_poll_interval_s if idle_poll_interval_s is not None else poll_interval_s
         )
         self._lease_ttl_s = lease_ttl_s
         self._heartbeat_interval_s = heartbeat_interval_s
+        # Set by start(run_id, ...) after every direct admission attempt, and
+        # by stop() for a clean shutdown -- the only two things that wake a
+        # loop currently blocked with the idle sweep disabled. Checking (and
+        # clearing) it is free; it never itself triggers a persistence call.
+        self._wake_event = threading.Event()
 
         max_workers = max(1, int(getattr(settings, "max_concurrent_runs", 2)))
         self._pool = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="run-exec")
@@ -218,6 +230,13 @@ class ThreadExecutor:
         no-op if the loop is not running yet or the run is not admissible."""
         if run_id is not None:
             self._try_admit(run_id)
+            # Nudge the admission loop in case it is currently blocked on the
+            # idle wake (idle_poll_interval_s disabled, CLAUDE.md P3 cost
+            # fix): this run was likely already handled by the direct
+            # _try_admit above, but a queued run this worker was not woken
+            # for (e.g. one that freed up capacity for) may also be waiting,
+            # and this is a real state-changing event, not periodic polling.
+            self._wake_event.set()
             return
         if self._admission_thread is not None and self._admission_thread.is_alive():
             return
@@ -233,6 +252,7 @@ class ThreadExecutor:
 
     def stop(self, *, wait: bool = True) -> None:
         self._stop_event.set()
+        self._wake_event.set()  # unblock the loop if it is parked on the idle wake
         if self._admission_thread is not None:
             self._admission_thread.join(timeout=5)
         if self._heartbeat_thread is not None:
@@ -254,20 +274,36 @@ class ThreadExecutor:
                 self._admit_all_queued()
             except Exception:  # pragma: no cover - defensive, the loop must not die
                 logger.exception("admission loop error")
-            self._stop_event.wait(self._next_poll_interval())
+            interval = self._next_poll_interval()
+            if interval is None:
+                # Idle sweep disabled (idle_poll_interval_s <= 0, the default
+                # -- CLAUDE.md P3 cost fix): no timer, so no further
+                # persistence call until something real wakes this worker.
+                # stop() also sets _wake_event, so shutdown is immediate, not
+                # bounded by any interval here.
+                self._wake_event.wait()
+                self._wake_event.clear()
+            else:
+                self._stop_event.wait(interval)
 
-    def _next_poll_interval(self) -> float:
+    def _next_poll_interval(self) -> float | None:
         """Fast cadence while this worker has anything in flight (a run it is
         actively executing, or a queued run backing off a failed lease
-        acquisition); otherwise the slow idle safety-sweep interval. A new
-        run created through the normal service functions is picked up
-        immediately regardless -- they call executor.start(run_id, phase),
-        which admits directly -- so this only controls how long an orphan or
-        a queued run this worker was not directly woken for can sit before
-        the next sweep notices it."""
+        acquisition); otherwise the OPT-IN idle safety-sweep interval, or
+        None when that sweep is disabled (idle_poll_interval_s <= 0, the
+        default) -- meaning "block on _wake_event, do not poll on a timer at
+        all". A new run created through the normal service functions is
+        picked up immediately regardless -- they call executor.start(run_id,
+        phase), which admits directly -- so this only controls how long an
+        orphan or a queued run this worker was not directly woken for can sit
+        before the next sweep (if any) notices it."""
         with self._lock:
             busy = bool(self._active_runs) or bool(self._admission_failures)
-        return self._poll_interval_s if busy else self._idle_poll_interval_s
+        if busy:
+            return self._poll_interval_s
+        if self._idle_poll_interval_s <= 0:
+            return None
+        return self._idle_poll_interval_s
 
     def _reap_orphans(self) -> None:
         # CLAUDE.md §2.3 rule 2 / P2/P3 gate review item 8: App-start reaping

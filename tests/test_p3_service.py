@@ -163,6 +163,34 @@ def test_run_completes_promptly_with_a_near_unreachable_idle_sweep_interval(tmp_
         ctx.executor.stop()
 
 
+def test_run_completes_promptly_with_default_settings_idle_sweep_off(tmp_path):
+    """CLAUDE.md P3 fix (2026-09-24): EXECUTOR_IDLE_POLL_INTERVAL_S now
+    defaults to 0 (the periodic idle sweep is off entirely) -- a run must
+    still reach awaiting_signoff and then completed promptly using NOTHING
+    but default Settings (no env override at all), because every transition
+    wakes the executor directly rather than depending on any sweep."""
+    ctx = _build_ctx(tmp_path)
+    assert ctx.settings.executor_idle_poll_interval_s == 0.0
+    ctx.executor.start()
+    try:
+        bindings = service.suggest_bindings(ctx, "SKILL-MINI")
+        run_id = service.start_audit_run(
+            ctx, skill_id="SKILL-MINI", bindings=bindings,
+            audit_period=("2026-01-01", "2026-02-28"), objective="idle-sweep-off default test",
+            run_owner="tester",
+        )
+        status = _wait_for_status(ctx, run_id, {"awaiting_signoff", "failed"}, timeout=5)
+        run = service.get_run(ctx, run_id)
+        assert status == "awaiting_signoff", run.get("status_reason")
+
+        service.sign_off(ctx, run_id, "approver")
+        status = _wait_for_status(ctx, run_id, {"completed", "failed"}, timeout=5)
+        run = service.get_run(ctx, run_id)
+        assert status == "completed", run.get("status_reason")
+    finally:
+        ctx.executor.stop()
+
+
 def test_self_signoff_is_labelled_self_approved_and_sod_not_enforced(tmp_path):
     """CLAUDE.md §11 "accept all defaults, allow self sign-off for now": when
     the sign-off actor equals run_owner, sign_off must not block it (self
