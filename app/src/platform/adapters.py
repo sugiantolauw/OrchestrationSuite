@@ -97,6 +97,10 @@ def list_skill_versions(skill_id: str) -> list[dict]:
     return service.list_skill_versions(get_context(), skill_id)
 
 
+def get_skill_version_plan(skill_id: str, version: str) -> dict | None:
+    return service.get_skill_version_plan(get_context(), skill_id, version)
+
+
 # ── Governed data discovery ──────────────────────────────────────────────────
 
 def list_governed_tables() -> list[dict]:

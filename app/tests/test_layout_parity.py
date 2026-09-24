@@ -110,6 +110,28 @@ def test_platform_trace_page_matches_prototype(monkeypatch, reference_fixtures):
     assert _app_tree(platform_trace_page()) == _reference_tree("trace")
 
 
+# Allow-list: exactly one deviation on /actions, both named here and in
+# app/src/platform/pages.py at the removed call site. User decision
+# 2026-09-24: the prototype's "Session-only persistence in demo mode --
+# actions reset when the app restarts" notice is REMOVED from app/'s
+# management_actions_page -- it is false on the real (Delta) backend, where
+# actions persist across restarts. Nothing else on the page changes. The
+# reference tree still renders the prototype's own (untouched) version of
+# this notice -- an anonymous `Div > Span, Span` block, id=None/class=None
+# throughout, so it cannot be filtered by id or className -- as the 3rd
+# top-level child (after page-header and the demo indicator, before the KPI
+# row); stripped out here as an exact, position-anchored substring so this
+# stays a zero-diff comparison in every other respect, and so a future
+# reshuffle of the prototype's page that moves this substring elsewhere
+# makes this assertion fail loudly rather than silently stop filtering.
+_ACTIONS_REMOVED_NOTICE_BLOCK = (
+    "\n  Div id=None class=None\n"
+    "    Span id=None class=None\n"
+    "    Span id=None class=None\n"
+    "  Div id=None class='plat-kpi-row'"
+)
+
+
 def test_management_actions_page_matches_prototype(monkeypatch, reference_fixtures):
     from src.platform import adapters
     from src.platform.pages import management_actions_page
@@ -119,7 +141,15 @@ def test_management_actions_page_matches_prototype(monkeypatch, reference_fixtur
     )
     monkeypatch.setattr(adapters, "is_demo_mode", lambda: True)
 
-    assert _app_tree(management_actions_page()) == _reference_tree("actions")
+    reference = _reference_tree("actions")
+    assert _ACTIONS_REMOVED_NOTICE_BLOCK in reference, (
+        "the prototype's session-only-persistence notice block moved or changed shape -- "
+        "update _ACTIONS_REMOVED_NOTICE_BLOCK rather than silently losing this allow-list entry"
+    )
+    reference_without_removed_notice = reference.replace(
+        _ACTIONS_REMOVED_NOTICE_BLOCK, "\n  Div id=None class='plat-kpi-row'"
+    )
+    assert _app_tree(management_actions_page()) == reference_without_removed_notice
 
 
 # ── Matching-volume harness: /workspace/tne and /skills/<id> ────────────────
@@ -167,6 +197,14 @@ def real_completed_tne_run(tmp_path_factory):
         "ORCH_LOCAL_EXPORT_ROOT": str(tmp_path_factory.mktemp("exports")),
         "ORCH_WORKER_ID": "layout-parity-landmarks",
         "SKILLS_DIR": os.path.join(_REPO_ROOT, "skills"),
+        # Pinned rather than derived from `git rev-parse HEAD` -- several
+        # agents commit to this checkout concurrently, so HEAD can move
+        # between this run's creation and the executor's later fingerprint
+        # re-verification pass (CLAUDE.md §4.1 "verified at every executor
+        # pass"), which is a real drift worth catching in production but not
+        # one this ~3-minute-long fixture is exercising (tests/test_p3_
+        # service.py's own _build_ctx does the same, for the same reason).
+        "CODE_REVISION": "test-fixed-revision",
     }
     ctx = real_service.build_app_context(env)
     ctx.executor.start()
@@ -227,11 +265,13 @@ def test_workspace_tne_matches_prototype_landmarks(monkeypatch, real_completed_t
     ref_lm = _reference_landmarks("workspace_tne")
 
     # Section headings, tab ids and chart ids match the prototype exactly,
-    # except this run's own finding titles and the Run signoff panel (the
-    # approved HITL sign-off gate, CLAUDE.md §2.4/§11 -- the prototype has
-    # no sign-off concept at all to compare against). See
-    # _DYNAMIC_IN_PROTOTYPE_NOTE for the finding titles.
-    app_headings = [h for h in app_lm["headings"] if h not in finding_headings and h != "Run signoff"]
+    # except this run's own finding titles (see _DYNAMIC_IN_PROTOTYPE_NOTE).
+    # Independent review 2026-09-24 item 5: the "Run signoff" panel this
+    # allow-list used to name was removed from /workspace/tne entirely (the
+    # approved HITL sign-off gate's self-approval text belongs only where
+    # the prototype shows who signed off -- /run/<id> and /runs, CLAUDE.md
+    # §11) -- there is no longer a deviation to name here.
+    app_headings = [h for h in app_lm["headings"] if h not in finding_headings]
     assert app_headings == ref_lm["headings"], _DYNAMIC_IN_PROTOTYPE_NOTE
     assert app_lm["tab_ids"] == ref_lm["tab_ids"]
     assert app_lm["chart_ids"] == ref_lm["chart_ids"]
@@ -243,16 +283,33 @@ def test_workspace_tne_matches_prototype_landmarks(monkeypatch, real_completed_t
     app_kpis.remove("Open management actions")
     assert app_kpis == ref_lm["kpi_labels"], _DYNAMIC_IN_PROTOTYPE_NOTE
 
-    # Table headers: the "Matters requiring attention" table matches the
-    # prototype's own Risk/Matter/Exposure columns exactly; its fourth
-    # column, "Exceptions", is a documented gap -- no finding in this
-    # run's data model carries a per-finding exception count yet, and
-    # CLAUDE.md NN14 forbids fabricating one rather than showing it. The
-    # methodology table's Layer/What it proves columns also match exactly.
-    # The Management Action Tracker table's own headers are excluded per
-    # _DYNAMIC_IN_PROTOTYPE_NOTE.
-    assert app_lm["table_headers"][:3] == ["Risk", "Matter", "Exposure"]
-    assert app_lm["table_headers"][-2:] == ["Layer", "What it proves"]
+    # Table headers: FULL header sets, no positional slicing (independent
+    # review 2026-09-24 item 5) -- the one remaining gap from the
+    # prototype's own table_headers is named explicitly below by VALUE (a
+    # contiguous block, removed only if it matches exactly), never silently
+    # dropped by a blind `[:n]`/`[-n:]` comparison that could hide an
+    # unrelated divergence anywhere else in the list.
+    app_headers = list(app_lm["table_headers"])
+    ref_headers = list(ref_lm["table_headers"])
+    # The Management Action Tracker table's own headers -- session-store
+    # rendered in the prototype (_DYNAMIC_IN_PROTOTYPE_NOTE), so absent from
+    # ref_headers entirely; this app renders that table's markup directly
+    # instead (same content, different mechanism). Named explicitly, in the
+    # exact order app/src/platform/components.py's action table declares
+    # them, and only removed if found verbatim right after "Matters
+    # requiring attention"'s own 4 headers -- everything else, including
+    # the methodology table's Layer/What it proves, must match with zero
+    # exclusion.
+    _ACTION_TRACKER_HEADERS = ["Test", "Finding", "Risk", "Status", "Owner", "Target", "Exposure", ""]
+    matters_header_count = len(["Risk", "Matter", "Exposure", "Exceptions"])
+    found = app_headers[matters_header_count:matters_header_count + len(_ACTION_TRACKER_HEADERS)]
+    assert found == _ACTION_TRACKER_HEADERS, (
+        f"expected the Management Action Tracker's own header block right after Matters "
+        f"requiring attention's headers, got {found} -- update this allow-list by value, "
+        f"never re-introduce a positional slice"
+    )
+    del app_headers[matters_header_count:matters_header_count + len(_ACTION_TRACKER_HEADERS)]
+    assert app_headers == ref_headers, _DYNAMIC_IN_PROTOTYPE_NOTE
 
 
 def test_skill_methodology_page_matches_prototype_landmarks(monkeypatch, real_completed_tne_run):

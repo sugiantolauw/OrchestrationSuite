@@ -47,11 +47,11 @@ def test_exposure_summary_prefers_label_over_basis():
     # `basis` is the full methodology paragraph, shown separately -- when
     # both are present the short label wins the hero line.
     payload = {"exposure": {
-        "headline": 1725.0, "label": "Gross value of flagged spend (de-duplicated)",
+        "headline": 1725.0, "label": "Potential exposure",
         "basis": "a very long methodology paragraph " * 5,
     }}
     summary = workspace_tne._exposure_summary([{"exposure_amount": 1.0}], payload)
-    assert "Gross value of flagged spend (de-duplicated)" in summary
+    assert "Potential exposure" in summary
     assert "methodology paragraph" not in summary
 
 
@@ -84,6 +84,29 @@ def test_workspace_layout_shows_error_panel_when_payload_load_fails(monkeypatch)
     assert "could not be loaded" in text
     assert "_FrameSnapshotIntegrityError" in text
     assert "sha256 mismatch" in text
+
+
+def test_workspace_layout_shows_error_panel_when_actions_load_fails(monkeypatch):
+    """Independent review 2026-09-24 item 7: list_management_actions'
+    failure used to be swallowed into an empty action list with no
+    load_error recorded -- unlike the payload/frames loads right above it
+    in _load_bundle, which already surface an explicit error panel. A
+    genuine actions-load failure (e.g. a Delta connectivity error) must not
+    render as "this run drafted zero management actions"."""
+    run_id = _completed_run()
+
+    class _ActionsLoadError(Exception):
+        pass
+
+    def _raise(ctx, filters=None):
+        raise _ActionsLoadError("connection reset reading management_actions")
+
+    monkeypatch.setattr(fake_service, "list_management_actions", _raise)
+    layout = workspace_tne.tne_workspace_layout(run_id)
+    text = str(layout)
+    assert "could not be loaded" in text
+    assert "_ActionsLoadError" in text
+    assert "connection reset" in text
 
 
 def test_finding_card_shows_exposure_not_yet_computed():
@@ -291,3 +314,65 @@ def test_workspace_layout_degrades_gracefully_on_a_run_with_no_frames(monkeypatc
     workspace_tne._CACHE.clear()
     layout = workspace_tne.tne_workspace_layout(run_id)
     assert "tab-executive" in str(layout)
+
+
+def test_skill_flag_meta_prefers_the_runs_pinned_skill_version_content(monkeypatch):
+    """Independent review 2026-09-24 item 7: when a skill_version is given,
+    its immutable skill_versions content wins over catalogue_tests/live-disk
+    -- proven here by making the pinned content disagree with catalogue_tests
+    and asserting the pinned one is what comes back."""
+    workspace_tne._SKILL_FLAG_CACHE.clear()
+
+    def _fake_get_skill_version_plan(skill_id, version):
+        assert (skill_id, version) == ("SKILL-PIN-TEST", "v7")
+        return {"tests": [{"test_id": "T9.9", "flag": "RF_PINNED_ONLY"}]}
+
+    monkeypatch.setattr(adapters, "get_skill_version_plan", _fake_get_skill_version_plan)
+
+    # catalogue_tests names a DIFFERENT flag -- if this were used instead of
+    # the pinned content, RF_PINNED_ONLY would never appear.
+    catalogue_tests = [{
+        "test_id": "T1.1", "category": "x", "test_name": "y",
+        "plan_tests": [{"test_id": "T1.1", "flag": "RF_FROM_CATALOGUE", "primitive": "threshold_exceedance"}],
+    }]
+    meta = workspace_tne._skill_flag_meta("SKILL-PIN-TEST", catalogue_tests, "v7")
+    assert "RF_PINNED_ONLY" in meta
+    assert "RF_FROM_CATALOGUE" not in meta
+
+
+def test_skill_flag_meta_falls_back_when_no_version_is_pinned(monkeypatch):
+    """get_skill_version_plan returning None (no skill_versions row for this
+    version -- a real, expected case, e.g. a run older than the skill
+    registry) is a legitimate fallback to catalogue_tests, never an error."""
+    workspace_tne._SKILL_FLAG_CACHE.clear()
+    monkeypatch.setattr(adapters, "get_skill_version_plan", lambda skill_id, version: None)
+
+    catalogue_tests = [{
+        "test_id": "T1.1", "category": "x", "test_name": "y",
+        "plan_tests": [{"test_id": "T1.1", "flag": "RF_FROM_CATALOGUE", "primitive": "threshold_exceedance"}],
+    }]
+    meta = workspace_tne._skill_flag_meta("SKILL-FALLBACK-TEST", catalogue_tests, "v-unregistered")
+    assert "RF_FROM_CATALOGUE" in meta
+
+
+def test_skill_flag_meta_never_swallows_a_genuine_load_failure(monkeypatch):
+    """Independent review 2026-09-24 item 7 -- THE REGRESSION THIS FIX
+    TARGETS: a broken skills/<id>/plan.yaml on the live-disk fallback path
+    (no skill_version, no catalogue_tests, no flag_to_test) used to be
+    swallowed by a bare `except Exception: pass` and silently cached as an
+    empty {} -- indistinguishable from "this Skill genuinely has no flags".
+    Must raise instead."""
+    import pytest as _pytest
+
+    workspace_tne._SKILL_FLAG_CACHE.clear()
+    monkeypatch.setattr(adapters, "get_skill", lambda skill_id: {})  # no flag_to_test
+
+    def _broken_load_skill(skill_dir):
+        raise ValueError("plan.yaml: schema violation")
+
+    monkeypatch.setattr(workspace_tne, "_skill_dir", lambda skill_id: "/some/fake/dir")
+    import orchestrator.skills as orch_skills
+    monkeypatch.setattr(orch_skills, "load_skill", _broken_load_skill)
+
+    with _pytest.raises(ValueError, match="schema violation"):
+        workspace_tne._skill_flag_meta("SKILL-BROKEN-TEST", [], None)

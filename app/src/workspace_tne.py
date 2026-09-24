@@ -57,9 +57,10 @@ _CACHE: dict[tuple, dict] = {}
 # Skill *definitions* (plan.yaml/catalogue.yaml), not run data — static per
 # skill_id for the life of this process, same shape as
 # src.platform.adapters' module-level `_ctx` (a build-once handle, not audit
-# evidence). A Skill's own plan never changes while this container is up;
-# nothing here is a DataFrame or run-level number.
-_SKILL_FLAG_CACHE: dict[str, dict] = {}
+# evidence). Keyed on (skill_id, skill_version) -- independent review
+# 2026-09-24 item 7 -- so two runs on different versions of the same Skill
+# never collide; nothing here is a DataFrame or run-level number.
+_SKILL_FLAG_CACHE: dict[tuple[str, str | None], dict] = {}
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SKILLS_DIR = _REPO_ROOT / "skills"
@@ -127,8 +128,14 @@ def _load_bundle(run_id: str) -> dict | None:
     skill = adapters.get_skill(run.get("skill_id")) if run.get("skill_id") else None
     try:
         actions = adapters.list_management_actions(filters={"run_id": run_id}) or []
-    except Exception:
+    except Exception as exc:
+        # Independent review 2026-09-24 item 7: this used to swallow an
+        # actions-load failure into an empty list with no load_error set --
+        # the same "looks merely sparse, not broken" failure mode the
+        # payload/frames loads above were already fixed against, just left
+        # unfixed here.
         actions = []
+        load_error = load_error or exc
 
     bundle = {
         "run": run, "payload": payload, "frames": frames, "skill": skill or {},
@@ -194,7 +201,23 @@ def _catalogue_id_for(plan_test_id: str, catalogue_ids: list[str]) -> str:
     return plan_test_id
 
 
-def _skill_flag_meta(skill_id: str | None, catalogue_tests: list[dict]) -> dict[str, dict]:
+def _plan_entries_from_plan_tests(plan_tests: list[dict]) -> list[dict]:
+    """[{"test_id": <plan.yaml id>, "flag": ...}, ...] from a raw plan.yaml
+    `tests:` list (the same shape orchestrator.skills.Skill.plan['tests']
+    has) -- shared by both the pinned-version path and the live-disk
+    fallback below so the two can never silently diverge in what counts as
+    a flag-producing test."""
+    entries: list[dict] = []
+    for t in plan_tests:
+        if t.get("flag"):
+            entries.append({"test_id": t.get("test_id", ""), "flag": t["flag"]})
+        elif "not_testable" in t:
+            for f in t["not_testable"].get("flags", []):
+                entries.append({"test_id": t.get("test_id", ""), "flag": f})
+    return entries
+
+
+def _skill_flag_meta(skill_id: str | None, catalogue_tests: list[dict], skill_version: str | None = None) -> dict[str, dict]:
     """{flag: {"test_id": <catalogue test_id>, "plan_test_id": <plan.yaml test_id>,
     "category": ..., "label": "T-id: name"}}.
 
@@ -211,41 +234,53 @@ def _skill_flag_meta(skill_id: str | None, catalogue_tests: list[dict]) -> dict[
     flag can be shared by more than one plan.yaml sub-test (T6.1d_dom and
     T6.1d_int both set `flag: RF_CS_DailySpendOverLimit`), and a dict keyed
     by flag can hold only the last one written. `plan_tests` has no such
-    collision -- it is a list, grouped by catalogue test already. Falls back
-    to reading skills/<id>/plan.yaml directly when neither is present (see
-    module docstring)."""
+    collision -- it is a list, grouped by catalogue test already.
+
+    Independent review 2026-09-24 item 7: when `skill_version` is given (the
+    run's own PINNED version, RunState.skill_version), that version's
+    immutable skill_versions.content['plan'] is tried FIRST, ahead of
+    catalogue_tests/flag_to_test/live-disk -- all three of which read
+    whatever is on disk RIGHT NOW, which may have moved on since this run
+    actually executed. Falls back to those only when no such version was
+    ever registered (get_skill_version_plan returns None, a real, expected
+    case for a run older than the skill registry) -- a genuine read/parse
+    failure on any path is never swallowed into an empty, silently-cached
+    result (the bug this fixes: a bare `except Exception: pass` here used to
+    hide a broken skills/<id>/plan.yaml behind what looked like "no flags to
+    show yet"). Cache key includes skill_version so two runs on different
+    versions of the same Skill can never collide."""
     if not skill_id:
         return {}
-    cached = _SKILL_FLAG_CACHE.get(skill_id)
+    cache_key = (skill_id, skill_version)
+    cached = _SKILL_FLAG_CACHE.get(cache_key)
     if cached is not None:
         return cached
 
     catalogue_ids = [t.get("test_id") for t in catalogue_tests if t.get("test_id")]
     catalogue_by_id = {t.get("test_id"): t for t in catalogue_tests}
 
-    skill_entry = adapters.get_skill(skill_id) or {}
     plan_entries: list[dict] = []  # [{"test_id": <plan.yaml id>, "flag": ...}, ...]
-    for t in catalogue_tests:
-        plan_entries.extend(t.get("plan_tests") or [])
+
+    if skill_version:
+        pinned_plan = adapters.get_skill_version_plan(skill_id, skill_version)
+        if pinned_plan is not None:
+            plan_entries = _plan_entries_from_plan_tests(pinned_plan.get("tests", []))
 
     if not plan_entries:
+        for t in catalogue_tests:
+            plan_entries.extend(t.get("plan_tests") or [])
+
+    if not plan_entries:
+        skill_entry = adapters.get_skill(skill_id) or {}
         flag_to_test: dict[str, str] = skill_entry.get("flag_to_test") or {}
         if flag_to_test:
             plan_entries = [{"test_id": plan_test_id, "flag": flag} for flag, plan_test_id in flag_to_test.items()]
         else:
             d = _skill_dir(skill_id)
             if d is not None:
-                try:
-                    from orchestrator.skills import load_skill
-                    skill = load_skill(d)
-                    for t in skill.plan.get("tests", []):
-                        if t.get("flag"):
-                            plan_entries.append({"test_id": t.get("test_id", ""), "flag": t["flag"]})
-                        elif "not_testable" in t:
-                            for f in t["not_testable"].get("flags", []):
-                                plan_entries.append({"test_id": t.get("test_id", ""), "flag": f})
-                except Exception:
-                    pass
+                from orchestrator.skills import load_skill
+                skill = load_skill(d)  # a genuine failure here propagates -- never swallowed
+                plan_entries = _plan_entries_from_plan_tests(skill.plan.get("tests", []))
 
     meta: dict[str, dict] = {}
     for e in plan_entries:
@@ -261,7 +296,7 @@ def _skill_flag_meta(skill_id: str | None, catalogue_tests: list[dict]) -> dict[
         if plan_test_id and plan_test_id not in meta[flag]["plan_test_ids"]:
             meta[flag]["plan_test_ids"].append(plan_test_id)
 
-    _SKILL_FLAG_CACHE[skill_id] = meta
+    _SKILL_FLAG_CACHE[cache_key] = meta
     return meta
 
 
@@ -436,7 +471,7 @@ def _exposure_summary(findings: list[dict], payload: dict | None = None) -> str:
     headline = exposure.get("headline")
     if headline is not None:
         # B2 (CLAUDE.md P2/P3 gate review): `label` is the short display name
-        # ("Gross value of flagged spend (de-duplicated)"); `basis` is the
+        # ("Potential exposure"); `basis` is the
         # full methodology paragraph, shown separately by
         # _exposure_methodology_note -- never inlined here, it would swamp
         # the one-line executive hero.
@@ -445,6 +480,34 @@ def _exposure_summary(findings: list[dict], payload: dict | None = None) -> str:
     if not findings:
         return "No findings"
     return "Not available — the run's de-duplicated exposure headline has not been computed"
+
+
+def _hero_exposure_sentence(findings: list[dict], payload: dict | None) -> str:
+    """Independent review 2026-09-24 item 1: the executive hero's exposure
+    sentence, restored to the prototype's own exact wording (reference_app/
+    app.py:1625: "Potential financial exposure of ${total_exposure:,.0f}.
+    Results are reproducible and linked to underlying source records.") --
+    not reworded. Both of the prototype's claims are true of this run: it
+    is reproducible (the run fingerprint, CLAUDE.md §3 NN8) and every
+    number traces to source provenance (NN10), which was not true of the
+    prototype's own frozen demo data -- nothing is dropped. When no
+    headline has been computed yet there is no $X to report, so this falls
+    back to an explicit not-available sentence rather than fabricating one
+    (CLAUDE.md NN14) -- the one deviation from the prototype, which never
+    had this case (FINDINGS_SCORED was always already computed)."""
+    exposure = (payload or {}).get("exposure") or {}
+    headline = exposure.get("headline")
+    if headline is not None:
+        return (
+            f"Potential financial exposure of ${headline:,.0f}. "
+            "Results are reproducible and linked to underlying source records."
+        )
+    if not findings:
+        return "No findings."
+    return (
+        "Potential financial exposure not available — the run's de-duplicated "
+        "exposure headline has not been computed."
+    )
 
 
 def _potential_exposure_value(findings: list[dict], payload: dict | None) -> str:
@@ -463,20 +526,38 @@ def _potential_exposure_value(findings: list[dict], payload: dict | None) -> str
     return "Not available"
 
 
-def _signoff_text(run: dict) -> str:
-    signoff = run.get("signoff")
-    if not signoff:
-        return "Not yet signed off."
-    text = f"Signed off by {signoff['approver']} at {signoff['timestamp']}"
-    if signoff.get("self_approved"):
-        text += " (self-approved — segregation of duties not enforced)"
-    return text
+def _finding_exception_count(finding: dict, test_results: list[dict]) -> int | None:
+    """Independent review 2026-09-24 item 5: the "Matters requiring
+    attention" table's Exceptions column, restored from the prototype
+    (reference_app/app.py) with a REAL count -- never a placeholder. A
+    finding can legitimately cite metrics from more than one plan.yaml
+    sub-test (CLAUDE.md P2/P3 gate review item B1, e.g. T6.1d_dom/_int), so
+    this sums `exception_units` over every test that produced one of this
+    finding's own metrics_cited -- the same producing-test derivation
+    orchestrator.nodes.fieldwork.prioritise uses for exposure, built here
+    from state.test_results' own metric_names (never re-reading run_metrics
+    -- the App must not run a second query for a number the run already
+    persisted in the payload it handed this callback)."""
+    metric_to_test_id = {
+        name: t["test_id"] for t in test_results for name in t.get("metric_names", [])
+    }
+    exception_units_by_test_id = {t["test_id"]: t.get("exception_units") for t in test_results}
+    producing_test_ids = {
+        metric_to_test_id[name] for name in (finding.get("metrics_cited") or {}) if name in metric_to_test_id
+    }
+    if not producing_test_ids:
+        return None
+    counts = [exception_units_by_test_id.get(tid) for tid in producing_test_ids]
+    if any(c is None for c in counts):
+        return None
+    return sum(counts)
 
 
 def _executive_tab(run: dict, findings: list[dict], payload: dict | None, actions: list[dict], frames: dict | None = None) -> html.Div:
     n_high = sum(1 for f in findings if f.get("severity") == "High")
     open_actions = sum(1 for a in actions if str(a.get("status", "")).lower() not in ("closed", "remediated"))
-    n_exception_tests = sum(1 for t in run.get("test_results", []) if t.get("status") == "exception")
+    test_results = run.get("test_results", [])
+    n_exception_tests = sum(1 for t in test_results if t.get("status") == "exception")
 
     priority = sorted(findings, key=lambda f: (
         {"High": 0, "Medium": 1, "Low": 2}.get(f.get("severity"), 3),
@@ -491,6 +572,8 @@ def _executive_tab(run: dict, findings: list[dict], payload: dict | None, action
                                       "borderColor": _SEVERITY_COLOR.get(f.get("severity"), "#6b7283")})),
             html.Td(f.get("title", ""), style={"fontWeight": 600}),
             html.Td(_fmt_currency(f.get("exposure_amount")) if f.get("exposure_amount") is not None else "—",
+                    style={"fontFamily": "monospace", "textAlign": "right"}),
+            html.Td(str(_finding_exception_count(f, test_results) or "—"),
                     style={"fontFamily": "monospace", "textAlign": "right"}),
         ])
         for f in priority
@@ -521,8 +604,7 @@ def _executive_tab(run: dict, findings: list[dict], payload: dict | None, action
                 className="showcase-headline",
             ),
             html.P(
-                f"{_exposure_summary(findings, payload)}. "
-                "Every number below is read from this run's persisted results.",
+                _hero_exposure_sentence(findings, payload),
                 className="showcase-supporting",
             ),
         ], className="showcase-hero"),
@@ -558,21 +640,18 @@ def _executive_tab(run: dict, findings: list[dict], payload: dict | None, action
                     html.Thead(html.Tr([
                         html.Th("Risk", style=th_style), html.Th("Matter", style=th_style),
                         html.Th("Exposure", style={**th_style, "textAlign": "right"}),
+                        html.Th("Exceptions", style={**th_style, "textAlign": "right"}),
                     ])),
                     html.Tbody(priority_rows),
                 ], style={"width": "100%", "borderCollapse": "collapse", "fontSize": 12.5}),
             ], className="panel"),
             html.Div([
                 html.H3("Management action status", style={"margin": "0 0 2px", "fontSize": 14.5, "fontWeight": 700}),
-                html.P("Real, persisted management actions drafted from this run's findings.", className="sub"),
+                html.P("Action ownership and responses are maintained in this session for the showcase.",
+                       className="sub"),
                 action_summary,
             ], className="panel"),
         ], className="grid-2"),
-
-        html.Div([
-            html.H3("Run signoff", style={"margin": "0 0 6px", "fontSize": 14.5, "fontWeight": 700}),
-            html.P(_signoff_text(run), className="sub"),
-        ], className="panel", style={"marginTop": 16}),
     ])
 
 
@@ -741,23 +820,37 @@ def _findings_tab(bundle: dict) -> html.Div:
     findings = payload.get("findings", [])
     frames = bundle["frames"]
     tests = bundle["skill"].get("tests", [])
-    meta = _skill_flag_meta(bundle["run"].get("skill_id"), tests)
+    meta = _skill_flag_meta(bundle["run"].get("skill_id"), tests, bundle["run"].get("skill_version"))
 
     n_high = sum(1 for f in findings if f.get("severity") == "High")
     n_med = sum(1 for f in findings if f.get("severity") == "Medium")
     n_low = sum(1 for f in findings if f.get("severity") == "Low")
+    # Independent review 2026-09-24 item 7: "Indeterminate" is a real
+    # severity (orchestrator/findings.py) -- a rule's severity threshold
+    # could not be evaluated (e.g. a metric it depends on is missing), never
+    # silently folded into Low. Counted here only when > 0, appended to the
+    # existing chip's text rather than a new chip (this is a documented
+    # deviation from the prototype, which has no such concept).
+    n_indeterminate = sum(1 for f in findings if f.get("severity") == "Indeterminate")
+    severity_chip_text = f"{n_high} High · {n_med} Medium · {n_low} Low"
+    if n_indeterminate:
+        severity_chip_text += f" · {n_indeterminate} Indeterminate"
 
-    # B2 (CLAUDE.md P2/P3 gate review): a chip is too small for the full
-    # "$X — Gross value of flagged spend (de-duplicated)" label -- shows the
-    # figure alone here, with the label spelled out in full on the
-    # executive tab (_executive_tab) instead.
+    # Independent review 2026-09-24 items 1 & 5: restores the prototype's
+    # own chip text (reference_app/app.py:1424 "Financial exposure: $X") and
+    # its "Metrics recomputed from source population" chip -- a claim that
+    # is genuinely true now (every number here comes from this run's own
+    # persisted results, not frozen demo data), so restoring it is not a
+    # false claim.
     headline_value = (payload.get("exposure") or {}).get("headline")
-    headline_chip_text = f"Flagged spend: ${headline_value:,.0f}" if headline_value is not None else "Flagged spend: not available"
+    headline_chip_text = f"Financial exposure: ${headline_value:,.0f}" if headline_value is not None else "Financial exposure: not available"
     summary_bar = html.Div([
         html.Span(f"{len(findings)} findings", className="chip"),
-        html.Span(f"{n_high} High · {n_med} Medium · {n_low} Low", className="chip"),
+        html.Span(severity_chip_text, className="chip"),
         html.Span(headline_chip_text, className="chip",
                    style={"color": "#b85042", "borderColor": "#b85042"}) if findings else None,
+        html.Span("Metrics recomputed from source population",
+                   className="chip", style={"color": "#2c7a4b", "borderColor": "#2c7a4b"}),
     ], className="chip-row", style={"marginBottom": 14})
 
     categories = sorted({c for c in (t.get("category") for t in tests) if c})
@@ -1612,7 +1705,7 @@ def register_callbacks(app) -> None:
             return True, _load_error_panel(run_id, load_error), f"{test_id}: Exception Records"
         frames = (bundle or {}).get("frames", {})
         tests = (bundle or {}).get("skill", {}).get("tests", [])
-        meta = _skill_flag_meta((bundle or {}).get("run", {}).get("skill_id"), tests)
+        meta = _skill_flag_meta((bundle or {}).get("run", {}).get("skill_id"), tests, (bundle or {}).get("run", {}).get("skill_version"))
         flags = _flags_for_test(meta, test_id)
         source, df = _frame_for_flags(frames, flags)
 
@@ -1710,7 +1803,7 @@ def register_callbacks(app) -> None:
             panel = _load_error_panel(run_id, load_error)
             return (panel,) + (dash.no_update,) * 8 + (panel,)
         tests = bundle["skill"].get("tests", [])
-        meta = _skill_flag_meta(bundle["run"].get("skill_id"), tests)
+        meta = _skill_flag_meta(bundle["run"].get("skill_id"), tests, bundle["run"].get("skill_version"))
         return _p1_update(bundle, start_date, end_date, members, meta)
 
     # ── Audit Detail / page 2 ────────────────────────────────────────────────
@@ -1744,7 +1837,7 @@ def register_callbacks(app) -> None:
         if load_error is not None:
             return (_load_error_panel(run_id, load_error),) + (dash.no_update,) * 13
         tests = bundle["skill"].get("tests", [])
-        meta = _skill_flag_meta(bundle["run"].get("skill_id"), tests)
+        meta = _skill_flag_meta(bundle["run"].get("skill_id"), tests, bundle["run"].get("skill_version"))
         return _p2_update(bundle, start_date, end_date, members, expense_types, meta)
 
     # ── Audit Detail / page 3 ────────────────────────────────────────────────

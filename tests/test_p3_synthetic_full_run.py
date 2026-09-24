@@ -43,6 +43,12 @@ def test_full_run_against_real_synthetic_data(tmp_path):
         "ORCH_LOCAL_DATA_ROOT": str(SYNTHETIC_DATA_DIR),
         "ORCH_LOCAL_EXPORT_ROOT": str(tmp_path / "exports"),
         "ORCH_WORKER_ID": "synthetic-full-run",
+        # Pinned, not derived from `git rev-parse HEAD` -- several agents
+        # commit to this checkout concurrently, so HEAD can move between
+        # this ~3-minute run's creation and the executor's fingerprint
+        # re-check (tests/test_p3_service.py's _build_ctx does the same,
+        # same reason).
+        "CODE_REVISION": "test-fixed-revision",
     }
     ctx = service.build_app_context(env)
     ctx.executor.start()

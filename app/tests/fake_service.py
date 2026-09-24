@@ -119,6 +119,14 @@ def list_skill_versions(ctx, skill_id: str) -> list:
     return list(_SKILL_VERSIONS)
 
 
+def get_skill_version_plan(ctx, skill_id: str, version: str) -> dict | None:
+    # The fake backend never records a skill_versions row -- callers must
+    # fall back to the live skill directory, exactly as a real run that
+    # predates the skill registry would (orchestrator.service.
+    # get_skill_version_plan's own docstring).
+    return None
+
+
 def list_governed_tables(ctx) -> list:
     return _GOVERNED_TABLES
 
