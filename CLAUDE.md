@@ -1791,6 +1791,8 @@ Never restart the App on a build that lacks the idle-polling fix.
 - **Build the PPTX export now** (§4.7). Do the P4 defect fixes and the P6 target structure
   immediately. The executive summary and themes slides use deterministic content, labelled as such,
   until the LLM layer lands; nothing is fabricated.
+- **Remove the `/actions` line "Session-only persistence in demo mode — actions reset when the app
+  restarts".** It is false on the Delta backend.
 
 ### Further decisions from the user (2026-09-23)
 
