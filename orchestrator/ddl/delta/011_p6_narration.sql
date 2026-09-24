@@ -5,8 +5,8 @@
 -- (§3.3-3.4) to prohibit model-invented numbers and preserve G11 faithfulness.
 -- narrative_id and related prose fields use typed placeholders {class:name}
 -- which Python renders to formatted values (format_metric_value) at display
--- time. Models write prose with placeholders; Python decides every number.
--- Regenerate bumps generation and re-narrates; each generation texts are
+-- time. Models write prose with placeholders, and Python decides every number.
+-- Regenerate bumps generation and re-narrates, and each generation texts are
 -- versioned and tracked in narrative_edits.
 
 CREATE TABLE IF NOT EXISTS ${catalog}.${schema}.narratives (

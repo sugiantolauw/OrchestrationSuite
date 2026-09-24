@@ -521,3 +521,13 @@ def test_delta_migration_statements_have_no_semicolon_inside_a_string_literal():
                 f"{path.name}: semicolon inside string literal {m.group(0)!r} would "
                 f"break the naive split_statements() splitter"
             )
+
+
+def test_delta_migration_comment_lines_have_no_semicolon():
+    # split_statements() splits on every ";", including one inside a "--"
+    # comment, which turns the rest of the comment line into a bogus SQL
+    # statement (found live: migration 011 failed on Delta, 2026-09-24).
+    for path in sorted(DELTA_DDL_DIR.glob("*.sql")):
+        for lineno, line in enumerate(path.read_text().splitlines(), 1):
+            if line.lstrip().startswith("--"):
+                assert ";" not in line, f"{path.name}:{lineno}: semicolon in a comment line"
