@@ -183,6 +183,39 @@ DDL_STATEMENTS = [
 ]
 
 
+# Cost incident, CLAUDE.md §11 "Cost and idle fixes" / independent review
+# 2026-09-24 item 6: the deployed App's idle polling kept this warehouse
+# awake for ~20 hours, ~230 DBU (~$218). The idle-polling fix (orchestrator/
+# executor.py) is necessary but not sufficient on its own -- the warehouse's
+# own auto_stop is the second, independent control, and it must never be
+# left at a platform default that could be longer than a minute.
+_WAREHOUSE_AUTO_STOP_MINS = 1
+
+
+def _ensure_warehouse_auto_stop(w: "WorkspaceClient", warehouse_id: str) -> None:
+    """Idempotently sets this warehouse's auto_stop_mins to
+    _WAREHOUSE_AUTO_STOP_MINS -- a no-op API call if it is already set (never
+    calls .edit() when the current value already matches, so a repeat run of
+    this bootstrap never resets an unrelated in-flight query's warehouse)."""
+    current = w.warehouses.get(warehouse_id)
+    if current.auto_stop_mins == _WAREHOUSE_AUTO_STOP_MINS:
+        print(f"  auto_stop_mins already {_WAREHOUSE_AUTO_STOP_MINS} on {current.name} ({warehouse_id})")
+        return
+    print(
+        f"  setting auto_stop_mins {current.auto_stop_mins} -> {_WAREHOUSE_AUTO_STOP_MINS} "
+        f"on {current.name} ({warehouse_id})"
+    )
+    w.warehouses.edit(
+        id=warehouse_id,
+        name=current.name,
+        cluster_size=current.cluster_size,
+        auto_stop_mins=_WAREHOUSE_AUTO_STOP_MINS,
+        min_num_clusters=current.min_num_clusters,
+        max_num_clusters=current.max_num_clusters,
+        enable_serverless_compute=current.enable_serverless_compute,
+    )
+
+
 def main() -> None:
     w = WorkspaceClient()
 
@@ -195,6 +228,8 @@ def main() -> None:
             sys.exit(1)
         warehouse_id = warehouses[0].id
         print(f"Using warehouse: {warehouses[0].name} ({warehouse_id})")
+
+    _ensure_warehouse_auto_stop(w, warehouse_id)
 
     print(f"Bootstrapping {CATALOG}.{SCHEMA} ...")
     for stmt in DDL_STATEMENTS:
