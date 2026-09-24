@@ -366,10 +366,15 @@ def _filter_by_dates(df: pd.DataFrame, date_col: str, start_date, end_date) -> p
     not "through midnight at its start", otherwise a datetime column with a
     real time-of-day (_APPROVED_DT_COL, "Approved Date/Time") would silently
     drop every row on the last day of the selected range. Like that engine
-    code, this does not add timezone handling (skills/tne_exco/contract.yaml
-    declares `timezone: Australia/Sydney`) -- the engine's own comment notes
-    that half of the audit-period boundary is not yet addressed there
-    either, so this stays naive rather than diverging from it."""
+    code, this adds no timezone handling of its own (skills/tne_exco/
+    contract.yaml declares `timezone: Australia/Sydney`) -- it does not need
+    to: `date_col` here is read from this run's frame snapshot
+    (orchestrator.frames.build_row_snapshots), which is built from the same
+    contract-validated columns orchestrator.contract.validate_contract typed
+    at execute() time, already normalised to naive local wall-clock time in
+    the contract's declared timezone (independent test-gap audit #13/H9;
+    orchestrator.timeutil.to_business_local). Staying naive here matches
+    that upstream representation rather than diverging from it."""
     out = df
     if date_col not in out.columns:
         return out

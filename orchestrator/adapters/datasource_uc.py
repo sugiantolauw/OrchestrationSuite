@@ -29,6 +29,7 @@ import pandas as pd
 
 from orchestrator.config import Settings
 from orchestrator.explorer.profile import pandas_distinct_count, pandas_profile_columns
+from orchestrator.timeutil import to_business_local
 
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -143,17 +144,28 @@ def _default_connection_factory(settings: Settings):
     )
 
 
-def _normalise_datetime_dtypes(df: pd.DataFrame) -> pd.DataFrame:
+def _normalise_datetime_dtypes(df: pd.DataFrame, audit_timezone: str | None = None) -> pd.DataFrame:
     """The SQL warehouse returns TIMESTAMP columns as tz-aware pyarrow timestamps;
     pandas.read_excel (what LocalFileDataSource uses) returns naive
     datetime64[us]. Normalise so a UC-backed and file-backed read of the same data
-    produce identical dtypes (verified in tests/test_datasource_uc.py's live
-    equality test)."""
+    produce identical dtypes AND identical wall-clock values (verified in
+    tests/test_datasource_uc.py's live equality test).
+
+    `audit_timezone` is the contract's declared business-calendar timezone
+    (CLAUDE.md §0.5, NN14; independent test-gap audit #13/H9) -- a tz-aware
+    column is converted to it (never left as a hardcoded "UTC", which is what
+    let a UC-backed read silently disagree with the file-backed read at an
+    audit-period boundary) via orchestrator.timeutil.to_business_local, THEN
+    stripped to naive so both paths end up with the same dtype. Defaults to
+    "UTC" only for a caller that has no contract in hand yet (e.g. the dtype-
+    only unit test below, or a pre-frame-snapshot legacy read) -- every real
+    execute_skill()/NodeContext-routed read passes the Skill's own
+    contract['timezone'] explicitly."""
+    tz = audit_timezone or "UTC"
     for col in df.columns:
         series = df[col]
         if pd.api.types.is_datetime64_any_dtype(series):
-            if getattr(series.dt, "tz", None) is not None:
-                series = series.dt.tz_convert("UTC").dt.tz_localize(None)
+            series = to_business_local(series, tz)
             df[col] = series.astype("datetime64[us]")
     return df
 
@@ -303,6 +315,7 @@ class UCTableDataSource:
         version: int | str,
         columns: list[str] | None = None,
         filters: dict[str, Any] | None = None,
+        audit_timezone: str | None = None,
     ) -> pd.DataFrame:
         fqn = self._fqn(source)
         quoted = _quoted_fqn(fqn)
@@ -363,7 +376,7 @@ class UCTableDataSource:
         cur = self._execute(sql_text, where_params)
         arrow_table = cur.fetchall_arrow()
         df = arrow_table.to_pandas()
-        df = _normalise_datetime_dtypes(df)
+        df = _normalise_datetime_dtypes(df, audit_timezone)
         df = df.reset_index(drop=True)
 
         if "_source_row" not in df.columns:
@@ -449,10 +462,19 @@ class UCTableDataSource:
         version: str | None = None,
         amount_column: str | None = None,
         date_column: str | None = None,
+        audit_timezone: str | None = None,
     ) -> dict:
         """G6's amount/min-max-date reconciliation (CLAUDE.md §5 G6, P2/P3 gate
         review item 2), pushed into the warehouse (§2.3 rule 4) rather than
-        pulling the whole source into pandas just to sum or bound-check it."""
+        pulling the whole source into pandas just to sum or bound-check it.
+
+        `audit_timezone` applies the same rule read_population's
+        `_normalise_datetime_dtypes` does (CLAUDE.md §0.5, NN14): the raw
+        MIN()/MAX() comes back tz-aware from the warehouse, and must be
+        converted to the contract's declared timezone -- never left as
+        whatever the connector's own default is -- before its date is
+        extracted, so this independent G6 figure agrees with the engine's
+        own (read_population-derived) min/max date at the same boundary."""
         if not amount_column and not date_column:
             return {"amount": None, "min_date": None, "max_date": None}
         fqn = self._fqn(source)
@@ -491,11 +513,12 @@ class UCTableDataSource:
             amount = float(v_amount) if v_amount is not None else 0.0
         min_date = max_date = None
         if date_column:
+            tz = audit_timezone or "UTC"
             v_min, v_max = row[cols.index("__min_date")], row[cols.index("__max_date")]
             if v_min is not None:
-                min_date = pd.Timestamp(v_min).date().isoformat()
+                min_date = to_business_local(pd.Timestamp(v_min), tz).date().isoformat()
             if v_max is not None:
-                max_date = pd.Timestamp(v_max).date().isoformat()
+                max_date = to_business_local(pd.Timestamp(v_max), tz).date().isoformat()
         return {"amount": amount, "min_date": min_date, "max_date": max_date}
 
     # ── Explorer Mode profiling (docs/specs/P6_P8_explorer_llm_design.md §4.3) ──
@@ -516,7 +539,11 @@ class UCTableDataSource:
         # applies unchanged), then computes every statistic in pandas --
         # ONE shared implementation with the local/upload adapters rather
         # than a second, SQL-pushdown one that could drift from it.
-        df = self.read_population(source, version=version)
+        # `audit_timezone` is threaded into the read (not just into
+        # pandas_profile_columns' own in_period_count boundary math) so a
+        # date/datetime column's min/max/values are the same business-local
+        # wall-clock digits a Playbook run would see (CLAUDE.md §0.5, NN14).
+        df = self.read_population(source, version=version, audit_timezone=audit_timezone)
         return pandas_profile_columns(
             df, max_distinct=max_distinct, min_count=min_count,
             audit_period=audit_period, audit_timezone=audit_timezone,

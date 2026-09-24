@@ -566,8 +566,15 @@ def execute(ctx: NodeContext, state: RunState) -> RunState:
         row_variance = None if engine_rows is None else engine_rows - independent_rows
 
         if amount_col or date_col:
+            # CLAUDE.md §0.5/NN14: the same declared contract timezone
+            # execute_skill() (above) threaded into read_population --
+            # without it here too, a UC-backed source's independently
+            # queried min/max date would be converted to a different
+            # timezone than the engine's own read, and G6 would fail on a
+            # boundary row that never actually moved.
             independent = ctx.data_source.column_stats(
-                source, version=version, amount_column=amount_col, date_column=date_col
+                source, version=version, amount_column=amount_col, date_column=date_col,
+                audit_timezone=ctx.skill.contract.get("timezone"),
             )
         else:
             independent = {"amount": None, "min_date": None, "max_date": None}

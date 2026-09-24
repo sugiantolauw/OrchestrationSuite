@@ -151,11 +151,19 @@ class VolumeUploadAwareDataSource:
 
     def read_population(
         self, source: str, *, version, columns: list[str] | None = None, filters: dict | None = None,
+        audit_timezone: str | None = None,
     ) -> pd.DataFrame:
+        # Threaded straight through to table_source (UCTableDataSource) for a
+        # governed-table source (CLAUDE.md §0.5, NN14) -- it never applies to
+        # the flat-file branch below, whose parse_source_bytes()-produced
+        # naive values already are local wall-clock time (same reasoning as
+        # LocalFileDataSource.read_population's own comment).
         row = self._uploaded_row(source)
         binding = None if row is not None else self._configured_binding(source)
         if row is None and binding is None:
-            return self.table_source.read_population(source, version=version, columns=columns, filters=filters)
+            return self.table_source.read_population(
+                source, version=version, columns=columns, filters=filters, audit_timezone=audit_timezone,
+            )
 
         if filters:
             # Independent review 2026-09-24 item 7: a flat file cannot push a
@@ -208,10 +216,12 @@ class VolumeUploadAwareDataSource:
     def column_stats(
         self, source: str, *, version: str | None = None,
         amount_column: str | None = None, date_column: str | None = None,
+        audit_timezone: str | None = None,
     ) -> dict:
         if not self._is_flat_file(source):
             return self.table_source.column_stats(
                 source, version=version, amount_column=amount_column, date_column=date_column,
+                audit_timezone=audit_timezone,
             )
         v = version or self.resolve_version(source)
         amount = min_date = max_date = None

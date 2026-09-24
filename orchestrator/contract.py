@@ -96,6 +96,17 @@ def _coerce_boolean(series: pd.Series) -> tuple[pd.Series, pd.Index]:
 
 
 def _coerce_date(series: pd.Series) -> tuple[pd.Series, pd.Index]:
+    # No timezone handling belongs here (CLAUDE.md §0.5, NN14; independent
+    # test-gap audit #13/H9): validate_contract runs AFTER
+    # DataSourceAdapter.read_population has already returned -- and every
+    # adapter's read_population (orchestrator.adapters.datasource_uc.
+    # UCTableDataSource, orchestrator.adapters.datasource_volume_upload.
+    # VolumeUploadAwareDataSource, LocalFileDataSource above) is responsible
+    # for handing back a NAIVE column that already represents local
+    # wall-clock time in the contract's declared timezone (via
+    # orchestrator.timeutil.to_business_local) -- a genuinely tz-aware
+    # timestamp never reaches this coercer. `pd.to_datetime` on an
+    # already-naive input is a pure parse/no-op, exactly as before.
     coerced = pd.to_datetime(series, errors="coerce")
     bad = series.index[coerced.isna() & ~series.map(_is_missing)]
     return coerced, bad
@@ -256,7 +267,16 @@ class LocalFileDataSource:
         version: int | str,
         columns: list[str] | None = None,
         filters: dict[str, Any] | None = None,
+        audit_timezone: str | None = None,
     ) -> pd.DataFrame:
+        # `audit_timezone` is accepted (never rejected) for calling-convention
+        # parity with UCTableDataSource/VolumeUploadAwareDataSource -- a caller
+        # threading the contract's declared timezone (CLAUDE.md §0.5, NN14)
+        # uniformly through every DataSourceAdapter must not have to special-
+        # case the file-backed one. It is never USED here: a naive value read
+        # by pandas from a CSV/XLSX file already IS local wall-clock time by
+        # the ONE rule (orchestrator.timeutil.to_business_local's own
+        # docstring) -- there is no timezone to convert FROM.
         cfg = self._cfg(source)
         path = self._path(source)
         # N9: read the file's bytes ONCE, hash that buffer, and parse from the
@@ -285,7 +305,10 @@ class LocalFileDataSource:
         version: str | None = None,
         amount_column: str | None = None,
         date_column: str | None = None,
+        audit_timezone: str | None = None,
     ) -> dict:
+        # `audit_timezone` accepted for interface parity (see read_population's
+        # own comment) -- unused: a naive file-read date is already local.
         # A SEPARATE read (re-parsed from the file's bytes, same as row_count
         # above) rather than reusing the engine's own in-memory population --
         # this is the independent side of G6's amount/date reconciliation
