@@ -1901,6 +1901,30 @@ acceptance testing:
     `.gitlab-ci.yml`, a test-runner notebook, `docs/PORTING.md`, and a Genie Code runbook listing
     exactly which values and decisions remain.
 
+### Lifecycle design decisions (user, 2026-09-24; see `docs/specs/LIFECYCLE_design.md` LD1–LD20)
+
+- **LD1:** add one top-navigation entry, "Audit Lifecycle" → `/lifecycle` hub. This is the only change
+  to an existing screen, and it takes one layout-parity allow-list entry.
+- **LD11:** evidence text to a model is off by default everywhere. It may be switched on in this
+  development workspace for synthetic documents only. At the corporate workspace it stays off until
+  governance approves.
+- **LD6:** add the dependencies `pypdf`, `python-docx` and an explicit `requests` pin. Add them to the
+  lock and to the offline wheelhouse.
+- **All other recommendations are accepted as written in the spec (LD2–LD5, LD7–LD10, LD12–LD20).**
+  In particular:
+  - backend foundations L0/L1 may start before mockup approval, but no lifecycle UI is built before
+    it;
+  - the research loop is plain Python;
+  - three new run kinds: `design_assessment`, `reporting` and `evidence`;
+  - sensing runs on Jobs, everything else in the App;
+  - a `MODEL_RESEARCH` role;
+  - the scoring scale and design criteria are labelled placeholders ("analyst-set, pending
+    methodology");
+  - monitoring schedules are created paused, with a daily minimum and weekly recommended;
+  - ServiceNow submission requires approval, with self-approval labelled until P7;
+  - `/runs` and `/actions` stay fieldwork-only;
+  - lifecycle runs reuse `/run/<id>`.
+
 ### Further decisions from the user (2026-09-23)
 
 - **UI is the prototype's, exactly.** Every page matches `reference_app/src/platform/pages.py` and
