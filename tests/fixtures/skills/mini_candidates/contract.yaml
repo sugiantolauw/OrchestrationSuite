@@ -1,0 +1,36 @@
+timezone: Australia/Sydney
+sources:
+  claims:
+    format: csv
+    file: claims.csv
+    header_trim: true
+    entry_key: [Employee ID, Transaction Date, Vendor, Amount]
+    columns:
+      Employee ID:
+        type: integer
+        nullable: false
+      Transaction Date:
+        type: date
+        nullable: false
+      Amount:
+        type: number
+        nullable: false
+      Vendor:
+        type: string
+        nullable: false
+        trim_values: true
+  register:
+    format: csv
+    file: register.csv
+    header_trim: true
+    columns:
+      Employee ID:
+        type: integer
+        nullable: false
+      Transaction Date:
+        type: date
+        nullable: false
+      Vendor:
+        type: string
+        nullable: false
+        trim_values: true

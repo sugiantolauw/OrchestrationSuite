@@ -1,0 +1,35 @@
+# Minimal risk/control register for the mini test-fixture Skill (N10:
+# risk_control.yaml is a required Skill file). Not seeded from any real
+# catalogue -- this Skill exists only for orchestrator unit tests.
+controls:
+  - control_id: CTL-1
+    risk_id: RSK-1
+    category: Test
+    title: Mini control 1
+    tests: [T1]
+
+  - control_id: CTL-2
+    risk_id: RSK-2
+    category: Test
+    title: Mini control 2
+    tests: [T2]
+
+  - control_id: CTL-3
+    risk_id: RSK-3
+    category: Test
+    title: Mini control 3
+    tests: [T3]
+
+risks:
+  - risk_id: RSK-1
+    control_id: CTL-1
+    title: Mini risk 1
+    category: Test
+  - risk_id: RSK-2
+    control_id: CTL-2
+    title: Mini risk 2
+    category: Test
+  - risk_id: RSK-3
+    control_id: CTL-3
+    title: Mini risk 3
+    category: Test

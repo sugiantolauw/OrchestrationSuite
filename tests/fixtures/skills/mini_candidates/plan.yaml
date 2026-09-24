@@ -1,0 +1,54 @@
+populations:
+  claims_pop:
+    source: claims
+    filters:
+      - column: Transaction Date
+        op: between
+        value: {ref: audit_period}
+    amount_column: Amount
+    date_column: Transaction Date
+  register_pop:
+    source: register
+
+tests:
+  - test_id: T1
+    control_id: CTL-1
+    risk_id: RSK-1
+    assertion: operating
+    flag: RF_HV
+    primitive: threshold_exceedance
+    params:
+      population: claims_pop
+      column: Amount
+      limit: {threshold: hv_limit}
+      direction: above
+      flag: RF_HV
+      metrics:
+        hv_count: {kind: count}
+        hv_amount: {kind: sum, column: Amount, unit: AUD}
+
+  - test_id: T2
+    control_id: CTL-2
+    risk_id: RSK-2
+    assertion: operating
+    flag: RF_MISSING
+    primitive: anti_join_gap
+    params:
+      left_population: claims_pop
+      right_population: register_pop
+      left_keys: [Employee ID, Transaction Date, Vendor]
+      right_keys: [Employee ID, Transaction Date, Vendor]
+      mode: semi
+      flag: RF_MISSING
+      metrics:
+        missing_count: {kind: count}
+        missing_pct: {kind: pct_of_population, unit: "%"}
+        missing_amount: {kind: sum, column: Amount, unit: AUD}
+
+  - test_id: T3
+    control_id: CTL-3
+    risk_id: RSK-3
+    assertion: operating
+    not_testable:
+      reason: "no classification endpoint wired in P2a"
+      flags: [RF_T3_NotTested]

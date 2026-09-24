@@ -15,16 +15,15 @@
 # name absent from `table` behaves as "not in this item's table" (N-G3),
 # matching how a real per-item PLACEHOLDERS table is scoped.
 #
-# Two golden-set slots the design spec (§3.6) assigns to candidate rule C-2
-# ("a candidate duplicating a rule finding" / "a candidate on a zero-
-# exception test") are substituted here with two more validate_prose-level
-# rules (N-L1, N-S3): C-2 is enforced by orchestrator/narration/candidates.py
-# (P6_narration_design.md §12 WP N8), which does not exist yet and is out of
-# this work package's scope (this coordinator's task bounds WP N2 to
-# validate.py and tests/, and this harness runs cases through
-# validate_prose). The 10/20 split and the "every invalid case names its
-# rule id" shape are unchanged; see the WP N8 candidates test (T-C1/T-C2)
-# for C-2 coverage once that module is built.
+# Two of the 20 invalid cases exercise candidate rule C-2 (§5.1), not a
+# validate_prose rule: "a candidate duplicating a rule finding (no uncited
+# anchor)" and "a candidate on a zero-exception test" (G10). Each carries
+# `check: candidate` plus a `candidate`/`context` block instead of a bare
+# `text`/`table`; tests/test_g11_faithfulness.py runs those two through
+# orchestrator.narration.candidates._build_candidate_row (P6 WP N8) rather
+# than validate_prose, and asserts it returns None (dropped, never
+# repaired -- §5.1's own "Python-only drop" shape). Every other case's
+# shape, and the 10/20 split, are unchanged.
 
 cases:
   # ---------------------------------------------------------------------
@@ -370,36 +369,55 @@ cases:
       valid: false
       rule_ids: [N-D3]
 
-  - id: i19_over_length_cap
+  - id: i19_candidate_duplicates_a_rule_finding
     description: >
-      A recommendation over its 600-character cap. Substituted for the design
-      spec's candidate-duplication case (rule C-2), which belongs to WP N8's
-      not-yet-built candidates.py -- see the file header note.
-    field: recommendation
-    text: >-
-      Review this population for further audit evidence. Review this
-      population for further audit evidence. Review this population for
-      further audit evidence. Review this population for further audit
-      evidence. Review this population for further audit evidence. Review
-      this population for further audit evidence. Review this population
-      for further audit evidence. Review this population for further audit
-      evidence. Review this population for further audit evidence. Review
-      this population for further audit evidence. Review this population
-      for further audit evidence. Review this population for further audit
-      evidence. Review this population for further audit evidence.
-    table: {}
+      An AI-proposed candidate's only cited metric (hv_amount) is already
+      cited by an existing rule finding (T4.4's high-value-claims rule) --
+      no uncited anchor, so the candidate is dropped, never repaired
+      (§5.1's own C-2 anchor rule, "no duplicate of a rule finding").
+    check: candidate
+    candidate:
+      title: High Value Claims Amount At Risk
+      metrics_cited: [hv_amount]
+      proposed_severity: Low
+      severity_reason: This restates an amount the existing finding already covers.
+      rationale: No new anchor -- hv_amount is already cited by T4.4's own rule finding.
+      observation: This candidate identifies {money:hv_amount} at risk.
+      recommendation: No separate action -- already covered by the T4.4 finding.
+      management_questions: ["What review step currently catches a claim like this before payment?"]
+    context:
+      metrics:
+        hv_count: {unit: count, value: 38, test_id: T4_4}
+        hv_amount: {unit: AUD, value: 91442.83, test_id: T4_4}
+      rule_cited_metric_names: [hv_count, hv_amount]
+      test_results:
+        T4_4: {status: exception, exception_units: 38}
     expected:
       valid: false
-      rule_ids: [N-L1]
+      rule_ids: [C-2]
 
-  - id: i20_code_like_text
+  - id: i20_candidate_on_a_zero_exception_test
     description: >
-      Code-like text, not audit prose. Substituted for the design spec's
-      zero-exception-candidate case (rule C-2, checked by G10 in WP N8) --
-      see the file header note.
-    field: observation
-    text: Run SELECT * FROM claims WHERE receipt IS NULL to find these rows.
-    table: {}
+      An AI-proposed candidate anchored on a metric from a test with
+      exception_units == 0 -- a clean test can never seed a candidate,
+      the same C-2 anchor rule G10 relies on for "a clean dataset gives
+      zero candidates".
+    check: candidate
+    candidate:
+      title: Missing Receipt Amount At Risk
+      metrics_cited: [missing_receipt_amount]
+      proposed_severity: Low
+      severity_reason: This test raised no exceptions this run.
+      rationale: T4.1 has no exceptions this run, so there is nothing new to raise.
+      observation: This candidate identifies {money:missing_receipt_amount} at risk.
+      recommendation: No action -- this test's population is clean.
+      management_questions: ["What review step currently catches a claim like this before payment?"]
+    context:
+      metrics:
+        missing_receipt_amount: {unit: AUD, value: 0, test_id: T4_1}
+      rule_cited_metric_names: []
+      test_results:
+        T4_1: {status: pass, exception_units: 0}
     expected:
       valid: false
-      rule_ids: [N-S3]
+      rule_ids: [C-2]

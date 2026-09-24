@@ -1,0 +1,37 @@
+findings:
+  - id: T1
+    test_id: T1
+    title: High Value Claims
+    trigger: "hv_count > 0"
+    severity:
+      - when: "hv_count > thresholds.hv_high"
+        then: High
+      - else: Medium
+    metrics_cited: [hv_count, hv_amount]
+    monetary_basis: spend
+    observation: >
+      {hv_count} claims exceed the high-value threshold, totalling {hv_amount}.
+    recommendation: >
+      Review high-value claims for legitimacy.
+    management_questions:
+      - Why were these claims not flagged earlier?
+
+  - id: T2
+    test_id: T2
+    title: Claims Missing Register Match
+    trigger: "missing_count > 0"
+    severity:
+      - else: Low
+    # P6 WP N8 (tests/test_candidates.py): unlike the shared `mini` Skill,
+    # this rule deliberately leaves `missing_amount` UNCITED -- it is a real,
+    # non-null, additive-AUD metric on a test with exceptions (T2 has 2
+    # missing claims), so it is a genuine C-2 anchor for an AI-proposed
+    # candidate (§5.1). Every other T2 behaviour (trigger, severity,
+    # count/pct citation) is identical to `mini`'s own T2.
+    metrics_cited: [missing_count, missing_pct]
+    monetary_basis: none
+    observation: >
+      {missing_count} claims ({missing_pct}) have no matching register entry.
+    recommendation: >
+      Investigate unmatched claims.
+    management_questions: []

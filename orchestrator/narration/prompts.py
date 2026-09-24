@@ -32,15 +32,17 @@ DEFAULT_NARRATION_PROMPTS_ROOT = _REPO_ROOT / "orchestrator" / "prompts" / "narr
 SYSTEM_FILE = "system_common.md"
 REPAIR_FILE = "repair_user.md"
 
-# task -> its own user template file (§4.3's table). `find_candidates` is
-# N8's task (WP N7 leaves a clean hook, per the coordinator's instructions
-# for this WP) -- its template file already exists on disk (candidates_user.md,
-# merged ahead of this WP) but is deliberately left out of this map so N7's
-# runner can never accidentally call it.
+# task -> its own user template file (§4.3's table). `find_candidates`
+# (P6 WP N8, §5.1) is included: `orchestrator.narration.candidates` is the
+# only caller (through `orchestrator.narration.runner._generate_item`, the
+# same shared loop every task uses), so this map does not decide whether a
+# candidate call is ever made -- the `ai_proposed_findings_enabled` switch
+# does, in `orchestrator.nodes.narration.narrate`.
 TASK_USER_FILES: dict[str, str] = {
     "profile": "profile_user.md",
     "find": "finding_user.md",
     "find_synthesis": "synthesis_user.md",
+    "find_candidates": "candidates_user.md",
     "prioritise": "priority_user.md",
     "act": "remediation_user.md",
     "export_summary": "exec_summary_user.md",
