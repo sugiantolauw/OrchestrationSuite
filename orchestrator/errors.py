@@ -269,6 +269,156 @@ class PromotionRequirementsNotMet(Exception):
         super().__init__(f"cannot publish: requirements not met: {', '.join(self.missing)}")
 
 
+class RunNotAwaitingSignoff(Exception):
+    """P6 WP N9 (docs/specs/P6_narration_design.md §5.2, §5.5, §6.4): a
+    candidate decision, a narrative edit or a regenerate request was made
+    against a run that is not currently `awaiting_signoff` -- the only
+    status any of the three is meaningful against (before it, there is
+    nothing to decide or edit yet; after it, sign-off has already frozen
+    the narration for export)."""
+
+    def __init__(self, run_id: str, status: str):
+        self.run_id = run_id
+        self.status = status
+        super().__init__(
+            f"run {run_id!r} is {status!r}, not 'awaiting_signoff' -- this action is only valid then"
+        )
+
+
+class CandidateNotFound(Exception):
+    def __init__(self, candidate_id: str):
+        self.candidate_id = candidate_id
+        super().__init__(f"AI-proposed finding candidate not found: {candidate_id!r}")
+
+
+class CandidateAlreadyDecided(Exception):
+    """§5.2: the conditional `decide_candidate_cas` UPDATE affected zero
+    rows because the candidate was already accepted or rejected -- by this
+    same decide_candidate call racing another, or by an earlier one."""
+
+    def __init__(self, candidate_id: str, status: str):
+        self.candidate_id = candidate_id
+        self.status = status
+        super().__init__(f"candidate {candidate_id!r} was already decided (status={status!r})")
+
+
+class CandidateSuperseded(Exception):
+    """§5.2: the conditional `decide_candidate_cas` UPDATE affected zero
+    rows because a racing `regenerate_narration` superseded this candidate
+    first (T-C6) -- a later generation's candidates replace it."""
+
+    def __init__(self, candidate_id: str):
+        self.candidate_id = candidate_id
+        super().__init__(
+            f"candidate {candidate_id!r} was superseded by a narration regeneration before it "
+            f"could be decided"
+        )
+
+
+class CandidateSeverityRequired(Exception):
+    """§5.2/§14 Answers Q4: accepting an AI-proposed finding requires the
+    auditor's own severity choice -- the model's `proposed_severity` is
+    shown, never applied silently."""
+
+    def __init__(self, candidate_id: str):
+        self.candidate_id = candidate_id
+        super().__init__(f"candidate {candidate_id!r}: decided_severity is required to accept")
+
+
+class CandidateReasonRequired(Exception):
+    """§5.2: "reason is required for a reject" -- a rejected candidate is
+    kept, never deleted (CLAUDE.md §3 NN2 amendment), and the reason is
+    what makes that record meaningful."""
+
+    def __init__(self, candidate_id: str):
+        self.candidate_id = candidate_id
+        super().__init__(f"candidate {candidate_id!r}: a reason is required to reject")
+
+
+class CandidatesUndecided(Exception):
+    """§5.2: "Sign-off is refused while any current-generation row is
+    candidate" -- the UI's own message (P6_narration_design.md §7 UI-3) is
+    reproduced verbatim in this exception so the service layer never has to
+    re-word it."""
+
+    def __init__(self, run_id: str, candidate_ids: list[str]):
+        self.run_id = run_id
+        self.candidate_ids = list(candidate_ids)
+        super().__init__("decide every AI-proposed finding before sign-off")
+
+
+class NarrativeNotFound(Exception):
+    def __init__(self, narrative_id: str):
+        self.narrative_id = narrative_id
+        super().__init__(f"narrative not found: {narrative_id!r}")
+
+
+class NarrativeTargetNotFound(Exception):
+    """WP N9's own `edit_narrative`: the finding/candidate/theme/chart a
+    narrative row points at (`target_kind`/`target_id`) no longer resolves
+    against this run's persisted findings/candidates/themes -- there is no
+    placeholder table to validate a human edit against."""
+
+    def __init__(self, narrative_id: str, target_kind: str, target_id: str):
+        self.narrative_id = narrative_id
+        self.target_kind = target_kind
+        self.target_id = target_id
+        super().__init__(
+            f"narrative {narrative_id!r}: its target ({target_kind}={target_id!r}) was not found "
+            f"in this run's current findings/candidates/themes"
+        )
+
+
+class NarrativeEditNotAllowed(Exception):
+    """§6.4: "allowed only while awaiting_signoff ... After sign-off, no
+    edits are possible" -- raised for either side of that window."""
+
+    def __init__(self, narrative_id: str, status: str):
+        self.narrative_id = narrative_id
+        self.status = status
+        super().__init__(
+            f"narrative {narrative_id!r}: edits are only allowed while the run is "
+            f"'awaiting_signoff' (current status: {status!r})"
+        )
+
+
+class NarrativeEditRejected(Exception):
+    """CLAUDE.md §14 Answers Q3: "If a number doesn't match, the edit is
+    refused with a message naming the mismatched number." `violations` is
+    every `orchestrator.narration.validate.Violation` the edit failed,
+    serialised as `{rule_id, message, text}` -- the N-H1 violation's own
+    message already names the exact mismatched substring."""
+
+    def __init__(self, narrative_id: str, violations: list[dict]):
+        self.narrative_id = narrative_id
+        self.violations = list(violations)
+        detail = "; ".join(f"{v['rule_id']}: {v['message']}" for v in self.violations)
+        super().__init__(f"narrative {narrative_id!r}: edit rejected -- {detail}")
+
+
+class NarrationDisabled(Exception):
+    def __init__(self, run_id: str):
+        self.run_id = run_id
+        super().__init__(f"run {run_id!r}: narration is disabled (NARRATION_ENABLED is off)")
+
+
+class NarrationNodeUnavailable(Exception):
+    """A `regenerate_narration` precondition that has nothing to do with
+    the auditor's request: this run_kind/phase's node sequence (CLAUDE.md
+    §4.2) has no `narrate` node to restart at. Distinct from
+    `NarrationDisabled` so a genuine configuration/deployment gap is never
+    reported to an auditor as if they had simply left narration off."""
+
+    def __init__(self, run_id: str, run_kind: str, phase: str):
+        self.run_id = run_id
+        self.run_kind = run_kind
+        self.phase = phase
+        super().__init__(
+            f"run {run_id!r}: no 'narrate' node is scheduled for run_kind={run_kind!r} "
+            f"phase={phase!r} -- narration regeneration is unavailable"
+        )
+
+
 class MissingSeverityProvenance(Exception):
     """CLAUDE.md §0.4/G8, P2/P3 gate review item 3: a finding whose severity
     provenance (analyst_set_severity / severity_basis) was never persisted.

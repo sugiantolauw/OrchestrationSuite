@@ -24,6 +24,10 @@ Public API (signatures kept stable for the UI to import against):
     confirm_plan(ctx, run_id, actor) -> RunState
     sign_off(ctx, run_id, actor) -> RunState
     resume_run(ctx, run_id, actor) -> RunState
+    decide_candidate(ctx, run_id, candidate_id, *, decision, reason=None,
+                      decided_severity=None, actor) -> dict   (P6 WP N9)
+    edit_narrative(ctx, run_id, narrative_id, new_text, *, actor) -> dict   (P6 WP N9)
+    regenerate_narration(ctx, run_id, actor) -> RunState   (P6 WP N9)
     get_run_payload(ctx, run_id) -> dict
     get_run_frames(ctx, run_id) -> dict[str, pandas.DataFrame]
     get_export(ctx, run_id, kind) -> tuple[str, bytes]
@@ -52,6 +56,7 @@ owned by the Unity Catalog work) against Unity Catalog, surfaced as
 
 from __future__ import annotations
 
+import difflib
 import functools
 import hashlib
 import json
@@ -74,12 +79,24 @@ from orchestrator.adapters.persistence_local import LocalPersistence
 from orchestrator.config import Settings, load_settings
 from orchestrator.contract import ContractViolation, LocalFileDataSource
 from orchestrator.errors import (
+    CandidateAlreadyDecided,
+    CandidateNotFound,
+    CandidateReasonRequired,
+    CandidateSeverityRequired,
+    CandidateSuperseded,
     ConfigError,
     ExplorerEditRejected,
     ExplorerInputError,
     ExplorerPlanNotConfirmable,
+    NarrationDisabled,
+    NarrationNodeUnavailable,
+    NarrativeEditNotAllowed,
+    NarrativeEditRejected,
+    NarrativeNotFound,
+    NarrativeTargetNotFound,
     PlanIntegrityError,
     PromotionRequirementsNotMet,
+    RunNotAwaitingSignoff,
     RunNotReady,
 )
 from orchestrator.executor import ThreadExecutor
@@ -1818,6 +1835,342 @@ def sign_off(ctx: AppContext, run_id: str, actor: str) -> RunState:
     return state
 
 
+# ── P6 WP N9: AI-proposed finding decisions, narrative edits and narration
+# regenerate (docs/specs/P6_narration_design.md §5.2, §5.5, §6.4) ───────────
+
+
+def _service_trace_event_id(run_id: str, *parts: str) -> str:
+    """Unlike `runs_module._emit` (keyed on `run_id:event_type:state_version`,
+    correct for the ONE transition-triggered event a RunState change ever
+    produces), several `decide_candidate`/`edit_narrative` calls can legally
+    happen back-to-back with `state_version` unchanged -- neither call
+    touches RunState. Keying on the decided/edited row's own id instead
+    (never state_version) keeps every one of those a distinct trace_events
+    row instead of the second silently no-op'ing into `append_trace_event`'s
+    INSERT OR IGNORE on a colliding event_id."""
+    return hashlib.sha256(":".join((run_id, *parts)).encode("utf-8")).hexdigest()[:32]
+
+
+def _emit_service_event(persistence, state: RunState, *, event_id: str, event_type: str, actor: str, message: str, now: str) -> None:
+    persistence.append_trace_event(
+        {
+            "event_id": event_id,
+            "run_id": state.run_id,
+            "engagement_id": state.engagement_id,
+            "event_type": event_type,
+            "event_time": now,
+            "stage": state.phase,
+            "status": state.status,
+            "message": message,
+            "duration_s": None,
+            "node_name": None,
+            "execution_key": None,
+            "actor": actor,
+            "state_version": state.state_version,
+        }
+    )
+
+
+_CANDIDATE_DECISIONS = ("accepted", "rejected")
+
+
+def decide_candidate(
+    ctx: AppContext,
+    run_id: str,
+    candidate_id: str,
+    *,
+    decision: str,
+    reason: str | None = None,
+    decided_severity: str | None = None,
+    actor: str,
+) -> dict:
+    """§5.2: `decide_candidate(ctx, run_id, candidate_id, *, decision, reason,
+    actor)`, with the auditor's own `decided_severity` (§14 Answers Q4 -- the
+    model's `proposed_severity` is shown, never applied silently; both are
+    stored). The single-winner guarantee is `decide_candidate_cas`'s own
+    conditional UPDATE (WHERE candidate_status='candidate') -- this function
+    turns a lost race into the right exception rather than a silent no-op:
+    `CandidateAlreadyDecided` (another decide_candidate won first) or
+    `CandidateSuperseded` (a racing `regenerate_narration` won first, T-C6)."""
+    if decision not in _CANDIDATE_DECISIONS:
+        raise ValueError(f"decision must be one of {_CANDIDATE_DECISIONS}, got {decision!r}")
+    state = ctx.persistence.load_state(run_id)
+    if state.status != "awaiting_signoff":
+        raise RunNotAwaitingSignoff(run_id, state.status)
+    if decision == "accepted" and not decided_severity:
+        raise CandidateSeverityRequired(candidate_id)
+    if decision == "rejected" and not (reason and reason.strip()):
+        raise CandidateReasonRequired(candidate_id)
+
+    now = ctx.clock()
+    won = ctx.persistence.decide_candidate_cas(
+        candidate_id,
+        decision=decision,
+        reason=reason,
+        decided_severity=decided_severity if decision == "accepted" else None,
+        actor=actor,
+        now=now,
+    )
+    current = next(
+        (c for c in ctx.persistence.list_candidates(run_id) if c["candidate_id"] == candidate_id), None
+    )
+    if current is None:
+        raise CandidateNotFound(candidate_id)
+    if not won:
+        if current["candidate_status"] == "superseded":
+            raise CandidateSuperseded(candidate_id)
+        raise CandidateAlreadyDecided(candidate_id, current["candidate_status"])
+
+    message = f"{current['rule_id']}: {decision} by {actor}"
+    if reason:
+        message += f" — {reason}"
+    event_type = "candidate_accepted" if decision == "accepted" else "candidate_rejected"
+    _emit_service_event(
+        ctx.persistence, state,
+        event_id=_service_trace_event_id(run_id, candidate_id, event_type),
+        event_type=event_type, actor=actor, message=message, now=now,
+    )
+    return current
+
+
+# `narratives.field` (§6.1: "observation|recommendation|management_questions|
+# title|summary|root_cause|review_observations|rationale|remediation|
+# exec_summary|caption|profile") -> the validator's own field taxonomy
+# (`orchestrator.narration.lexicon.FIELD_LENGTH_CAPS`/`OBSERVATION_TYPE_
+# FIELDS`/`TITLE_FIELDS`/`RATIONALE_FIELD`) -- the SAME mapping
+# `orchestrator.narration.runner`'s per-task `narrate_*` functions apply when
+# they first validate the model's own output (e.g. `narrate_remediation`
+# reuses the "recommendation" field's rules, its own comment says so), kept
+# here rather than imported so this module never has to import runner.py's
+# node-scoped internals for one small lookup table.
+_VALIDATOR_FIELD_FOR: dict[tuple[str, str], str] = {
+    ("finding", "observation"): "observation",
+    ("finding", "recommendation"): "recommendation",
+    ("finding", "management_questions"): "question",
+    ("finding", "rationale"): "rationale",
+    ("finding", "remediation"): "recommendation",
+    ("candidate", "observation"): "observation",
+    ("candidate", "recommendation"): "recommendation",
+    ("candidate", "management_questions"): "question",
+    ("candidate", "title"): "candidate_title",
+    ("candidate", "rationale"): "rationale",
+    ("theme", "title"): "theme_title",
+    ("theme", "summary"): "theme_summary",
+    ("theme", "root_cause"): "root_cause",
+    ("theme", "review_observations"): "review_observation",
+    ("run", "exec_summary"): "exec_paragraph",
+    ("chart", "caption"): "caption",
+    ("profile", "profile"): "profile_paragraph",
+}
+# §3.2's list-shaped fields -- `narratives.template_text` for these holds a
+# JSON array (`orchestrator.narration.runner._persist`'s `list_text` path),
+# so an edit's `new_text` may be either a single replacement string (treated
+# as the whole list becoming that one item) or the full list.
+_LIST_NARRATIVE_FIELDS = frozenset({"management_questions", "review_observations", "exec_summary", "profile"})
+
+
+def _metrics_placeholder_table(names, metrics: dict[str, dict]):
+    from orchestrator.narration.placeholders import PlaceholderEntry, class_for_unit
+
+    table = {}
+    for name in names:
+        row = metrics.get(name)
+        if row is None or row.get("value") is None:
+            continue
+        unit = row.get("unit")
+        table[name] = PlaceholderEntry(
+            name=name, unit=unit, value=row["value"], source_field=f"run_metrics.{name}",
+            meaning=f"{class_for_unit(unit)} metric, unit {unit}",
+        )
+    return table
+
+
+def _narrative_table(ctx: AppContext, state: RunState, row: dict) -> dict:
+    """Rebuilds the SAME `{name: PlaceholderEntry}` table
+    `orchestrator.narration.runner` built when this narrative was first
+    generated (§3.2) -- from this run's CURRENT persisted findings/
+    candidates/themes/metrics, never re-run through a model. This is what
+    `validate_human_edit`'s N-H1 check (a typed number must equal the
+    rendering of a metric the item cites) validates an edit against."""
+    from orchestrator.narration.payloads import build_finding_table, build_profile_payload, build_theme_table
+    from orchestrator.narration.run_values import run_values
+
+    target_kind = row["target_kind"]
+    target_id = row["target_id"]
+    period = tuple(state.audit_period) if state.audit_period else None
+
+    if target_kind == "finding":
+        finding = next(
+            (f for f in ctx.persistence.list_findings(state.run_id) if f["finding_id"] == target_id), None
+        )
+        if finding is None:
+            raise NarrativeTargetNotFound(row["narrative_id"], target_kind, target_id)
+        skill = resolve_run_skill(ctx, state)
+        return build_finding_table(finding, skill=skill, period=period)
+    if target_kind == "candidate":
+        candidate = next(
+            (c for c in ctx.persistence.list_candidates(state.run_id) if c["candidate_id"] == target_id), None
+        )
+        if candidate is None:
+            raise NarrativeTargetNotFound(row["narrative_id"], target_kind, target_id)
+        metrics = ctx.persistence.get_run_metrics(state.run_id)
+        return _metrics_placeholder_table(candidate.get("metrics_cited") or [], metrics)
+    if target_kind == "theme":
+        theme = next(
+            (t for t in ctx.persistence.list_themes(state.run_id) if t["theme_id"] == target_id), None
+        )
+        if theme is None:
+            raise NarrativeTargetNotFound(row["narrative_id"], target_kind, target_id)
+        findings_by_id = {f["finding_id"]: f for f in ctx.persistence.list_findings(state.run_id)}
+        members = [findings_by_id[fid] for fid in theme.get("finding_ids", []) if fid in findings_by_id]
+        skill = resolve_run_skill(ctx, state)
+        return build_theme_table(members, skill=skill)
+    if target_kind == "run":
+        findings = ctx.persistence.list_findings(state.run_id)
+        metrics = ctx.persistence.get_run_metrics(state.run_id)
+        return run_values(state, findings, metrics)
+    if target_kind == "profile":
+        _, table = build_profile_payload(state)
+        return table
+    if target_kind == "chart":
+        # A chart's own metric_names (the caption's original, narrower
+        # table) live only in the `narrate` node's own in-memory chart specs
+        # (orchestrator.nodes.narration._chart_specs), not in anything
+        # persisted -- every run metric is offered instead. This never
+        # widens what an edit may claim as true (N-H1 only checks that a
+        # typed number equals SOME metric's rendered value, never that it
+        # was the metric the original caption cited), and G11's own
+        # per-task coverage requirement (N-C1) is never applied to an edit.
+        metrics = ctx.persistence.get_run_metrics(state.run_id)
+        return _metrics_placeholder_table(list(metrics), metrics)
+    raise NarrativeTargetNotFound(row["narrative_id"], target_kind, target_id)
+
+
+def _canonical_json_compact(value) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def edit_narrative(ctx: AppContext, run_id: str, narrative_id: str, new_text, *, actor: str) -> dict:
+    """§6.4 / CLAUDE.md §14 Answers Q3 (amended): an auditor may retype a
+    model-written (or fallback) narrative field. Every typed number must
+    equal the DISPLAYED rendering of a metric this item's own placeholder
+    table carries (`validate_human_edit`, N-H1) -- every other §3.3-§3.4
+    rule still applies (vague language, causation/policy language, length
+    caps, ...). Allowed only while `awaiting_signoff` (§6.4: "After
+    sign-off, no edits are possible"). Writes the G14 `narrative_edits` row
+    BEFORE the current text is upserted, never after, so a crash between the
+    two can never leave an edit applied but unrecorded."""
+    from orchestrator.narration.placeholders import render, scan_placeholders
+    from orchestrator.narration.validate import validate_human_edit
+
+    state = ctx.persistence.load_state(run_id)
+    if state.status != "awaiting_signoff":
+        raise NarrativeEditNotAllowed(narrative_id, state.status)
+
+    row = next((r for r in ctx.persistence.get_narratives(run_id) if r["narrative_id"] == narrative_id), None)
+    if row is None:
+        raise NarrativeNotFound(narrative_id)
+
+    field = row["field"]
+    validator_field = _VALIDATOR_FIELD_FOR.get((row["target_kind"], field))
+    if validator_field is None:
+        raise NarrativeTargetNotFound(narrative_id, row["target_kind"], field)
+
+    table = _narrative_table(ctx, state, row)
+
+    is_list = field in _LIST_NARRATIVE_FIELDS
+    if is_list:
+        items = list(new_text) if not isinstance(new_text, str) else [new_text]
+    else:
+        if not isinstance(new_text, str):
+            raise ValueError(f"narrative {narrative_id!r} field {field!r} takes a single string, not {type(new_text)!r}")
+        items = [new_text]
+
+    violations: list = []
+    for item in items:
+        result = validate_human_edit(item, table, field=validator_field)
+        violations.extend(result.violations)
+    if violations:
+        raise NarrativeEditRejected(
+            narrative_id, [{"rule_id": v.rule_id, "message": v.message, "text": v.text} for v in violations]
+        )
+    for item in items:
+        render(item, table)  # defensive: validate_human_edit must guarantee this succeeds (CLAUDE.md NN14)
+
+    used: set[str] = set()
+    for item in items:
+        for span in scan_placeholders(item):
+            if span.valid_syntax and span.name in table:
+                used.add(span.name)
+    sources = [
+        {"placeholder": f"{{{table[n].cls}:{n}}}", "source_field": table[n].source_field, "unit": table[n].unit}
+        for n in sorted(used)
+    ]
+    template_text = _canonical_json_compact(items) if is_list else items[0]
+
+    now = ctx.clock()
+    new_version = int(row["version"]) + 1
+    before_text = row.get("template_text")
+    diff = "\n".join(
+        difflib.unified_diff(
+            (before_text or "").splitlines(keepends=True),
+            (template_text or "").splitlines(keepends=True),
+            lineterm="",
+        )
+    )
+    edit_id = hashlib.sha256(f"{narrative_id}|{new_version}".encode("utf-8")).hexdigest()[:32]
+    ctx.persistence.append_narrative_edit(
+        {
+            "edit_id": edit_id, "narrative_id": narrative_id, "run_id": run_id, "version": new_version,
+            "origin": "human_edit", "action": "human_edit", "actor": actor, "at": now,
+            "before_text": before_text, "after_text": template_text, "diff": diff,
+            "reason": None, "call_id": None,
+        }
+    )
+    new_row = {
+        "narrative_id": narrative_id, "run_id": run_id, "engagement_id": row.get("engagement_id"),
+        "target_kind": row["target_kind"], "target_id": row["target_id"], "field": field,
+        "version": new_version, "generation": row.get("generation", 0), "origin": "human_edit",
+        "template_text": template_text, "sources": sources, "call_ids": [],
+        "served_model_version": None, "violations": None, "updated_by": actor, "updated_at": now,
+    }
+    ctx.persistence.upsert_narrative(new_row)
+
+    _emit_service_event(
+        ctx.persistence, state,
+        event_id=_service_trace_event_id(run_id, narrative_id, str(new_version), "narrative_edited"),
+        event_type="narrative_edited", actor=actor,
+        message=f"{narrative_id} ({row['target_kind']}.{field}) edited by {actor} (v{new_version})", now=now,
+    )
+    return new_row
+
+
+def regenerate_narration(ctx: AppContext, run_id: str, actor: str) -> RunState:
+    """§5.5: re-runs only `narrate` and `act` (via `transition(restart_at_
+    index=...)`, orchestrator.status/orchestrator.runs.regenerate_narration).
+    Rule findings, their numbers and their severities are untouched -- only
+    `find`/`prioritise` decide those, and neither runs again. Requires
+    `NARRATION_ENABLED` and the run to be `awaiting_signoff`."""
+    if not getattr(ctx.settings, "narration_enabled", False):
+        raise NarrationDisabled(run_id)
+    state = ctx.persistence.load_state(run_id)
+    if state.status != "awaiting_signoff":
+        raise RunNotAwaitingSignoff(run_id, state.status)
+
+    node_names = [name for name, _ in NODES_FOR.get(state.run_kind, {}).get(state.phase, [])]
+    try:
+        narrate_index = node_names.index("narrate")
+    except ValueError:
+        raise NarrationNodeUnavailable(run_id, state.run_kind, state.phase)
+
+    new_state = runs_module.regenerate_narration(
+        ctx.persistence, run_id, actor=actor, now=ctx.clock(), narrate_node_index=narrate_index,
+    )
+    if ctx.executor is not None:
+        ctx.executor.start(run_id, new_state.phase)
+    return new_state
+
+
 def resume_run(ctx: AppContext, run_id: str, actor: str) -> RunState:
     current_state = ctx.persistence.load_state(run_id)
     fingerprint = build_run_fingerprint(ctx, current_state)
@@ -1855,6 +2208,21 @@ def get_run_payload(ctx: AppContext, run_id: str) -> dict:
     exposure_metric = metrics.get("run_exposure_headline")
     approved_not_spent_metric = metrics.get("run_approved_not_spent_total")
 
+    # P6 §5.3: "between a sign-off that accepted at least one candidate and
+    # `finalise` completing, get_run_payload returns exposure.pending_
+    # recompute = true" -- so the UI can show "—" rather than a headline
+    # that is about to change under it (CLAUDE.md §11 "'—' replaces a
+    # fabricated '$0'"). True exactly while an accepted candidate has not
+    # yet been copied into `findings` (origin='ai_proposed', WP N10's
+    # `finalise`) -- never true before sign-off, because a candidate cannot
+    # be 'accepted' before then (decide_candidate requires awaiting_signoff).
+    pending_recompute = False
+    if state.signoff is not None:
+        accepted_ids = {c["candidate_id"] for c in ctx.persistence.list_candidates(run_id) if c["candidate_status"] == "accepted"}
+        if accepted_ids:
+            finalised_ids = {f["candidate_id"] for f in findings if f.get("origin") == "ai_proposed" and f.get("candidate_id")}
+            pending_recompute = bool(accepted_ids - finalised_ids)
+
     return {
         "run_id": run_id,
         "status": state.status,
@@ -1875,6 +2243,7 @@ def get_run_payload(ctx: AppContext, run_id: str) -> dict:
             "label": (exposure_metric.get("source_ref") or {}).get("label") if exposure_metric else None,
             "sources": (exposure_metric.get("source_ref") or {}).get("sources") if exposure_metric else None,
             "approved_not_spent_total": approved_not_spent_metric["value"] if approved_not_spent_metric else None,
+            "pending_recompute": pending_recompute,
         },
     }
 
