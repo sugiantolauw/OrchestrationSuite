@@ -25,7 +25,7 @@ For each of the 8 sources declared in skills/tne_exco/contract.yaml's `sources` 
 Usage:
     set -a; source .env; set +a
     python scripts/load_tne_sources_to_uc.py
-    python scripts/load_tne_sources_to_uc.py --catalog orchestrationsuite --schema tne_source --volume raw
+    python scripts/load_tne_sources_to_uc.py --catalog <your catalog> --schema <your source schema> --volume raw
 """
 
 from __future__ import annotations
@@ -116,7 +116,7 @@ def _rows_from_result(resp) -> list[list]:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--catalog", default=os.environ.get("DBX_CATALOG"))
-    ap.add_argument("--schema", default=os.environ.get("DBX_TNE_SCHEMA", "tne_source"))
+    ap.add_argument("--schema", default=os.environ.get("DBX_TNE_SCHEMA"))
     ap.add_argument("--volume", default=os.environ.get("DBX_TNE_VOLUME", "raw"))
     ap.add_argument(
         "--warehouse-http-path", default=os.environ.get("DBX_WAREHOUSE_HTTP_PATH")
@@ -125,6 +125,8 @@ def main() -> None:
 
     if not args.catalog:
         raise SystemExit("--catalog or DBX_CATALOG is required")
+    if not args.schema:
+        raise SystemExit("--schema or DBX_TNE_SCHEMA is required (no hardcoded default, CLAUDE.md NN16)")
     if not args.warehouse_http_path:
         raise SystemExit("--warehouse-http-path or DBX_WAREHOUSE_HTTP_PATH is required")
 

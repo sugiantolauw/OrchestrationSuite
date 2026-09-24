@@ -15,7 +15,8 @@ What it does, in order (safe to re-run):
      `sql-warehouse` resource with CAN_USE (idempotent: re-running updates
      the existing App's resources rather than erroring).
   5. Grants the App's service principal: USE CATALOG on the catalog;
-     USE SCHEMA + SELECT on <catalog>.tne_source; USE SCHEMA + SELECT +
+     USE SCHEMA + SELECT on each schema named by DBX_SOURCE_SCHEMAS
+     (.env.example); USE SCHEMA + SELECT +
      MODIFY + CREATE TABLE on <catalog>.<DBX_SCHEMA>; READ VOLUME +
      WRITE VOLUME on the exports Volume (creating <catalog>.<DBX_SCHEMA>.files
      first if DBX_VOLUME points at it and it does not exist yet); CAN_MANAGE
@@ -35,6 +36,7 @@ check configuration before spending a real deploy.
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import subprocess
 import sys
@@ -216,7 +218,9 @@ def _ensure_volume(w, catalog: str, schema: str, volume: str) -> None:
     print(f"Created managed volume {full_name!r}.")
 
 
-def _grant_all(w, *, catalog: str, schema: str, principal: str, dbx_volume: str | None) -> None:
+def _grant_all(
+    w, *, catalog: str, schema: str, principal: str, dbx_volume: str | None, source_schemas: list[str],
+) -> None:
     from databricks.sdk.service.catalog import PermissionsChange, Privilege, SecurableType
 
     def grant(securable_type: SecurableType, full_name: str, privileges: list[Privilege]) -> None:
@@ -227,7 +231,8 @@ def _grant_all(w, *, catalog: str, schema: str, principal: str, dbx_volume: str 
         print(f"Granted {[p.value for p in privileges]} on {full_name} to {principal}")
 
     grant(SecurableType.CATALOG, catalog, [Privilege.USE_CATALOG])
-    grant(SecurableType.SCHEMA, f"{catalog}.tne_source", [Privilege.USE_SCHEMA, Privilege.SELECT])
+    for source_schema in source_schemas:
+        grant(SecurableType.SCHEMA, source_schema, [Privilege.USE_SCHEMA, Privilege.SELECT])
     grant(
         SecurableType.SCHEMA, f"{catalog}.{schema}",
         [Privilege.USE_SCHEMA, Privilege.SELECT, Privilege.MODIFY, Privilege.CREATE_TABLE],
@@ -297,6 +302,17 @@ def main() -> None:
         raise SystemExit("DBX_APP_NAME is not set (env or --app-name).")
     settings.require("catalog", "schema", "host")
 
+    # CLAUDE.md §3 non-negotiable 16: the source schema(s) the App's SP reads
+    # from (e.g. the Skill's raw source tables) are a portability concern
+    # like any other -- this used to hardcode a specific T&E source schema
+    # name as a literal (independent review 2026-09-24). DBX_SOURCE_SCHEMAS
+    # is comma-separated fully-qualified
+    # `catalog.schema` names (documented in .env.example); no default names
+    # any schema, so an unset value grants nothing beyond the run schema
+    # itself rather than guessing at a name that may not exist in another
+    # workspace.
+    source_schemas = [s.strip() for s in (os.environ.get("DBX_SOURCE_SCHEMAS") or "").split(",") if s.strip()]
+
     code_revision = _git_head(REPO_ROOT) or "unknown"
 
     env_vars = {
@@ -363,7 +379,11 @@ def main() -> None:
         if args.dry_run:
             print("\n--dry-run: not touching the workspace. Grants that would be issued:")
             print(f"  USE CATALOG on {settings.catalog}")
-            print(f"  USE SCHEMA, SELECT on {settings.catalog}.tne_source")
+            if source_schemas:
+                for source_schema in source_schemas:
+                    print(f"  USE SCHEMA, SELECT on {source_schema}")
+            else:
+                print("  (no DBX_SOURCE_SCHEMAS configured — no source-schema grants)")
             print(f"  USE SCHEMA, SELECT, MODIFY, CREATE TABLE on {settings.catalog}.{settings.schema}")
             if settings.volume:
                 print(f"  READ VOLUME, WRITE VOLUME on the volume named by {settings.volume}")
@@ -387,7 +407,10 @@ def main() -> None:
         if not principal:
             raise SystemExit(f"App {app_name!r} has no service principal yet — try again once it is provisioned.")
 
-        _grant_all(w, catalog=settings.catalog, schema=settings.schema, principal=principal, dbx_volume=settings.volume)
+        _grant_all(
+            w, catalog=settings.catalog, schema=settings.schema, principal=principal,
+            dbx_volume=settings.volume, source_schemas=source_schemas,
+        )
         _ensure_mlflow_experiment_permissions(w, env_vars["MLFLOW_EXPERIMENT_PATH"], principal)
 
         from databricks.sdk.service.apps import AppDeployment
