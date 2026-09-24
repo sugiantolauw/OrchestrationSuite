@@ -115,7 +115,7 @@ def test_attendee_grain_population_collapses_to_one_headline_entry(local_persist
     # all share the same entry_key (Employee ID, Transaction Date, Vendor,
     # Entry Amount), only __row_key (one per attendee) differs. The headline
     # must count this once, not three times.
-    def read_population(source, *, version=None):
+    def read_population(source, *, version=None, **_):
         assert source == "claims"
         return pd.DataFrame({
             "__row_key": ["a1", "a2", "a3"],
@@ -171,7 +171,7 @@ def test_duplicate_lines_excess_only_counts_lines_beyond_the_first(local_persist
     # at-risk PORTION counts: the line(s) beyond the first, deterministically
     # ordered (read/row order -- "d1" before "d2"). d1 is not at risk (it is
     # the original claim); d2 is the double payment.
-    def read_population(source, *, version=None):
+    def read_population(source, *, version=None, **_):
         assert source == "claims"
         return pd.DataFrame({
             "__row_key": ["d1", "d2"],
@@ -222,7 +222,7 @@ def test_split_detection_group_of_different_amounts_is_not_collapsed(local_persi
     # Three DIFFERENT-amount lines clustered into one detected split group
     # (split_detection's group_id shape) -- each has a distinct entry_key
     # (Amount differs) and is its own headline entry.
-    def read_population(source, *, version=None):
+    def read_population(source, *, version=None, **_):
         assert source == "claims"
         return pd.DataFrame({
             "__row_key": ["c1", "c2", "c3"],
@@ -326,7 +326,7 @@ def test_approved_not_spent_finding_never_enters_the_headline(local_persistence,
     # not "flagged spend". Reported separately (run_approved_not_spent_total),
     # never summed into the headline even though it has a real cited amount
     # metric and real flagged rows.
-    def read_population(source, *, version=None):
+    def read_population(source, *, version=None, **_):
         return pd.DataFrame({
             "__row_key": ["r1"], "Employee ID": [3], "Transaction Date": ["2026-01-20"],
             "Vendor": ["VendorZ"], "Amount": [2500.0],
@@ -359,7 +359,7 @@ def test_approved_not_spent_finding_never_enters_the_headline(local_persistence,
 
 
 def test_overlapping_findings_never_double_count_the_headline(local_persistence, tmp_path):
-    def read_population(source, *, version=None):
+    def read_population(source, *, version=None, **_):
         return pd.DataFrame({
             "__row_key": ["r1", "r2", "r3"],
             "Employee ID": [4, 4, 4],
@@ -410,7 +410,7 @@ def test_overlapping_findings_never_double_count_the_headline(local_persistence,
 
 
 def test_null_amount_raises_contract_violation_never_defaults_to_zero(local_persistence, tmp_path):
-    def read_population(source, *, version=None):
+    def read_population(source, *, version=None, **_):
         return pd.DataFrame({
             "__row_key": ["r1"], "Employee ID": [5], "Transaction Date": ["2026-01-01"],
             "Vendor": ["V"], "Amount": [None],
@@ -434,7 +434,7 @@ def test_null_amount_raises_contract_violation_never_defaults_to_zero(local_pers
 
 
 def test_unparseable_amount_raises_contract_violation(local_persistence, tmp_path):
-    def read_population(source, *, version=None):
+    def read_population(source, *, version=None, **_):
         return pd.DataFrame({
             "__row_key": ["r1"], "Employee ID": [5], "Transaction Date": ["2026-01-01"],
             "Vendor": ["V"], "Amount": ["not-a-number"],
@@ -462,7 +462,7 @@ def test_entries_sharing_a_key_but_disagreeing_on_amount_raises(local_persistenc
     # population) but carry different amounts is a genuine data-integrity
     # problem -- the same transaction entry cannot have two different
     # amounts. Fail loudly rather than silently pick one.
-    def read_population(source, *, version=None):
+    def read_population(source, *, version=None, **_):
         return pd.DataFrame({
             "__row_key": ["a1", "a2"],
             "Employee ID": [1, 1], "Transaction Date": ["2026-01-05", "2026-01-05"],
@@ -511,7 +511,7 @@ def test_finding_citing_a_sibling_sub_tests_metrics_is_not_dropped(local_persist
     $446.40 AND $998.53). Fixed: a finding's amount metrics/flags are drawn
     from whichever test produced each cited metric (the run's own recorded
     metric->test mapping), never from string-matching the finding's test_id."""
-    def read_population(source, *, version=None):
+    def read_population(source, *, version=None, **_):
         return pd.DataFrame({
             "__row_key": ["d1", "i1"],
             "Employee ID": [6, 6], "Transaction Date": ["2026-03-01", "2026-03-02"],
@@ -588,7 +588,7 @@ def test_amount_column_not_in_read_data_raises(local_persistence, tmp_path):
     """Item 2 (CLAUDE.md P2/P3 gate review): a population's declared
     amount_column absent from the data actually read must fail loudly,
     never silently skip that source's contribution to the headline."""
-    def read_population(source, *, version=None):
+    def read_population(source, *, version=None, **_):
         return pd.DataFrame({"__row_key": ["r1"]})  # no "Amount" column
 
     h = _rig(
@@ -616,7 +616,7 @@ def test_spend_finding_whose_source_declares_no_entry_key_uses_row_identity(loca
     that every monetary source declare an entry_key, which is exactly what
     drove expense_report to declare one it didn't actually need and that
     turned out non-unique)."""
-    def read_population(source, *, version=None):
+    def read_population(source, *, version=None, **_):
         return pd.DataFrame({"__row_key": ["r1"], "Amount": [123.0]})
 
     h = _rig(
@@ -659,7 +659,7 @@ def test_declared_entry_key_that_is_not_unique_raises(local_persistence, tmp_pat
     data actually share it. This is exactly expense_report's old shape
     (4,049 shared rows) that silently collapsed real, distinct spend. The
     fix fails the run loudly instead of guessing."""
-    def read_population(source, *, version=None):
+    def read_population(source, *, version=None, **_):
         return pd.DataFrame({
             "__row_key": ["r1", "r2"],
             "Employee ID": [1, 1], "Transaction Date": ["2026-01-05", "2026-01-05"],
@@ -698,7 +698,7 @@ def test_per_diem_group_excess_allocated_pro_rata_to_the_days_lines(local_persis
     group total. One employee-day: two $300/$100 lines (limit $200, so
     total $400 is $200 over) -- the $300 line is at risk for $150, the $100
     line for $50."""
-    def read_population(source, *, version=None):
+    def read_population(source, *, version=None, **_):
         return pd.DataFrame({
             "__row_key": ["p1", "p2"],
             "Employee ID": [7, 7],
