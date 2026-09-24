@@ -165,3 +165,84 @@ def test_real_skill_description_has_no_dev_strings(monkeypatch, tmp_path):
 
     manifest = __import__("yaml").safe_load((repo_root / "skills" / "tne_exco" / "manifest.yaml").read_text())
     assert "Assess executive travel and entertainment spend against policy" in manifest["description"]
+
+
+def test_xlsx_workpaper_has_no_dev_strings(tmp_path):
+    """Independent review 2026-09-24 item 7: a developer-facing string
+    (a CLAUDE.md reference, a section mark, a gate/phase name) is exactly as
+    wrong in an exported XLSX workpaper as it is in the UI -- an auditor
+    reads both. Runs the real T&E Skill end to end (through the fast planted
+    fixture, tests/fixtures/tne_planted/data/, never the ~3-minute real
+    synthetic_data/ run) and scans every string cell of every sheet."""
+    import io
+    import time
+    from pathlib import Path
+
+    import openpyxl
+    import pytest as _pytest
+
+    from orchestrator import service as real_service
+
+    repo_root = Path(__file__).resolve().parents[2]
+    data_dir = repo_root / "tests" / "fixtures" / "tne_planted" / "data"
+    if not data_dir.is_dir():
+        _pytest.skip("tests/fixtures/tne_planted/data/ not present -- run generate.py first")
+
+    env = {
+        "ORCH_BACKEND": "local",
+        "ORCH_LOCAL_DB": str(tmp_path / "orch.db"),
+        "ORCH_LOCAL_DATA_ROOT": str(data_dir),
+        "ORCH_LOCAL_EXPORT_ROOT": str(tmp_path / "exports"),
+        "ORCH_WORKER_ID": "dev-strings-xlsx-check",
+        "SKILLS_DIR": str(repo_root / "skills"),
+        # Pinned, not derived from `git rev-parse HEAD` -- several agents
+        # commit to this checkout concurrently, so HEAD can move between
+        # this run's creation and the executor's fingerprint re-check
+        # (tests/test_p3_service.py's _build_ctx does the same, same reason).
+        "CODE_REVISION": "test-fixed-revision",
+    }
+    ctx = real_service.build_app_context(env)
+    ctx.executor.start()
+    try:
+        bindings = real_service.suggest_bindings(ctx, "SKILL-001")
+        run_id = real_service.start_audit_run(
+            ctx, skill_id="SKILL-001", bindings=bindings,
+            audit_period=("2025-01-01", "2026-04-30"),
+            objective="No-dev-strings XLSX check.", run_owner="dev-strings-check",
+        )
+        deadline = time.time() + 120
+        status = None
+        while time.time() < deadline:
+            status = real_service.get_run(ctx, run_id)["status"]
+            if status in ("awaiting_signoff", "failed"):
+                break
+            time.sleep(0.5)
+        assert status == "awaiting_signoff", real_service.get_run(ctx, run_id).get("status_reason")
+
+        real_service.sign_off(ctx, run_id, "dev-strings-check")
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            status = real_service.get_run(ctx, run_id)["status"]
+            if status in ("completed", "failed"):
+                break
+            time.sleep(0.5)
+        assert status == "completed", real_service.get_run(ctx, run_id).get("status_reason")
+
+        _filename, content = real_service.get_export(ctx, run_id, "xlsx")
+    finally:
+        ctx.executor.stop()
+
+    wb = openpyxl.load_workbook(io.BytesIO(content), data_only=True)
+    offenders = []
+    for sheet in wb.worksheets:
+        for row in sheet.iter_rows():
+            for cell in row:
+                if isinstance(cell.value, str):
+                    for token in _FORBIDDEN_SUBSTRINGS:
+                        if token in cell.value:
+                            offenders.append(f"{sheet.title}!{cell.coordinate}: {token!r} in {cell.value!r}")
+                    for pat in _FORBIDDEN_PATTERNS:
+                        m = pat.search(cell.value)
+                        if m:
+                            offenders.append(f"{sheet.title}!{cell.coordinate}: {m.group(0)!r} in {cell.value!r}")
+    assert not offenders, "developer string(s) found in the XLSX workpaper:\n" + "\n".join(offenders)
