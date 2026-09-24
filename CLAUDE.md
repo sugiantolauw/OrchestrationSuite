@@ -1749,7 +1749,25 @@ Source files are in `synthetic_data/`; row counts match `FILE_REGISTRY` exactly.
   audit scope memo, test steps and a document request list, from agreed templates. Test steps link
   to executable Skill tests/primitives wherever one fits, so an approved plan launches fieldwork
   runs; the auditor edits and approves before anything runs. Step (3)'s mockups include the impact
-  analysis, RCM and planning screens.
+  analysis, RCM and planning screens. A **template library** (scope memo, test step and request
+  list templates, versioned and owned like Skills) ships with this step.
+  Further steps (approved 2026-09-23), each mocked up for approval before build:
+  (7) **Reporting & ServiceNow integration** — the audit team is moving to ServiceNow and leadership
+  will track issues and remediation there, so **this app does not build issue tracking or a
+  remediation tracker**. It builds an issue-management agent that drafts issue descriptions and
+  remediation plans from signed-off findings, a `ServiceNowAdapter` behind an `IssueTrackerAdapter`
+  Protocol that submits them only after an explicit human approval (never automatically; "Preview —
+  not submitted" until connected, NN13), stores the returned ServiceNow record ids on
+  `issues`/`management_actions`, and reads status back for rollforward. Credentials live in a
+  secret scope; transport is ServiceNow's REST API — no MCP (§7). Plus an audit committee report
+  and a leadership view of engagements and themes (not issue tracking). Jira is superseded by
+  ServiceNow. (8) **Continuous monitoring** — scheduled Skill runs as Databricks Jobs, each run
+  compared with the previous one, key-risk-indicator thresholds raising alerts that feed Risk
+  Assessment. (9) **Control design assessment** — design-effectiveness conclusions with rationale
+  against the planning RCM (`assertion: design`). (10) **Evidence and workpapers** — request-list
+  tracking, document evidence ingestion with citations and annotation, prior-year workpaper reuse,
+  and workpaper generation; a separate subsystem, scoped on its own. The review workflow
+  (preparer → reviewer → approver, review notes) stays in P7. Statistical sampling stays deferred.
 
 ---
 
