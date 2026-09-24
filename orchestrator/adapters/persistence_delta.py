@@ -16,6 +16,7 @@ from orchestrator.errors import (
     FindingNotFound,
     FingerprintConflict,
     InvalidReviewStateTransition,
+    ManagementActionNotFound,
     NonDraftFindingWouldBeDeleted,
     RiskStatusRegression,
     RunAlreadyExists,
@@ -1718,6 +1719,39 @@ class DeltaPersistence:
         for r in rows:
             out[r["run_id"]].append(r)
         return out
+
+    def update_management_action(
+        self, action_id: str, *, owner: str | None, status: str, target_date: str | None,
+        response: str | None, updated_by: str, now: str,
+    ) -> dict:
+        with self._cursor_ctx() as conn:
+            cur = self._execute(
+                conn,
+                f"SELECT ma.*, f.title AS finding_title, f.observation AS finding_observation "
+                f"FROM {self._table('management_actions')} ma "
+                f"LEFT JOIN {self._table('findings')} f ON f.finding_id = ma.finding_id "
+                "WHERE ma.action_id = :action_id",
+                {"action_id": action_id},
+            )
+            row = _fetchone_dict(cur)
+            if row is None:
+                raise ManagementActionNotFound(action_id)
+            self._execute(
+                conn,
+                f"UPDATE {self._table('management_actions')} SET owner = :owner, status = :status, "
+                "target_date = :target_date, description = :response, updated_by = :updated_by, "
+                "last_updated = :now WHERE action_id = :action_id",
+                {
+                    "owner": owner, "status": status, "target_date": target_date, "response": response,
+                    "updated_by": updated_by, "now": now, "action_id": action_id,
+                },
+            )
+            updated = dict(row)
+            updated.update({
+                "owner": owner, "status": status, "target_date": target_date, "description": response,
+                "updated_by": updated_by, "last_updated": now,
+            })
+        return updated
 
     def record_export(
         self, run_id: str, kind: str, *, path: str, sha256: str, created_by: str, now: str

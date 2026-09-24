@@ -8,6 +8,7 @@ from orchestrator.errors import (
     AttemptAlreadyClosed,
     AttemptNotFound,
     FingerprintConflict,
+    ManagementActionNotFound,
     RunAlreadyExists,
     RunNotFound,
     StaleStateError,
@@ -941,3 +942,48 @@ def test_write_management_actions_round_trips_description_origin(persistence, ui
     )
     other = [a for a in persistence.list_management_actions(filters={"run_id": run_id}) if a["action_id"] == other_id][0]
     assert other["description_origin"] is None
+
+
+def test_update_management_action_persists_owner_status_target_date_response(persistence, uid):
+    # Independent review 2026-09-24 gap #3: an auditor's edit must reach the
+    # SAME table list_management_actions reads, not a browser-session
+    # dcc.Store -- write, then read back through a completely separate
+    # list_management_actions() call, the same round trip a fresh page load
+    # makes.
+    run_id = f"RUN-MAEDIT-{uid}"
+    action_id = f"MA-EDIT-{uid}"
+    persistence.write_management_actions(
+        run_id,
+        [{
+            "action_id": action_id, "finding_id": f"{run_id}:T1", "title": "Fix it",
+            "status": "draft", "risk": "High", "description": "original draft text",
+        }],
+        now=canonical_ts(0),
+    )
+
+    updated = persistence.update_management_action(
+        action_id, owner="Alex Chen", status="agreed", target_date="2026-03-01",
+        response="Agreed with management; remediation underway.", updated_by="reviewer@example.com",
+        now=canonical_ts(1),
+    )
+    assert updated["owner"] == "Alex Chen"
+    assert updated["status"] == "agreed"
+    assert updated["target_date"] == "2026-03-01"
+    assert updated["description"] == "Agreed with management; remediation underway."
+    assert updated["updated_by"] == "reviewer@example.com"
+
+    reread = [a for a in persistence.list_management_actions(filters={"run_id": run_id}) if a["action_id"] == action_id][0]
+    assert reread["owner"] == "Alex Chen"
+    assert reread["status"] == "agreed"
+    assert reread["target_date"] == "2026-03-01"
+    assert reread["description"] == "Agreed with management; remediation underway."
+    assert reread["updated_by"] == "reviewer@example.com"
+    assert reread["last_updated"] == canonical_ts(1)
+
+
+def test_update_management_action_raises_for_an_unknown_action_id(persistence, uid):
+    with pytest.raises(ManagementActionNotFound):
+        persistence.update_management_action(
+            f"MA-DOES-NOT-EXIST-{uid}", owner="Alex", status="open", target_date=None,
+            response=None, updated_by="reviewer@example.com", now=canonical_ts(0),
+        )

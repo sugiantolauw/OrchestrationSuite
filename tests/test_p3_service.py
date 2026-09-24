@@ -438,3 +438,161 @@ def test_queue_note_is_none_once_the_run_is_no_longer_queued(tmp_path):
 
     run = service.get_run(ctx, run_id)
     assert run["queue_note"] is None
+
+
+# ── cross_run_totals (independent review 2026-09-24 gap #6) ─────────────────
+#
+# Pure function over the shape service.list_runs() already returns, so these
+# are plain dict fixtures -- no executor, no persistence.
+
+def _run(
+    run_id, *, status="Completed", skill_id="SKILL-001", engagement_id="ENG-A",
+    audit_period="2025-01-01 – 2025-03-31", run_timestamp="2026-01-01T00:00:00Z",
+    high_risk_count=0, potential_exposure=None, superseded_by=None,
+):
+    return {
+        "run_id": run_id, "status": status, "skill_id": skill_id, "engagement_id": engagement_id,
+        "audit_period": audit_period, "run_timestamp": run_timestamp,
+        "high_risk_count": high_risk_count, "potential_exposure": potential_exposure,
+        "superseded_by": superseded_by,
+    }
+
+
+def test_cross_run_totals_excludes_rerun_and_failed_runs():
+    # B1c: /runs' "High-risk findings" used to sum high_risk_count over
+    # EVERY run, including a failed attempt and every re-run of the same
+    # skill/period alongside its predecessor.
+    runs = [
+        _run("RUN-OLD", high_risk_count=3, potential_exposure=1000),
+        _run("RUN-NEW", high_risk_count=5, potential_exposure=2000, run_timestamp="2026-02-01T00:00:00Z"),
+        _run("RUN-FAILED", status="Failed", high_risk_count=9, potential_exposure=9999,
+             audit_period="2025-04-01 – 2025-06-30", run_timestamp="2026-04-01T00:00:00Z"),
+        _run("RUN-QUEUED", status="Queued", high_risk_count=7,
+             audit_period="2025-07-01 – 2025-09-30", run_timestamp="2026-07-01T00:00:00Z"),
+    ]
+    totals = service.cross_run_totals(runs)
+    assert totals["high_risk_findings_total"] == 5, "only RUN-NEW (the latest re-run) counts"
+    assert totals["total_exposure"] == 2000
+
+
+def test_cross_run_totals_counts_awaiting_signoff_as_eligible():
+    # A run whose tests already ran and whose numbers are already fixed
+    # (only export is outstanding) is a trustworthy figure, not a re-run in
+    # progress.
+    runs = [_run("RUN-1", status="Awaiting Signoff", high_risk_count=2, potential_exposure=500)]
+    totals = service.cross_run_totals(runs)
+    assert totals == {"high_risk_findings_total": 2, "total_exposure": 500}
+
+
+def test_cross_run_totals_excludes_superseded_run():
+    runs = [_run("RUN-SUPERSEDED", high_risk_count=4, potential_exposure=4000, superseded_by="RUN-NEW")]
+    totals = service.cross_run_totals(runs)
+    assert totals == {"high_risk_findings_total": 0, "total_exposure": None}
+
+
+def test_cross_run_totals_sums_disjoint_periods():
+    runs = [
+        _run("RUN-1", audit_period="2025-01-01 – 2025-03-31", potential_exposure=8000),
+        _run("RUN-2", audit_period="2025-04-01 – 2025-06-30", potential_exposure=3000,
+             run_timestamp="2026-04-01T00:00:00Z"),
+    ]
+    totals = service.cross_run_totals(runs)
+    assert totals["total_exposure"] == 11000
+
+
+def test_cross_run_totals_never_sums_overlapping_periods():
+    # gap #6 (B4b): two DIFFERENT audit periods that still overlap in time
+    # (Jan-Mar and Feb-Apr) are the same underlying spend tested twice under
+    # two windows -- summing them would double-count March. The most recent
+    # run's own figure stands in, never a sum.
+    runs = [
+        _run("RUN-1", audit_period="2025-01-01 – 2025-03-31", potential_exposure=8000,
+             run_timestamp="2026-01-01T00:00:00Z"),
+        _run("RUN-2", audit_period="2025-02-01 – 2025-04-30", potential_exposure=3000,
+             run_timestamp="2026-04-01T00:00:00Z"),
+    ]
+    totals = service.cross_run_totals(runs)
+    assert totals["total_exposure"] == 3000, "the latest run's own figure, never a sum across overlapping periods"
+
+
+def test_cross_run_totals_overlap_across_skills_also_never_summed():
+    # The overlap rule is stated over periods, not scoped to one Skill --
+    # two Skills' runs over overlapping windows are still never summed.
+    runs = [
+        _run("RUN-A", skill_id="SKILL-001", audit_period="2025-01-01 – 2025-06-30", potential_exposure=5000,
+             run_timestamp="2026-01-01T00:00:00Z"),
+        _run("RUN-B", skill_id="SKILL-002", audit_period="2025-03-01 – 2025-09-30", potential_exposure=6000,
+             run_timestamp="2026-06-01T00:00:00Z"),
+    ]
+    totals = service.cross_run_totals(runs)
+    assert totals["total_exposure"] == 6000
+
+
+def test_cross_run_totals_no_eligible_runs_returns_none_never_zero():
+    totals = service.cross_run_totals([_run("RUN-1", status="Running", potential_exposure=1000)])
+    assert totals == {"high_risk_findings_total": 0, "total_exposure": None}
+
+
+def test_cross_run_totals_run_with_no_exposure_metric_is_excluded_not_zero():
+    # B4 (NN14): a run whose finding set has no run_exposure_headline
+    # metric (potential_exposure=None) never gets treated as $0 -- it drops
+    # out of the sum entirely rather than dragging the total down.
+    runs = [
+        _run("RUN-1", audit_period="2025-01-01 – 2025-03-31", potential_exposure=None),
+        _run("RUN-2", audit_period="2025-04-01 – 2025-06-30", potential_exposure=7000,
+             run_timestamp="2026-04-01T00:00:00Z"),
+    ]
+    totals = service.cross_run_totals(runs)
+    assert totals["total_exposure"] == 7000
+
+
+# ── update_management_action (independent review 2026-09-24 gap #3) ─────────
+
+def test_update_management_action_persists_and_is_reflected_by_list(tmp_path):
+    ctx = _build_ctx(tmp_path)
+    ctx.executor.start()
+    try:
+        bindings = service.suggest_bindings(ctx, "SKILL-MINI")
+        run_id = service.start_audit_run(
+            ctx, skill_id="SKILL-MINI", bindings=bindings,
+            audit_period=("2026-01-01", "2026-02-28"), objective="local run test",
+            run_owner="tester",
+        )
+        _wait_for_status(ctx, run_id, {"awaiting_signoff", "failed"})
+        service.sign_off(ctx, run_id, "approver")
+        _wait_for_status(ctx, run_id, {"completed", "failed"})
+
+        actions = service.list_management_actions(ctx, filters={"run_id": run_id})
+        assert actions, "the mini Skill's findings should have drafted management actions"
+        action_id = actions[0]["action_id"]
+
+        updated = service.update_management_action(
+            ctx, action_id, owner="Alex Chen", status="agreed", target_date="2026-03-01",
+            response="Agreed with management.", actor="reviewer@example.com",
+        )
+        assert updated["owner"] == "Alex Chen"
+        assert updated["status"] == "Agreed"  # title-cased, same as list_management_actions' own status
+        assert updated["target_date"] == "2026-03-01"
+        assert updated["response"] == "Agreed with management."
+        assert updated["updated_by"] == "reviewer@example.com"
+
+        # a completely fresh list call, exactly what a page reload makes --
+        # not the return value of update_management_action itself.
+        reread = next(a for a in service.list_management_actions(ctx, filters={"run_id": run_id})
+                      if a["action_id"] == action_id)
+        assert reread["owner"] == "Alex Chen"
+        assert reread["status"] == "Agreed"
+        assert reread["target_date"] == "2026-03-01"
+        assert reread["description"] == "Agreed with management."
+        assert reread["updated_by"] == "reviewer@example.com"
+    finally:
+        ctx.executor.stop()
+
+
+def test_update_management_action_rejects_an_unrecognised_status(tmp_path):
+    ctx = _build_ctx(tmp_path)
+    with pytest.raises(ValueError):
+        service.update_management_action(
+            ctx, "MA-DOES-NOT-EXIST", owner=None, status="not_a_real_status", target_date=None,
+            response=None, actor="reviewer@example.com",
+        )

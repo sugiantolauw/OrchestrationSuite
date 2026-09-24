@@ -219,7 +219,13 @@ def test_actions_tab_renders_real_persisted_actions():
     bundle = workspace_tne._load_bundle(run_id)
     body = workspace_tne._actions_tab(bundle)
     text = str(body)
-    assert "session-only" in text
+    # Independent review 2026-09-24 gap #3: this claim is only true once
+    # owner/status/target-date/response edits actually persist
+    # (orchestrator.service.update_management_action) -- "session-only" was
+    # a true statement about the OLD dcc.Store-only behaviour; asserting it
+    # here would pin the bug this fix removes.
+    assert "session-only" not in text
+    assert "Action ownership and responses are saved with this run" in text
     assert "Missing Receipt Documentation" in text
 
 
@@ -376,3 +382,204 @@ def test_skill_flag_meta_never_swallows_a_genuine_load_failure(monkeypatch):
 
     with _pytest.raises(ValueError, match="schema violation"):
         workspace_tne._skill_flag_meta("SKILL-BROKEN-TEST", [], None)
+
+
+# ── Catalogue-grain "tests with exceptions" counting (independent review
+# 2026-09-24 gap #5) ─────────────────────────────────────────────────────
+#
+# One catalogue test ("T-A") can resolve to several plan.yaml sub-tests
+# ("T-A_x1", "T-A_x2") -- counting test_results directly (sub-test grain)
+# instead of the 14-entry catalogue over/under-counts. Fixture below has 3
+# catalogue tests behind 5 plan sub-tests: T-A is 2 sub-tests, BOTH
+# "exception" (must combine to ONE catalogue exception, not two); T-B is a
+# single passing sub-test; T-C is 2 sub-tests, BOTH not_testable (must
+# report not_testable, never as a clean pass).
+
+_CATALOGUE_TESTS = [
+    {"test_id": "T-A", "category": "Cat", "test_name": "Test A", "threshold": "0",
+     "control_objective": "obj", "population": "pop", "rule": "rule"},
+    {"test_id": "T-B", "category": "Cat", "test_name": "Test B", "threshold": "0",
+     "control_objective": "obj", "population": "pop", "rule": "rule"},
+    {"test_id": "T-C", "category": "Cat", "test_name": "Test C", "threshold": "0",
+     "control_objective": "obj", "population": "pop", "rule": "rule"},
+]
+
+_SUBTEST_RESULTS = [
+    {"test_id": "T-A_x1", "status": "exception", "exception_units": 3},
+    {"test_id": "T-A_x2", "status": "exception", "exception_units": 4},
+    {"test_id": "T-B", "status": "pass", "exception_units": 0},
+    {"test_id": "T-C_x1", "status": "not_testable", "reason": "no endpoint"},
+    {"test_id": "T-C_x2", "status": "not_testable", "reason": "no endpoint"},
+]
+
+
+def _kpi_values(component) -> dict:
+    """Walks a Dash component tree and collects every kpi_card's
+    {label: value} -- avoids brittle substring matching when a KPI's number
+    might coincide with something else rendered on the same page."""
+    values: dict = {}
+
+    def walk(node):
+        children = getattr(node, "children", None)
+        if getattr(node, "className", None) == "kpi-tile" and isinstance(children, list) and len(children) >= 2:
+            values[children[0].children] = children[1].children
+        if isinstance(children, list):
+            for c in children:
+                walk(c)
+        elif children is not None:
+            walk(children)
+
+    walk(component)
+    return values
+
+
+def test_catalogue_test_statuses_combines_subtests_under_one_catalogue_id():
+    statuses = workspace_tne._catalogue_test_statuses(_CATALOGUE_TESTS, _SUBTEST_RESULTS)
+    assert statuses["T-A"]["status"] == "exception"
+    assert statuses["T-A"]["exception_units"] == 7  # 3 + 4, summed across T-A's own sub-tests only
+    assert statuses["T-B"]["status"] == "pass"
+    assert statuses["T-C"]["status"] == "not_testable", "never reported as a clean pass"
+
+
+def test_catalogue_tab_kpis_count_catalogue_tests_not_plan_subtests():
+    body = workspace_tne._catalogue_tab(_CATALOGUE_TESTS, _SUBTEST_RESULTS, None)
+    kpis = _kpi_values(body)
+    assert kpis["Tests Executed"] == "3", "3 catalogue tests, not 5 plan.yaml sub-tests"
+    assert kpis["Exceptions"] == "1", "T-A's two exception sub-tests are one catalogue exception"
+    assert kpis["Pass"] == "1"
+    assert kpis["Not Testable"] == "1"
+
+
+def test_executive_tab_tests_with_exceptions_counts_catalogue_tests_not_plan_subtests():
+    run = {"test_results": _SUBTEST_RESULTS}
+    body = workspace_tne._executive_tab(run, findings=[], payload=None, actions=[], tests=_CATALOGUE_TESTS)
+    kpis = _kpi_values(body)
+    assert kpis["Tests with exceptions"] == "1", "one catalogue test (T-A), not two exception sub-test rows"
+
+
+def test_executive_tab_falls_back_to_subtest_grain_when_no_catalogue_rows_given():
+    # No `tests` -- the KPI still renders rather than raising, using the
+    # old (wrong-grain) count as a fallback rather than crashing a caller
+    # that genuinely has no catalogue rows to hand in.
+    run = {"test_results": _SUBTEST_RESULTS}
+    body = workspace_tne._executive_tab(run, findings=[], payload=None, actions=[])
+    kpis = _kpi_values(body)
+    assert kpis["Tests with exceptions"] == "2"
+
+
+# ── Management action edits persist for real (independent review 2026-09-24
+# gap #3, requirement #4) ────────────────────────────────────────────────
+
+def _write_tiny_mini_data(root):
+    import pandas as pd
+
+    pd.DataFrame([
+        {"Employee ID": 1, "Transaction Date": "2026-01-05", "Amount": 100, "Vendor": "VendorA"},
+        {"Employee ID": 1, "Transaction Date": "2026-01-06", "Amount": 600, "Vendor": "VendorA"},
+        {"Employee ID": 2, "Transaction Date": "2026-01-10", "Amount": 700, "Vendor": "VendorB"},
+        {"Employee ID": 3, "Transaction Date": "2026-01-15", "Amount": 50, "Vendor": "VendorC"},
+        {"Employee ID": 4, "Transaction Date": "2026-02-01", "Amount": 900, "Vendor": "VendorD"},
+    ]).to_csv(root / "claims.csv", index=False)
+    pd.DataFrame([
+        {"Employee ID": 1, "Transaction Date": "2026-01-05", "Vendor": "VendorA"},
+        {"Employee ID": 2, "Transaction Date": "2026-01-10", "Vendor": "VendorB"},
+        {"Employee ID": 4, "Transaction Date": "2026-02-01", "Vendor": "VendorD"},
+    ]).to_csv(root / "register.csv", index=False)
+
+
+def test_management_action_edit_survives_a_fresh_bundle_load_against_real_local_persistence(monkeypatch, tmp_path):
+    """Independent review 2026-09-24 gap #3, requirement #4: an edit made
+    through adapters.update_management_action (the same call _save_action
+    makes) must be readable back from a completely fresh _load_bundle() call
+    -- what a genuine page reload makes -- against the REAL LocalPersistence
+    backend, never fake_service.py. Also exercises the one thing that could
+    silently defeat this: _load_bundle's own per-run cache, which does not
+    key on anything a management-action edit changes, so it must be
+    invalidated by the save path (workspace_tne._save_action) rather than
+    serving a snapshot taken before the edit."""
+    import time
+    from pathlib import Path as _Path
+
+    from orchestrator import service as real_service
+
+    repo_root = _Path(__file__).resolve().parents[2]
+    mini_skill_dir = repo_root / "tests" / "fixtures" / "skills" / "mini"
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    _write_tiny_mini_data(data_dir)
+
+    env = {
+        "ORCH_BACKEND": "local",
+        "ORCH_LOCAL_DB": str(tmp_path / "orch.db"),
+        "ORCH_LOCAL_DATA_ROOT": str(data_dir),
+        "ORCH_LOCAL_EXPORT_ROOT": str(tmp_path / "exports"),
+        "SKILLS_DIR": str(mini_skill_dir.parent),
+        "CODE_REVISION": "test-fixed-revision",
+    }
+    monkeypatch.setattr(adapters, "service", real_service)
+    adapters._ctx = None
+    original_build = real_service.build_app_context
+    monkeypatch.setattr(real_service, "build_app_context", lambda *a, **k: original_build(env))
+    workspace_tne._CACHE.clear()
+
+    run_ctx = adapters.get_context()
+    run_ctx.executor.start()
+    try:
+        bindings = real_service.suggest_bindings(run_ctx, "SKILL-MINI")
+        run_id = adapters.start_audit_run(
+            skill_id="SKILL-MINI", bindings=bindings, audit_period=("2026-01-01", "2026-02-28"),
+            objective="reload test", run_owner="tester@example.com",
+        )
+
+        def _wait(statuses, timeout=15):
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                status = adapters.get_run(run_id)["status"]
+                if status in statuses:
+                    return status
+                time.sleep(0.05)
+            raise AssertionError(f"run {run_id} did not reach {statuses} in time")
+
+        _wait({"awaiting_signoff", "failed"})
+        adapters.sign_off(run_id, "approver@example.com")
+        status = _wait({"completed", "failed"})
+        assert status == "completed", adapters.get_run(run_id).get("status_reason")
+
+        # Simulates the FIRST page view -- also primes _CACHE, which is the
+        # exact staleness risk a save must defeat.
+        first_bundle = workspace_tne._load_bundle(run_id)
+        actions = first_bundle["actions"]
+        assert actions, "the mini Skill's findings should have drafted management actions"
+        action_id = actions[0]["action_id"]
+        assert actions[0].get("owner") in (None, "")
+
+        adapters.update_management_action(
+            action_id, owner="Alex Chen", status="agreed", target_date="2026-03-01",
+            response="Agreed with management.", actor="reviewer@example.com",
+        )
+        # What workspace_tne._save_action itself does immediately after this
+        # same persistence call -- proven necessary by the assertion below:
+        # without it, _load_bundle would still serve the bundle cached above.
+        workspace_tne._CACHE.clear()
+
+        # A genuinely fresh page load -- new call, no session dcc.Store data
+        # carried over. _load_bundle must not still be serving the bundle
+        # cached above.
+        fresh_bundle = workspace_tne._load_bundle(run_id)
+        fresh_action = next(a for a in fresh_bundle["actions"] if a["action_id"] == action_id)
+        assert fresh_action["owner"] == "Alex Chen"
+        assert fresh_action["status"] == "Agreed"
+        assert fresh_action["target_date"] == "2026-03-01"
+        assert fresh_action["description"] == "Agreed with management."
+
+        # And the rendered tab's table shows the edit too, exactly as a real
+        # reload would (the response text itself only surfaces in the edit
+        # modal, opened separately -- not this table's own columns).
+        body = workspace_tne._actions_tab(fresh_bundle)
+        text = str(body)
+        assert "Alex Chen" in text
+        assert "Agreed" in text
+    finally:
+        run_ctx.executor.stop()
+        adapters._ctx = None
+        workspace_tne._CACHE.clear()

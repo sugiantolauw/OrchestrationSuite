@@ -9,6 +9,7 @@ from __future__ import annotations
 from dash import dcc, html
 import dash_bootstrap_components as dbc
 
+from orchestrator.service import cross_run_totals
 from src.platform import adapters
 from src.platform.components import (
     demo_indicator,
@@ -113,6 +114,13 @@ def audit_runs_page() -> html.Div:
     runs = adapters.list_audit_runs()
     skills_for_filter = sorted(set(r.get("skill_name", "") for r in runs))
 
+    # Independent review 2026-09-24 gap #6: this used to sum high_risk_count
+    # over EVERY run -- re-runs of the same Skill/period alongside their
+    # predecessors, plus failed/queued/running runs that never produced a
+    # trustworthy finding set. cross_run_totals applies the one rule shared
+    # with /actions' exposure figure (orchestrator.service.cross_run_totals).
+    high_risk_findings_total = cross_run_totals(runs)["high_risk_findings_total"]
+
     return html.Div([
         html.Div([
             html.H2("Audit Runs", className="page-title"),
@@ -125,7 +133,7 @@ def audit_runs_page() -> html.Div:
         html.Div([
             kpi_card("Total runs", str(len(runs))),
             kpi_card("Completed", str(sum(1 for r in runs if r["status"] == "Completed"))),
-            kpi_card("High-risk findings", str(sum(r.get("high_risk_count", 0) for r in runs))),
+            kpi_card("High-risk findings", str(high_risk_findings_total)),
             kpi_card("Open actions", str(sum(r.get("open_actions", 0) for r in runs))),
         ], className="plat-kpi-row", style={"marginBottom": 16}),
 
@@ -194,26 +202,23 @@ def management_actions_page() -> html.Div:
     # CLAUDE.md §0.3: findings' potential_exposure figures overlap the same
     # underlying spend (a claim can be cited by more than one finding), so
     # summing them here would double-count exactly the way the exec-brief
-    # figure once did. Each *completed* run already carries its own
+    # figure once did. Each eligible run already carries its own
     # de-duplicated headline (run_exposure_headline, one number per run,
     # see orchestrator/service.py list_runs "potential_exposure") -- sum
-    # that, once per run, instead of once per finding. Independent review
-    # 2026-09-24 item 2: a re-run of the SAME Skill over the SAME engagement
-    # and audit period is the same underlying population re-tested, not
-    # additional exposure -- summing every completed run (rather than only
-    # the latest per skill/engagement/period) double-counted a re-run's
-    # exposure alongside its predecessor's. "—" (never a fabricated $0)
-    # when there is no completed run to report at all.
-    completed_runs = [r for r in adapters.list_audit_runs() if r.get("status") == "Completed"]
-    latest_by_group: dict[tuple, dict] = {}
-    for r in completed_runs:
-        key = (r.get("skill_id"), r.get("engagement_id"), r.get("audit_period"))
-        current = latest_by_group.get(key)
-        if current is None or (r.get("run_timestamp") or "") > (current.get("run_timestamp") or ""):
-            latest_by_group[key] = r
-    total_exposure = None
-    if latest_by_group:
-        total_exposure = sum(r.get("potential_exposure") or 0 for r in latest_by_group.values())
+    # that, once per run, instead of once per finding.
+    #
+    # Independent review 2026-09-24 gap #6: a re-run of the SAME Skill over
+    # the SAME engagement and audit period is the same underlying population
+    # re-tested, not additional exposure (item 2), and two runs whose
+    # periods merely OVERLAP without being identical are still the same
+    # spend tested twice under two windows -- summing them double-counts it
+    # just the same. orchestrator.service.cross_run_totals applies
+    # the one rule shared with /runs' "High-risk findings" KPI: eligible,
+    # non-superseded, latest-per-(skill, engagement, period), and never
+    # summed across overlapping periods -- the latest run's own figure (or
+    # "—", never a fabricated $0) stands in when it can't state an honest
+    # total.
+    total_exposure = cross_run_totals(adapters.list_audit_runs())["total_exposure"]
     # "Under Review" (title-cased) is what orchestrator.service.
     # list_management_actions() actually produces from the persisted
     # "under_review" status (str.replace("_", " ").title()) -- the prototype's

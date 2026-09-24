@@ -320,6 +320,20 @@ class PersistenceAdapter(Protocol):
         present with an empty list, never omitted."""
         ...
 
+    def update_management_action(
+        self, action_id: str, *, owner: str | None, status: str, target_date: str | None,
+        response: str | None, updated_by: str, now: str,
+    ) -> dict:
+        """Independent review 2026-09-24 gap #3: persists an auditor's edit
+        to an existing management action's owner/status/target_date and
+        response (the `description` column -- the same field write_
+        management_actions' own template-drafted text occupies; an edit
+        here overwrites it, same as the prototype's tracker) -- never held
+        only in a browser session. Raises ManagementActionNotFound if
+        action_id names no row. Returns the updated row, same shape as
+        list_management_actions' own rows."""
+        ...
+
     def record_export(
         self, run_id: str, kind: str, *, path: str, sha256: str, created_by: str, now: str
     ) -> dict:

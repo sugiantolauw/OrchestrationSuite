@@ -14,6 +14,7 @@ from orchestrator.errors import (
     FindingNotFound,
     FingerprintConflict,
     InvalidReviewStateTransition,
+    ManagementActionNotFound,
     NonDraftFindingWouldBeDeleted,
     RiskStatusRegression,
     RunAlreadyExists,
@@ -1325,6 +1326,26 @@ class LocalPersistence:
             d = dict(r)
             out[d["run_id"]].append(d)
         return out
+
+    def update_management_action(
+        self, action_id: str, *, owner: str | None, status: str, target_date: str | None,
+        response: str | None, updated_by: str, now: str,
+    ) -> dict:
+        with self._writer() as conn:
+            cur = conn.execute(
+                "UPDATE management_actions SET owner = ?, status = ?, target_date = ?, "
+                "description = ?, updated_by = ?, last_updated = ? WHERE action_id = ?",
+                (owner, status, target_date, response, updated_by, now, action_id),
+            )
+            if cur.rowcount == 0:
+                raise ManagementActionNotFound(action_id)
+            row = conn.execute(
+                "SELECT ma.*, f.title AS finding_title, f.observation AS finding_observation "
+                "FROM management_actions ma LEFT JOIN findings f ON f.finding_id = ma.finding_id "
+                "WHERE ma.action_id = ?",
+                (action_id,),
+            ).fetchone()
+        return dict(row)
 
     def record_export(
         self, run_id: str, kind: str, *, path: str, sha256: str, created_by: str, now: str
