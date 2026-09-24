@@ -316,6 +316,31 @@ def home_layout() -> html.Div:
 
 _DEFAULT_ENGAGEMENT_ID = "ENG-DEFAULT"  # same seeded default every other caller here uses (CLAUDE.md §4.8)
 
+# Independent review 2026-09-24 item 7: "governed tables win unless the
+# upload was made in the current page session" -- this app has no real
+# per-tab session id to check an upload against, so recency is the
+# approximation: an upload from the last _RECENT_UPLOAD_WINDOW_S is treated
+# as plausibly this session's own deliberate upload and allowed to
+# override a governed table of the same name; an older one no longer
+# overrides a governed table but is still usable when no governed table
+# exists for that source at all (see _auto_bind's own docstring).
+_RECENT_UPLOAD_WINDOW_S = 15 * 60
+
+
+def _is_recent_upload(uploaded_at: str | None) -> bool:
+    if not uploaded_at:
+        return False
+    from datetime import datetime, timezone
+
+    try:
+        ts = datetime.fromisoformat(uploaded_at.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    age_s = (datetime.now(timezone.utc) - ts).total_seconds()
+    return 0 <= age_s <= _RECENT_UPLOAD_WINDOW_S
+
 
 def _auto_bind(skill_id: str) -> tuple[dict[str, str], list[str]]:
     """The prototype's landing page has no binding step at all: a run always
@@ -323,17 +348,23 @@ def _auto_bind(skill_id: str) -> tuple[dict[str, str], list[str]]:
     concrete source per contract entry, so this binds by EXACT name match
     only, never fuzzy (CLAUDE.md NN14/§0.5):
 
-      1. an uploaded, Ready file whose filename (without extension) equals
-         the contract source name exactly -- scoped to the current user's
-         own uploads in the current engagement (independent review
-         2026-09-24 item 7: an unscoped match could silently bind a run to
-         a DIFFERENT auditor's upload, in a different engagement, that
-         happens to share a filename), and to governed tables the same way
-         regardless of data-source backend (the earlier local-only gate
-         here was an artificial restriction -- VolumeUploadAwareDataSource
-         already reads an uploaded file the same way on every backend);
-      2. otherwise the governed-table/local-default suggestion
-         (service.suggest_bindings), itself an exact short-name match.
+      1. the governed-table/local-default suggestion (service.
+         suggest_bindings, itself an exact short-name match), UNLESS
+      2. an uploaded, Ready file whose filename (without extension) equals
+         the contract source name exactly, scoped to the current user's own
+         uploads in the current engagement (independent review 2026-09-24
+         item 7: an unscoped match could silently bind a run to a DIFFERENT
+         auditor's upload, in a different engagement, that happens to share
+         a filename), AND uploaded recently enough to plausibly be this
+         page session's own upload (_RECENT_UPLOAD_WINDOW_S -- an
+         approximation: this app has no real per-tab session id to check
+         against, so "governed wins unless the upload is from the current
+         session" is approximated by "unless it was made in the last few
+         minutes", never a literal session check) -- an upload this fresh
+         wins over a governed table of the same name, on every backend (the
+         earlier local-only gate here was an artificial restriction --
+         VolumeUploadAwareDataSource already reads an uploaded file the
+         same way regardless of data-source backend).
 
     Returns (bindings, missing_source_names). A source with neither is left
     out of `bindings` and named in `missing_source_names` -- the caller
@@ -345,18 +376,27 @@ def _auto_bind(skill_id: str) -> tuple[dict[str, str], list[str]]:
     current_owner = _request_owner()
     uploads_by_stem: dict[str, dict] = {}
     for row in adapters.list_uploaded_files(engagement_id=_DEFAULT_ENGAGEMENT_ID):
-        if row.get("status") == "Ready" and row.get("uploaded_by") == current_owner:
-            stem = Path(row["filename"]).stem
-            uploads_by_stem.setdefault(stem, row)
+        if row.get("status") != "Ready" or row.get("uploaded_by") != current_owner:
+            continue
+        stem = Path(row["filename"]).stem
+        # Newest upload wins if this user has more than one Ready upload
+        # with the same stem (a re-upload superseding an earlier one).
+        existing = uploads_by_stem.get(stem)
+        if existing is None or (row.get("uploaded_at") or "") > (existing.get("uploaded_at") or ""):
+            uploads_by_stem[stem] = row
 
     bindings: dict[str, str] = {}
     missing: list[str] = []
     for name in source_names:
         upload_row = uploads_by_stem.get(name)
-        if upload_row is not None:
+        governed = suggested.get(name)
+        upload_is_recent = upload_row is not None and _is_recent_upload(upload_row.get("uploaded_at"))
+        if governed and not upload_is_recent:
+            bindings[name] = governed
+        elif upload_row is not None:
             bindings[name] = upload_row["volume_path"]
-        elif suggested.get(name):
-            bindings[name] = suggested[name]
+        elif governed:
+            bindings[name] = governed
         else:
             missing.append(name)
     return bindings, missing
