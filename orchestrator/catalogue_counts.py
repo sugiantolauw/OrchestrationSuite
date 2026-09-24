@@ -27,6 +27,7 @@ __all__ = [
     "combined_status",
     "catalogue_test_statuses",
     "catalogue_test_counts",
+    "catalogue_tests_for_skill",
 ]
 
 
@@ -85,3 +86,32 @@ def catalogue_test_counts(catalogue_tests: list[dict], test_results: list[dict])
         "with_exceptions": sum(1 for s in statuses.values() if s.get("status") == "exception"),
         "not_testable": sum(1 for s in statuses.values() if s.get("status") == "not_testable"),
     }
+
+
+def catalogue_tests_for_skill(skill) -> list[dict]:
+    """This run's Skill's catalogue.yaml `tests` list, for a caller that
+    needs to pass `catalogue_tests` into `orchestrator.narration.run_values.
+    run_values` (or `catalogue_test_counts` directly) -- `orchestrator.
+    nodes.narration.narrate` and `orchestrator.service._narrative_table`'s
+    "run" branch both call this rather than each hand-rolling the same
+    load-or-fall-back.
+
+    A Skill loaded straight from its own directory always has one. A Skill
+    reconstructed from the `skill_versions` ledger (an Explorer draft, or
+    any Playbook run of a saved Explorer draft -- `orchestrator.skills`'s
+    own `_LEDGER_ALLOWED_FILES`) may not: catalogue.yaml is not one of the
+    ledger's required files, because it is UI/export decoration, not
+    something `execute` needs to run the tests. When there genuinely is no
+    catalogue.yaml, there is also no coarser grouping to lose -- every
+    plan.yaml test IS already its own top-level test -- so this returns one
+    synthetic catalogue-test entry per plan test rather than an empty list.
+    An empty list would silently hand the CALLER's own plan-grain fallback
+    (`run_values`'s `if catalogue_tests:` check) the exact wrong-grain
+    behaviour this module exists to fix; this function's job is to never
+    hand back "nothing" when a 1:1 grain is the correct, known answer."""
+    from orchestrator.pptx_export import load_catalogue_rows
+
+    rows = load_catalogue_rows(skill.skill_dir)
+    if rows:
+        return rows
+    return [{"test_id": t["test_id"]} for t in (skill.plan.get("tests") or []) if t.get("test_id")]

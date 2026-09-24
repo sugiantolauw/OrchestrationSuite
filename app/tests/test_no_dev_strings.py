@@ -40,13 +40,9 @@ _EXPORT_FORBIDDEN_SUBSTRINGS = [
     "findings.yaml",
     "plan.yaml",
     "manifest.yaml",
+    "contract.yaml",
     "strip_pptx_template.py",
     "computation.py",
-    # NOT "contract.yaml": a metric's own source_ref.basis text (computed
-    # outside _write_xlsx_workpaper/pptx_export.py, in scope for a
-    # different task -- see this task's own report) already cites it in
-    # the real fixture's Metrics sheet, so it is a known, out-of-scope
-    # finding here, not something these two tests can assert clean yet.
 ]
 _EXPORT_FORBIDDEN_PATTERNS = [
     *_FORBIDDEN_PATTERNS,

@@ -28,11 +28,18 @@ Gap-fix (independent review 2026-09-24, gap #5): `run_tests_total` /
 `run_tests_with_exceptions` / `run_tests_not_testable` must be counted at
 CATALOGUE grain (14 for SKILL-001), not over `state.test_results`'s own,
 larger set of plan-grain primitive-instance sub-tests (21) -- see
-`orchestrator.catalogue_counts`. A caller that can supply the run's
-catalogue tests (a catalogue.yaml `tests` list) passes them as
-`catalogue_tests`; a caller that cannot (none yet does) falls back to the
-prior, plan-grain count rather than raising, since a wrong grain is still
-better than a missing figure."""
+`orchestrator.catalogue_counts`. `catalogue_tests` is a REQUIRED keyword,
+not merely accepted: every caller (`orchestrator.narration.payloads.
+build_exec_summary_payload`, `orchestrator.narration.runner.
+narrate_exec_summary`, the `narrate` node, `orchestrator.service`'s "run"
+narrative table) resolves it via `orchestrator.catalogue_counts.
+catalogue_tests_for_skill(skill)` and passes it through explicitly, so a
+future caller cannot silently fall back to the wrong grain by forgetting
+the argument the way every caller here once did. An empty list is still a
+legitimate, EXPLICIT choice (no Skill/plan in scope) -- it still falls back
+to the plan-grain count below rather than raising, since a wrong grain is
+still better than a missing figure; what changed is that nothing may reach
+that fallback by omission any more."""
 
 from __future__ import annotations
 
@@ -65,7 +72,7 @@ def _date_entry(name: str, value: str | None, meaning: str) -> PlaceholderEntry:
 
 
 def run_values(
-    state, findings: list[dict], metrics: dict[str, dict], *, catalogue_tests: list[dict] | None = None,
+    state, findings: list[dict], metrics: dict[str, dict], *, catalogue_tests: list[dict],
 ) -> dict[str, PlaceholderEntry]:
     """Builds the `run_*` table. `findings` is whichever finding LIST the
     caller currently has (rule findings, or rule findings plus accepted
@@ -74,10 +81,13 @@ def run_values(
     source_ref, test_id}}). `state` supplies `audit_period` and
     `test_results` -- a plain `RunState`, or any object exposing those two
     attributes (the fixture harnesses' minimal state stubs already do).
-    `catalogue_tests`, when supplied, is this run's Skill's catalogue.yaml
-    `tests` list -- the test-count entries are then computed at catalogue
-    grain (`orchestrator.catalogue_counts`) rather than over the plan's own,
-    larger set of sub-tests."""
+    `catalogue_tests` is REQUIRED (see module docstring): this run's
+    Skill's catalogue.yaml `tests` list, normally from `orchestrator.
+    catalogue_counts.catalogue_tests_for_skill(skill)` -- when non-empty,
+    the test-count entries are computed at catalogue grain (`orchestrator.
+    catalogue_counts`) rather than over the plan's own, larger set of
+    sub-tests; pass `[]` explicitly (never omit the argument) for a caller
+    with no Skill/plan in scope."""
     severity_counts = {s: 0 for s in _SEVERITIES}
     for f in findings:
         severity = f.get("severity")
