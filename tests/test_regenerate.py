@@ -40,18 +40,12 @@ from orchestrator.pipeline import run_phase
 from tests.n9_test_support import FIELDWORK_NODES_FOR, harness_at_awaiting_signoff
 
 
-def test_the_node_registry_is_missing_narrate_blocking_regeneration(local_persistence, tmp_path, clock):
-    """Canary, not a WP N9 defect: documents the real, currently-unfixed gap
-    in `orchestrator/nodes/registry.py` (out of this WP's scope) that makes
-    `regenerate_narration` unusable end-to-end against the actual production
-    node lookup today. If this test starts failing, the registry gap has
-    been fixed -- remove it and the `monkeypatch.setattr(service, "NODES_FOR",
-    ...)` calls below stop being necessary (though they remain harmless)."""
-    from orchestrator.errors import NarrationNodeUnavailable
-
+def test_regenerate_finds_narrate_in_the_real_node_registry(local_persistence, tmp_path, clock):
+    """The registry gap this used to document (narrate missing from
+    orchestrator/nodes/registry.py) is fixed: regenerate_narration now works
+    against the production node lookup, with no monkeypatching."""
     h, ctx_app, state = harness_at_awaiting_signoff(local_persistence, tmp_path, clock)
-    with pytest.raises(NarrationNodeUnavailable):
-        service.regenerate_narration(ctx_app, state.run_id, "alice")
+    service.regenerate_narration(ctx_app, state.run_id, "alice")
 
 
 @pytest.fixture
