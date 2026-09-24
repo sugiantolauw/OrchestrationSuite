@@ -38,3 +38,23 @@ TASK_PROFILES: dict[str, TaskProfile] = {
         fallback=None,
     ),
 }
+
+# FALLBACK_ROLE (CLAUDE.md §6 "Fallback" / docs/specs/P6_narration_design.md
+# §4.1): the per-task degrade rule LLMGateway.call() applies when a task's
+# primary role (orchestrator.config.NODE_MODELS[task]) is unavailable.
+# profile/prioritise/act are auditor-edited prose in a consistent voice --
+# CLAUDE.md §6 allows degrading them to GPT-OSS. `find`, the exec summary
+# and `plan` are read verbatim by a CAO/executive or drive what an auditor
+# confirms, and CLAUDE.md §6 says never to silently degrade what an
+# executive reads -- they, and every task absent from this dict, have no
+# fallback: LLMGateway.call() returns `status="unavailable"` for them
+# instead ("LLM unavailable — deterministic output only", NN13). A task
+# whose fallback role resolves to the SAME endpoint as its primary role
+# (the development-workspace override, CLAUDE.md §6) is skipped by the
+# gateway, not listed specially here -- that is a runtime config fact, not
+# a per-task rule.
+FALLBACK_ROLE: dict[str, str | None] = {
+    "profile": "model_gpt_oss",
+    "prioritise": "model_gpt_oss",
+    "act": "model_gpt_oss",
+}

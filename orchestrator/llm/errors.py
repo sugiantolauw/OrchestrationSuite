@@ -75,3 +75,17 @@ class LLMLoggingError(Exception):
     non-negotiable 7: "nothing is returned unlogged". This fails the node;
     a call whose outcome cannot be recorded is not a call this system can
     stand behind."""
+
+
+class LLMReplayMiss(Exception):
+    """`LLM_CACHE_MODE=replay` (docs/specs/P6_P8_explorer_llm_design.md
+    §3.6 steps 5-7 / WP N6): replay mode never makes a live call. When no
+    cached response exists for the exact (prompt, endpoint, params) triple,
+    the gateway logs outcome='replay_miss' (NN7 -- the miss itself is
+    logged, same as any other outcome) and raises this, rather than falling
+    through to a live call or to a fallback role."""
+
+    def __init__(self, endpoint: str, reason: str = "no cached response for this prompt/endpoint/params"):
+        self.endpoint = endpoint
+        self.reason = reason
+        super().__init__(f"replay miss for endpoint {endpoint!r}: {reason}")

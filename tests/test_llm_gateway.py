@@ -14,7 +14,14 @@ import pytest
 from orchestrator.adapters.model_fake import FakeModelClient
 from orchestrator.adapters.protocols import ModelResponse
 from orchestrator.adapters.persistence_local import LocalPersistence
-from orchestrator.llm.errors import LLMConfigError, LLMLoggingError, RateLimited, TransientModelError
+from orchestrator.llm.errors import (
+    LLMConfigError,
+    LLMLoggingError,
+    LLMReplayMiss,
+    ModelUnavailable,
+    RateLimited,
+    TransientModelError,
+)
 from orchestrator.llm.gateway import CallContext, LLMGateway
 
 _CAPS = {
@@ -26,6 +33,10 @@ _CAPS = {
                 "json_schema_strict": "supported", "seed": "rejected",
             },
         },
+        "model_sonnet": {
+            "verified_on": "2026-09-23", "served_model_prefix": "claude-sonnet",
+            "params": {"max_tokens": "supported", "temperature": "supported"},
+        },
     }
 }
 
@@ -36,6 +47,7 @@ NODE_MODELS = {"classify": "model_gpt_oss", "find": "model_sonnet"}
 class _Settings:
     model_gpt_oss: str | None = "databricks-gpt-oss-120b"
     model_sonnet: str | None = None
+    llm_cache_mode: str = "live"
 
 
 def _resp(text="hello", model="gpt-oss-120b-080525", finish_reason="stop", reasoning=0):
@@ -288,3 +300,195 @@ def test_logging_failure_raises_llm_logging_error():
     gw = _gateway(client, persistence=_RaisingPersistence())
     with pytest.raises(LLMLoggingError):
         gw.call(task="classify", seq=1, messages=[], desired_params={}, ctx=_ctx())
+
+
+# ── LLM_CACHE_MODE=replay (WP N6) ─────────────────────────────────────────
+
+
+def test_replay_mode_serves_a_prior_cached_response_without_calling_the_endpoint():
+    persistence = _persistence()
+    client = FakeModelClient(responses={"databricks-gpt-oss-120b": [_resp(text="captured live")]})
+    live_gw = _gateway(client, persistence=persistence, settings=_Settings(llm_cache_mode="live"))
+    messages = [{"role": "user", "content": "hi"}]
+    first = live_gw.call(task="classify", seq=1, messages=messages, desired_params={"max_tokens": 10}, ctx=_ctx())
+    assert first.source == "live"
+
+    replay_gw = _gateway(client, persistence=persistence, settings=_Settings(llm_cache_mode="replay"))
+    second = replay_gw.call(task="classify", seq=2, messages=messages, desired_params={"max_tokens": 10}, ctx=_ctx())
+    assert second.status == "ok"
+    assert second.source == "cache"
+    assert second.text == "captured live"
+    assert len(client.calls) == 1  # the endpoint was never called a second time
+
+    rows = persistence.list_llm_calls("RUN-1")
+    assert [r["outcome"] for r in rows] == ["succeeded", "succeeded"]
+
+
+def test_replay_mode_miss_raises_and_logs_replay_miss_never_calling_live():
+    persistence = _persistence()
+    client = FakeModelClient(responses={"databricks-gpt-oss-120b": [_resp()]})
+    gw = _gateway(client, persistence=persistence, settings=_Settings(llm_cache_mode="replay"))
+    with pytest.raises(LLMReplayMiss):
+        gw.call(task="classify", seq=1, messages=[{"role": "user", "content": "never cached"}],
+                 desired_params={"max_tokens": 10}, ctx=_ctx())
+    assert client.calls == []  # replay mode never makes a live call
+    rows = persistence.list_llm_calls("RUN-1")
+    assert len(rows) == 1
+    assert rows[0]["outcome"] == "replay_miss"
+    assert rows[0]["source"] is None
+
+
+def test_live_mode_is_unaffected_by_the_replay_addition():
+    # "live" (the default) keeps today's behaviour: a miss just calls live.
+    persistence = _persistence()
+    client = FakeModelClient(responses={"databricks-gpt-oss-120b": [_resp()]})
+    gw = _gateway(client, persistence=persistence, settings=_Settings(llm_cache_mode="live"))
+    result = gw.call(task="classify", seq=1, messages=[], desired_params={}, ctx=_ctx())
+    assert result.status == "ok"
+    assert result.source == "live"
+    assert len(client.calls) == 1
+
+
+# ── per-call prompt_template_id/version (WP N6) ───────────────────────────
+
+
+def test_per_call_prompt_template_overrides_the_constructor_default():
+    persistence = _persistence()
+    client = FakeModelClient(responses={"databricks-gpt-oss-120b": [_resp()]})
+    gw = _gateway(
+        client, persistence=persistence,
+        prompt_template_id="classify/t43", prompt_template_version="1",
+    )
+    gw.call(
+        task="classify", seq=1, messages=[], desired_params={}, ctx=_ctx(),
+        prompt_template_id="narration/finding", prompt_template_version="v2",
+    )
+    rows = persistence.list_llm_calls("RUN-1")
+    assert len(rows) == 1
+    assert rows[0]["prompt_template_id"] == "narration/finding"
+    assert rows[0]["prompt_template_version"] == "v2"
+
+
+def test_call_without_a_per_call_template_falls_back_to_the_constructor_default():
+    persistence = _persistence()
+    client = FakeModelClient(responses={"databricks-gpt-oss-120b": [_resp()]})
+    gw = _gateway(
+        client, persistence=persistence,
+        prompt_template_id="classify/t43", prompt_template_version="1",
+    )
+    gw.call(task="classify", seq=1, messages=[], desired_params={}, ctx=_ctx())
+    rows = persistence.list_llm_calls("RUN-1")
+    assert rows[0]["prompt_template_id"] == "classify/t43"
+    assert rows[0]["prompt_template_version"] == "1"
+
+
+# ── FALLBACK_ROLE degrade matrix (CLAUDE.md §6 / WP N6) ───────────────────
+
+
+def test_allowed_task_degrades_to_gpt_oss_when_sonnet_is_unconfigured():
+    persistence = _persistence()
+    client = FakeModelClient(responses={"databricks-gpt-oss-120b": [_resp(text="from gpt-oss")]})
+    gw = _gateway(
+        client, persistence=persistence,
+        node_models={"profile": "model_sonnet"},
+        fallback_role={"profile": "model_gpt_oss"},
+        settings=_Settings(model_sonnet=None, model_gpt_oss="databricks-gpt-oss-120b"),
+    )
+    result = gw.call(task="profile", seq=1, messages=[], desired_params={}, ctx=_ctx())
+    assert result.status == "ok"
+    assert result.text == "from gpt-oss"
+
+    rows = sorted(persistence.list_llm_calls("RUN-1"), key=lambda r: r["created_at"])
+    assert len(rows) == 2
+    assert rows[0]["endpoint_role"] == "model_sonnet" and rows[0]["outcome"] == "unavailable"
+    assert rows[1]["endpoint_role"] == "model_gpt_oss" and rows[1]["outcome"] == "succeeded"
+
+
+def test_allowed_task_degrades_when_sonnet_call_itself_is_unavailable():
+    persistence = _persistence()
+    client = FakeModelClient(responses={
+        "databricks-claude-sonnet-5": ModelUnavailable("databricks-claude-sonnet-5", "rate limit of 0"),
+        "databricks-gpt-oss-120b": _resp(text="fallback answered"),
+    })
+    gw = _gateway(
+        client, persistence=persistence,
+        node_models={"act": "model_sonnet"},
+        fallback_role={"act": "model_gpt_oss"},
+        settings=_Settings(model_sonnet="databricks-claude-sonnet-5", model_gpt_oss="databricks-gpt-oss-120b"),
+    )
+    result = gw.call(task="act", seq=1, messages=[], desired_params={}, ctx=_ctx())
+    assert result.status == "ok"
+    assert result.text == "fallback answered"
+
+
+def test_task_with_no_fallback_role_stays_unavailable():
+    """`find` (and every task absent from FALLBACK_ROLE) never degrades --
+    CLAUDE.md §6: "for find, exec summary and plan, show LLM unavailable"."""
+    persistence = _persistence()
+    client = FakeModelClient(responses={"databricks-gpt-oss-120b": [_resp()]})
+    gw = _gateway(
+        client, persistence=persistence,
+        node_models={"find": "model_sonnet"},
+        fallback_role={},  # find is absent -- no fallback, even though gpt_oss IS configured
+        settings=_Settings(model_sonnet=None, model_gpt_oss="databricks-gpt-oss-120b"),
+    )
+    result = gw.call(task="find", seq=1, messages=[], desired_params={}, ctx=_ctx())
+    assert result.status == "unavailable"
+    assert client.calls == []  # the gpt_oss endpoint was never touched
+    rows = persistence.list_llm_calls("RUN-1")
+    assert len(rows) == 1
+    assert rows[0]["endpoint_role"] == "model_sonnet"
+
+
+def test_fallback_skipped_when_it_resolves_to_the_same_endpoint_as_the_primary():
+    """The development-workspace override (CLAUDE.md §6): MODEL_SONNET and
+    MODEL_GPT_OSS pointing at the same endpoint means a second attempt
+    would just repeat the failed call, so the gateway never makes it."""
+    persistence = _persistence()
+    client = FakeModelClient(responses={
+        "databricks-gpt-oss-120b": ModelUnavailable("databricks-gpt-oss-120b", "rate limit of 0"),
+    })
+    gw = _gateway(
+        client, persistence=persistence,
+        node_models={"profile": "model_sonnet"},
+        fallback_role={"profile": "model_gpt_oss"},
+        settings=_Settings(model_sonnet="databricks-gpt-oss-120b", model_gpt_oss="databricks-gpt-oss-120b"),
+    )
+    result = gw.call(task="profile", seq=1, messages=[], desired_params={}, ctx=_ctx())
+    assert result.status == "unavailable"
+    assert len(client.calls) == 1  # one failed attempt, no repeat
+
+
+def test_fallback_role_default_matches_claude_md_section_6():
+    from orchestrator.llm.tasks import FALLBACK_ROLE
+
+    assert FALLBACK_ROLE == {
+        "profile": "model_gpt_oss", "prioritise": "model_gpt_oss", "act": "model_gpt_oss",
+    }
+    # `find`, `plan_explorer` (the plan node) and every other task have no
+    # fallback -- CLAUDE.md §6 "never silently degrade what an executive reads".
+    for never_degrades in ("find", "export_summary", "plan_explorer"):
+        assert FALLBACK_ROLE.get(never_degrades) is None
+
+
+# ── NN11: reasoning is never stored, whatever its count ───────────────────
+
+
+def test_reasoning_parts_stripped_count_is_logged_but_never_the_text():
+    persistence = _persistence()
+    client = FakeModelClient(responses={
+        "databricks-gpt-oss-120b": [_resp(text="the clean answer", reasoning=3)],
+    })
+    gw = _gateway(client, persistence=persistence)
+    result = gw.call(task="classify", seq=1, messages=[], desired_params={}, ctx=_ctx())
+    assert result.status == "ok"
+    assert result.text == "the clean answer"  # ModelResponse.text is already reasoning-free
+
+    rows = persistence.list_llm_calls("RUN-1")
+    row = rows[0]
+    assert row["reasoning_parts_stripped"] == 3
+    # the count is the only reasoning-shaped thing in the row: response_text
+    # is exactly ModelResponse.text, already reasoning-free (NN11 -- the
+    # gateway trusts the ModelClient to have stripped it, and adds nothing).
+    assert row["response_text"] == "the clean answer"
+    assert "reasoning" not in row["response_text"]
