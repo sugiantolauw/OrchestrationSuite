@@ -123,7 +123,10 @@ def read_line_amounts(ctx, skill, bindings: dict, amount_col_by_source: dict, en
                  f"state.data_assets has no binding for it -- discover() should "
                  f"have required one"]
             )
-        df = ctx.data_source.read_population(source, version=version)
+        # CLAUDE.md §0.5/NN14: same declared contract timezone execute()
+        # already used for this (source, version) -- keeps this read
+        # cache-consistent with (and numerically identical to) execute()'s.
+        df = ctx.data_source.read_population(source, version=version, audit_timezone=skill.contract.get("timezone"))
         source_frames[source] = df
 
         col = amount_col_by_source.get(source)
@@ -248,7 +251,14 @@ def per_diem_row_excess(
                     [f"source {src!r} declares a contract but state.data_assets has no "
                      f"binding for it -- discover() should have required one"]
                 )
-            raw_df = ctx.data_source.read_population(src, version=version)
+            # CLAUDE.md §0.5/NN14: the same declared contract timezone
+            # execute_skill() threads through read_population -- never a
+            # bare re-read left to fall back to a different (or no)
+            # timezone, which would disagree with execute()'s own already-
+            # normalised dates for this exact (source, version).
+            raw_df = ctx.data_source.read_population(
+                src, version=version, audit_timezone=skill.contract.get("timezone"),
+            )
             source_frames[src] = raw_df
         if src not in contract_validated_sources:
             # build_populations' own filters/derives assume contract-typed

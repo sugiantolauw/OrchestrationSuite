@@ -7,7 +7,7 @@ from typing import Any
 import jsonschema
 import pandas as pd
 
-from orchestrator.contract import validate_contract
+from orchestrator.contract import ContractViolation, validate_contract
 from orchestrator.findings import build_findings
 from orchestrator.populations import PopulationContext, PopulationResult, build_populations
 from orchestrator.primitives import PRIMITIVES, PrimitiveContext, PrimitiveParamsError, run_primitive
@@ -197,6 +197,21 @@ def execute_skill(
     engine's own tests) that never pinned a version keep working."""
     contract_sources = skill.contract.get("sources", {})
 
+    # CLAUDE.md §0.5/NN14, independent test-gap audit #13/H9: an audit period
+    # is a business-calendar concept in a stated timezone, and a contract
+    # without one fails loudly rather than letting date-boundary comparisons
+    # silently fall back to a guess. `skills.load_skill`'s jsonschema check
+    # already requires contract.yaml to declare `timezone` for every
+    # YAML-loaded Skill; this is the defense-in-depth check for a Skill built
+    # directly (bypassing that schema), and it is what actually threads the
+    # declared timezone to every read below.
+    audit_timezone = skill.contract.get("timezone")
+    if not audit_timezone:
+        raise ContractViolation(
+            ["contract missing required 'timezone' -- an audit period is a business-calendar "
+             "concept and cannot be evaluated without one (CLAUDE.md §0.5, NN14)"]
+        )
+
     if pinned_versions is not None:
         missing = sorted(set(contract_sources) - set(pinned_versions))
         if missing:
@@ -206,7 +221,7 @@ def execute_skill(
         source_versions = {name: data_source.resolve_version(name) for name in contract_sources}
     raw_sources: dict[str, dict] = {}
     for name in contract_sources:
-        df = data_source.read_population(name, version=source_versions[name])
+        df = data_source.read_population(name, version=source_versions[name], audit_timezone=audit_timezone)
         validate_contract(df, contract_sources[name])
         raw_sources[name] = {"df": df, "version": source_versions[name]}
 

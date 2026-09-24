@@ -41,16 +41,18 @@ class _CachingDataSource:
         version,
         columns: list[str] | None = None,
         filters: dict[str, Any] | None = None,
+        audit_timezone: str | None = None,
     ):
         key = (
             source,
             version,
             tuple(sorted(columns)) if columns else None,
             json.dumps(filters, sort_keys=True, default=str) if filters else None,
+            audit_timezone,
         )
         if key not in self._cache:
             self._cache[key] = self._inner.read_population(
-                source, version=version, columns=columns, filters=filters
+                source, version=version, columns=columns, filters=filters, audit_timezone=audit_timezone,
             )
         return self._cache[key].copy()
 

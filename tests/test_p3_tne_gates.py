@@ -163,9 +163,10 @@ def test_g6_reconciliation_fails_on_injected_amount_variance(local_persistence, 
 
     real_column_stats = ctx.data_source.column_stats
 
-    def lying_column_stats(source, *, version=None, amount_column=None, date_column=None):
+    def lying_column_stats(source, *, version=None, amount_column=None, date_column=None, audit_timezone=None):
         stats = real_column_stats(
-            source, version=version, amount_column=amount_column, date_column=date_column
+            source, version=version, amount_column=amount_column, date_column=date_column,
+            audit_timezone=audit_timezone,
         )
         if source == "expense_report" and stats["amount"] is not None:
             stats = {**stats, "amount": stats["amount"] + 1.0}
@@ -187,9 +188,10 @@ def test_g6_reconciliation_fails_on_injected_date_variance(local_persistence, ui
 
     real_column_stats = ctx.data_source.column_stats
 
-    def lying_column_stats(source, *, version=None, amount_column=None, date_column=None):
+    def lying_column_stats(source, *, version=None, amount_column=None, date_column=None, audit_timezone=None):
         stats = real_column_stats(
-            source, version=version, amount_column=amount_column, date_column=date_column
+            source, version=version, amount_column=amount_column, date_column=date_column,
+            audit_timezone=audit_timezone,
         )
         if source == "expense_report" and stats["max_date"] is not None:
             stats = {**stats, "max_date": "2099-12-31"}

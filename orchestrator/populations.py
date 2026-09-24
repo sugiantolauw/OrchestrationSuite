@@ -99,9 +99,23 @@ def _apply_filter(df: pd.DataFrame, flt: dict, ctx: PopulationContext) -> pd.Ser
             # "through midnight at its start" -- otherwise every row on the last
             # day of the period with a non-midnight time-of-day (e.g. an
             # approval timestamp) is silently dropped. CLAUDE.md §0.5: an audit
-            # period is a business-calendar concept; this is the boundary half of
-            # that fix (the timezone half is not yet addressed -- see the P2b-1
-            # report).
+            # period is a business-calendar concept.
+            #
+            # The timezone half (independent test-gap audit #13/H9) is
+            # addressed upstream, not here: by the time a population is built,
+            # `series` is a column DataSourceAdapter.read_population already
+            # returned NAIVE -- and every adapter is responsible for that
+            # naive value already representing local wall-clock time in the
+            # contract's declared timezone (orchestrator.timeutil.
+            # to_business_local, applied in
+            # orchestrator.adapters.datasource_uc._normalise_datetime_dtypes
+            # for a UC TIMESTAMP's tz-aware value, a no-op for a file/Volume
+            # read's already-naive one). `lo`/`hi` are plain calendar-day
+            # bounds in that same local, naive representation, so this
+            # comparison needs no tz-aware arithmetic of its own -- and
+            # correctly handles a DST-transition day for free, since a
+            # calendar day here is always 24 naive hours regardless of what
+            # UTC offset applied on either side of it.
             hi = pd.Timestamp(hi) + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)
         return (series >= lo) & (series <= hi)
     if op == "gt":
