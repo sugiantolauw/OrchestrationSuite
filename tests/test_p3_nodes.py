@@ -16,6 +16,7 @@ import pytest
 
 from orchestrator import runs as runs_module
 from orchestrator.adapters.export_storage import LocalExportStorage
+from orchestrator.config import DEFAULT_PPTX_TEMPLATE_PATH
 from orchestrator.contract import ContractViolation, LocalFileDataSource
 from orchestrator.nodes.context import NodeContext
 from orchestrator.nodes.fieldwork import act, classify, discover, execute, export, find, prioritise, profile
@@ -98,7 +99,7 @@ def _make_harness(local_persistence, tmp_path, *, run_owner="alice", engagement_
 
     export_dir = tmp_path / "exports"
     ctx = NodeContext(
-        settings=type("S", (), {"catalog": None, "schema": None})(),
+        settings=type("S", (), {"catalog": None, "schema": None, "pptx_template_path": DEFAULT_PPTX_TEMPLATE_PATH})(),
         persistence=persistence,
         data_source=data_source,
         skill=skill,
