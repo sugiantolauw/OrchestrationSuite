@@ -31,6 +31,11 @@ _EXCLUDED_DIRS = (REPO_ROOT / "reference_app", REPO_ROOT / "docs")
 def _is_excluded(path: Path) -> bool:
     if "__pycache__" in path.parts or ".git" in path.parts:
         return True
+    # Agent worktrees (.claude/worktrees/<id>) are full checkouts of other
+    # branches, and .local holds generated run output: neither is this tree's
+    # source.
+    if ".claude" in path.parts or ".local" in path.parts:
+        return True
     if path.name == ".env" or (path.name.startswith(".env") and path.name != ".env.example"):
         return True
     return any(excluded in path.parents or path == excluded for excluded in _EXCLUDED_DIRS)
