@@ -64,6 +64,38 @@ class DataSourceAdapter(Protocol):
         "max_date": str | None} (dates as ISO 'YYYY-MM-DD')."""
         ...
 
+    def profile_columns(
+        self,
+        source: str,
+        *,
+        version: int | str,
+        max_distinct: int,
+        min_count: int,
+        audit_period: tuple[str, str] | None = None,
+        audit_timezone: str | None = None,
+    ) -> dict:
+        """Explorer Mode's aggregates-only statistical profile of one source
+        (docs/specs/P6_P8_explorer_llm_design.md §4.3): row_count and, per
+        column, null_count/distinct_count/type/min/max/negative_count/
+        zero_count/values (a low-cardinality column's value set with counts,
+        capped at max_distinct and suppressing any value seen in fewer than
+        min_count rows) and, for a date/datetime column, in_period_count when
+        audit_period+audit_timezone are given. PII classification is NOT this
+        method's job -- it returns raw statistics only; §4.3.1 masking is
+        applied by the caller (orchestrator.explorer.profile), never here, so
+        an adapter never has to know what a Skill or the heuristic rules
+        consider PII. Never reads more than a bounded sample of distinct
+        values per column (CLAUDE.md §2.3 rule 4 -- pushed into the warehouse
+        for a UC-backed source; computed in pandas over the same population a
+        Playbook profile() would read for a file-backed source)."""
+        ...
+
+    def distinct_count(self, source: str, *, version: int | str, columns: list[str]) -> int:
+        """COUNT(DISTINCT <columns...>) at the pinned version -- used for
+        Explorer's entry_key uniqueness check (§4.7 V-C3): a composite key is
+        unique when this equals row_count(source, version=version)."""
+        ...
+
 
 @dataclass(frozen=True)
 class ModelResponse:

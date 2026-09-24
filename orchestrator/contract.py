@@ -10,6 +10,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from orchestrator.explorer.profile import pandas_distinct_count, pandas_profile_columns
+
 
 class ContractViolation(Exception):
     """Raised when data read from a source does not conform to its contract.yaml
@@ -302,3 +304,23 @@ class LocalFileDataSource:
                     min_date = dates.min().date().isoformat()
                     max_date = dates.max().date().isoformat()
         return {"amount": amount, "min_date": min_date, "max_date": max_date}
+
+    def profile_columns(
+        self,
+        source: str,
+        *,
+        version: int | str,
+        max_distinct: int,
+        min_count: int,
+        audit_period: tuple[str, str] | None = None,
+        audit_timezone: str | None = None,
+    ) -> dict:
+        df = self.read_population(source, version=version)
+        return pandas_profile_columns(
+            df, max_distinct=max_distinct, min_count=min_count,
+            audit_period=audit_period, audit_timezone=audit_timezone,
+        )
+
+    def distinct_count(self, source: str, *, version: int | str, columns: list[str]) -> int:
+        df = self.read_population(source, version=version, columns=columns)
+        return pandas_distinct_count(df, columns)

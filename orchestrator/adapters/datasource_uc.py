@@ -28,6 +28,7 @@ from typing import Any, Callable
 import pandas as pd
 
 from orchestrator.config import Settings
+from orchestrator.explorer.profile import pandas_distinct_count, pandas_profile_columns
 
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -496,6 +497,60 @@ class UCTableDataSource:
             if v_max is not None:
                 max_date = pd.Timestamp(v_max).date().isoformat()
         return {"amount": amount, "min_date": min_date, "max_date": max_date}
+
+    # ── Explorer Mode profiling (docs/specs/P6_P8_explorer_llm_design.md §4.3) ──
+
+    def profile_columns(
+        self,
+        source: str,
+        *,
+        version: int | str,
+        max_distinct: int,
+        min_count: int,
+        audit_period: tuple[str, str] | None = None,
+        audit_timezone: str | None = None,
+    ) -> dict:
+        # Documented simplification (see orchestrator.explorer.profile's own
+        # docstring): reads the same bound population a Playbook profile()
+        # node already reads (its own cell-ceiling guard, §2.3 rule 4,
+        # applies unchanged), then computes every statistic in pandas --
+        # ONE shared implementation with the local/upload adapters rather
+        # than a second, SQL-pushdown one that could drift from it.
+        df = self.read_population(source, version=version)
+        return pandas_profile_columns(
+            df, max_distinct=max_distinct, min_count=min_count,
+            audit_period=audit_period, audit_timezone=audit_timezone,
+        )
+
+    def distinct_count(self, source: str, *, version: int | str, columns: list[str]) -> int:
+        df = self.read_population(source, version=version, columns=columns)
+        return pandas_distinct_count(df, columns)
+
+    def column_tags(self, source: str, *, version: int | str | None = None) -> dict[str, list[str]] | None:
+        """§4.3.1 rule 2: `{column_name: [tag_name, ...]}` from
+        `information_schema.column_tags`. `None` (never raised) only when
+        this identity is genuinely denied that query -- the same
+        PermissionDenied-vs-everything-else distinction `list_tables` makes
+        (independent review 2026-09-24 item 6): a real platform error still
+        raises, because that is not a permission question and must not be
+        silently swallowed into a false 'tags unreadable'."""
+        from databricks.sdk.errors import PermissionDenied
+
+        fqn = self._fqn(source)
+        catalog, schema, table = _split_and_validate_fqn(fqn)
+        try:
+            cur = self._execute(
+                f"SELECT column_name, tag_name FROM {_quote_ident(catalog)}.information_schema.column_tags "
+                f"WHERE schema_name = :schema_name AND table_name = :table_name",
+                {"schema_name": schema, "table_name": table},
+            )
+            rows = cur.fetchall()
+        except PermissionDenied:
+            return None
+        tags: dict[str, list[str]] = {}
+        for column_name, tag_name in rows:
+            tags.setdefault(column_name, []).append(tag_name)
+        return tags
 
     # ── UI helper (data_asset_card metadata) ────────────────────────────────
 
