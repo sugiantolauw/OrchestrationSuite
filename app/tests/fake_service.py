@@ -452,7 +452,23 @@ def get_run_frames(ctx, run_id) -> dict:
     """Realistic multi-source frames -- real contract column names
     (skills/tne_exco/contract.yaml) and RF_* flags from the real Skill's
     plan.yaml, so app/'s own workspace_tne.py exercises the same flag ->
-    catalogue-test mapping it uses against a live backend."""
+    catalogue-test mapping it uses against a live backend.
+
+    Every contract "date"/"datetime" column here (independently confirmed
+    against orchestrator.service.get_run_frames' own real path, which
+    contract-validates each source before it is ever written into a run's
+    frame snapshot -- orchestrator.contract.validate_contract's _coerce_date
+    -- and the parquet round-trip that snapshot goes through preserves that
+    dtype) comes back to this module as an actual datetime64 column, never
+    a plain python string. Writing these frames as raw strings and coercing
+    them to datetime64 immediately below, rather than constructing them as
+    datetime64 in the first place, keeps the column values above
+    hand-readable while still handing app/ the same dtype the real backend
+    does -- so a test against this fixture exercises the same dtype
+    production sees (CLAUDE.md build brief P4 defect: a date-picker crash on
+    every Audit Detail page that this fixture's plain-string columns used to
+    hide, because pandas 3.0.6's default dtype for a plain string column is
+    "str", not the datetime64 a contract-validated column actually has)."""
     expense = pd.DataFrame({
         "Employee": ["Alice Wu", "Bob Chen", "Alice Wu", "Carol Ng", "Bob Chen", "Alice Wu"],
         "Transaction Date": ["2025-02-01", "2025-02-03", "2025-03-01", "2025-03-15", "2025-04-02", "2025-06-15"],
@@ -502,6 +518,16 @@ def get_run_frames(ctx, run_id) -> dict:
         "Depart Date": ["2025-01-30", "2025-02-01"],
         "RF_CS_LateBooking": [1, 0],
     })
+    # skills/tne_exco/contract.yaml's own "date"/"datetime" columns per
+    # source (see this function's own docstring for why this frame matches
+    # the real backend's dtype rather than leaving these as plain strings).
+    expense["Transaction Date"] = pd.to_datetime(expense["Transaction Date"])
+    approval["Approved Date/Time"] = pd.to_datetime(approval["Approved Date/Time"])
+    approval["Approver Received Date"] = pd.to_datetime(approval["Approver Received Date"])
+    approval["Receipts Viewed Date"] = pd.to_datetime(approval["Receipts Viewed Date"])
+    travel_requests["Start Date"] = pd.to_datetime(travel_requests["Start Date"])
+    booking["Depart Date"] = pd.to_datetime(booking["Depart Date"])
+
     return {
         "expense_report": expense,
         "approval_aging": approval,

@@ -348,18 +348,6 @@ def test_p1_filtered_by_member_matches_independently_filtered_population(bundle,
     assert list(f4.data[1].y) == list(expected_tiers["Amount"])
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "DEFECT: app/src/workspace_tne.py _p1_update (around line 1042/1070) never filters "
-        "travel_requests_no_expense (pre_df) by the page's own member/date filters before "
-        "passing it into charts.grouped_count_chart -- only the expense_report side (df) is "
-        "filtered. Filtering 'Travel pre-request compliance' to a single ExCo member still "
-        "shows every OTHER employee's pre-approval count (e.g. Bob Chen, 0 claims / 1 "
-        "pre-approval) even though the member dropdown says 'Alice Wu' only. Expected: the "
-        "chart's own Employee categories are a subset of the selected member filter."
-    ),
-)
 def test_p1_precomp_chart_respects_the_member_filter():
     run_id = _completed_run()
     bundle = workspace_tne._load_bundle(run_id)
@@ -372,22 +360,6 @@ def test_p1_precomp_chart_respects_the_member_filter():
     assert categories <= {"Alice Wu"}, categories
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "DEFECT: app/src/workspace_tne.py _filter_by_dates (lines 334-342) compares the raw "
-        "string date column directly against a pandas Timestamp -- "
-        "`out[date_col] >= pd.to_datetime(start_date)` -- without first parsing date_col to "
-        "datetime. On this environment's pandas (3.0.6), a plain string column has dtype "
-        "'str' (Arrow-backed), and pandas refuses that comparison outright: "
-        "TypeError: Invalid comparison between dtype=str and Timestamp. Every date-range "
-        "picker on /workspace/tne's Audit Detail pages (p1 'tne-p1-date', p2 'tne-p2-date', "
-        "p3 'tne-p3-date') calls this same helper, so picking ANY start/end date on ANY of "
-        "the three pages crashes that page's callback outright -- not a wrong number, a hard "
-        "failure. Confirmed here for all three pages against the same run/frames the other "
-        "tests in this file use."
-    ),
-)
 def test_date_range_filter_crashes_on_every_audit_detail_page():
     run_id = _completed_run()
     bundle = workspace_tne._load_bundle(run_id)
