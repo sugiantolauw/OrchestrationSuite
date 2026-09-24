@@ -4,7 +4,7 @@ import dataclasses
 
 import pytest
 
-from orchestrator.config import Settings, load_settings, runtime_config_hash
+from orchestrator.config import DEFAULT_PPTX_TEMPLATE_PATH, Settings, load_settings, runtime_config_hash
 from orchestrator.errors import ConfigError
 
 
@@ -141,3 +141,18 @@ def test_load_settings_defaults_when_env_empty():
     assert settings.max_concurrent_runs == 2
     assert settings.demo_mode is False
     assert settings.catalog is None
+    assert settings.pptx_template_path == DEFAULT_PPTX_TEMPLATE_PATH
+
+
+def test_load_settings_reads_pptx_template_path_env():
+    settings = load_settings({"PPTX_TEMPLATE_PATH": "/tmp/custom_template.pptx"})
+    assert settings.pptx_template_path == "/tmp/custom_template.pptx"
+
+
+def test_runtime_config_hash_excludes_pptx_template_path():
+    # CLAUDE.md §4.7: the template changes the export's appearance only,
+    # never a number or a finding -- two identically-configured runs
+    # differing only in this must fingerprint identically.
+    s1 = Settings(catalog="cat", schema="sch", pptx_template_path="/a/template.pptx")
+    s2 = dataclasses.replace(s1, pptx_template_path="/b/other.pptx")
+    assert runtime_config_hash(s1) == runtime_config_hash(s2)

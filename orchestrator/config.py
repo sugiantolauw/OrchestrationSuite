@@ -5,10 +5,20 @@ import json
 import os
 import re
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 
 from orchestrator.errors import ConfigError
 
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+# CLAUDE.md §4.7: the PPTX exporter's own content-free template (layouts +
+# masters, zero content slides -- scripts/strip_pptx_template.py generates
+# it from the source deck). A relative default resolves against the repo
+# root so a checkout works with no .env at all; PPTX_TEMPLATE_PATH overrides
+# it for a deployment layout where the repo root differs (CLAUDE.md §3
+# non-negotiable 16 -- never a hardcoded absolute path).
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_PPTX_TEMPLATE_PATH = str(_REPO_ROOT / "templates" / "report_template.pptx")
 
 # task -> Settings attribute name holding the endpoint for that task (CLAUDE.md §6)
 NODE_MODELS: dict[str, str] = {
@@ -78,6 +88,7 @@ class Settings:
     # fields above.
     executor_active_poll_interval_s: float = 30.0
     executor_idle_poll_interval_s: float = 0.0
+    pptx_template_path: str = DEFAULT_PPTX_TEMPLATE_PATH
 
     def __post_init__(self) -> None:
         _validate_identifier("catalog", self.catalog)
@@ -127,6 +138,7 @@ def load_settings(env: dict | None = None) -> Settings:
         admission_backoff_max_s=_parse_float(env.get("ADMISSION_BACKOFF_MAX_S"), 60.0),
         executor_active_poll_interval_s=_parse_float(env.get("EXECUTOR_ACTIVE_POLL_INTERVAL_S"), 30.0),
         executor_idle_poll_interval_s=_parse_float(env.get("EXECUTOR_IDLE_POLL_INTERVAL_S"), 0.0),
+        pptx_template_path=env.get("PPTX_TEMPLATE_PATH") or DEFAULT_PPTX_TEMPLATE_PATH,
         # P2/P3 gate review item 4 (MLflow per-node spans, CLAUDE.md §2.3).
         # Unset -- never hardcoded here -- means mlflow's own default
         # resolution: MLFLOW_TRACKING_URI if the process environment already
@@ -158,6 +170,11 @@ _RUNTIME_HASH_EXCLUDED_FIELDS = frozenset({
     "max_concurrent_runs", "executor", "mlflow_tracking_uri", "mlflow_experiment_path",
     "admission_max_attempts", "admission_backoff_base_s", "admission_backoff_max_s",
     "executor_active_poll_interval_s", "executor_idle_poll_interval_s",
+    # PPTX template path changes the export's appearance only -- never a
+    # number or a finding (CLAUDE.md §4.7's "every number comes from
+    # RunState" rule), so two runs configured identically except for this
+    # should still share a fingerprint.
+    "pptx_template_path",
 })
 
 
