@@ -2075,14 +2075,29 @@ class DeltaPersistence:
             )
             return _fetchone_dict(cur)
 
-    def find_llm_cache(self, prompt_sha256: str, endpoint: str, params_json: str) -> list[dict]:
+    def find_llm_cache(
+        self, prompt_sha256: str, endpoint: str, params_json: str,
+        served_model_version: str | None = None,
+    ) -> list[dict]:
         with self._cursor_ctx() as conn:
-            cur = self._execute(
-                conn,
-                f"SELECT * FROM {self._table('llm_cache')} WHERE prompt_sha256 = :prompt_sha256 "
-                "AND endpoint = :endpoint AND params_json = :params_json ORDER BY created_at DESC",
-                {"prompt_sha256": prompt_sha256, "endpoint": endpoint, "params_json": params_json},
-            )
+            if served_model_version is not None:
+                cur = self._execute(
+                    conn,
+                    f"SELECT * FROM {self._table('llm_cache')} WHERE prompt_sha256 = :prompt_sha256 "
+                    "AND endpoint = :endpoint AND params_json = :params_json "
+                    "AND served_model_version = :served_model_version ORDER BY created_at DESC",
+                    {
+                        "prompt_sha256": prompt_sha256, "endpoint": endpoint, "params_json": params_json,
+                        "served_model_version": served_model_version,
+                    },
+                )
+            else:
+                cur = self._execute(
+                    conn,
+                    f"SELECT * FROM {self._table('llm_cache')} WHERE prompt_sha256 = :prompt_sha256 "
+                    "AND endpoint = :endpoint AND params_json = :params_json ORDER BY created_at DESC",
+                    {"prompt_sha256": prompt_sha256, "endpoint": endpoint, "params_json": params_json},
+                )
             return _fetchall_dicts(cur)
 
     def put_llm_cache_if_absent(self, row: dict) -> bool:

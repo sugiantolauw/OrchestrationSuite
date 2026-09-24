@@ -349,6 +349,112 @@ def test_live_mode_is_unaffected_by_the_replay_addition():
     assert len(client.calls) == 1
 
 
+# ── version-aware cache matching (independent review, NN8 fix) ────────────
+# §3.6 steps 5-7: a cache hit must match the full NN8 key -- (prompt_sha256,
+# endpoint, served_model_version, params_json) -- not just the first cached
+# response for this prompt/endpoint/params, or a silent provider upgrade
+# lets a replay keep returning an older model's response.
+
+
+def test_live_mode_does_not_serve_a_stale_cached_response_after_a_version_change():
+    persistence = _persistence()
+    client = FakeModelClient(responses={"databricks-gpt-oss-120b": [
+        _resp(text="P answered by v1", model="v1"),   # 1. prompt P, first ever call -> v1
+        _resp(text="Q answered by v2", model="v2"),   # 2. prompt Q reveals the provider moved to v2
+        _resp(text="P answered by v2", model="v2"),   # 3. prompt P again, now expected to be v2
+    ]})
+    gw = _gateway(client, persistence=persistence, settings=_Settings(llm_cache_mode="live"))
+    prompt_p = [{"role": "user", "content": "prompt p"}]
+    prompt_q = [{"role": "user", "content": "prompt q"}]
+
+    first_p = gw.call(task="classify", seq=1, messages=prompt_p, desired_params={"max_tokens": 10}, ctx=_ctx())
+    assert first_p.source == "live"
+    assert first_p.text == "P answered by v1"
+
+    first_q = gw.call(task="classify", seq=2, messages=prompt_q, desired_params={"max_tokens": 10}, ctx=_ctx())
+    assert first_q.source == "live"
+    assert first_q.text == "Q answered by v2"
+
+    # Before the fix, find_llm_cache(prompt, endpoint, params) ignored
+    # served_model_version and returned the only (stale, v1) row cached for
+    # prompt P. The cache lookup must now be scoped to the endpoint's
+    # current expected version (v2, observed via prompt Q), find no match
+    # for P at v2, and make a fresh live call -- never replaying v1.
+    second_p = gw.call(task="classify", seq=3, messages=prompt_p, desired_params={"max_tokens": 10}, ctx=_ctx())
+    assert second_p.source == "live"
+    assert second_p.text == "P answered by v2"
+    assert len(client.calls) == 3
+
+
+def test_version_changed_flag_recorded_when_served_version_differs_from_expected():
+    persistence = _persistence()
+    client = FakeModelClient(responses={"databricks-gpt-oss-120b": [
+        _resp(text="first", model="v1"), _resp(text="second", model="v2"),
+    ]})
+    gw = _gateway(client, persistence=persistence, settings=_Settings(llm_cache_mode="live"))
+    first = gw.call(task="classify", seq=1, messages=[{"role": "user", "content": "p"}],
+                     desired_params={"max_tokens": 10}, ctx=_ctx())
+    rows = persistence.list_llm_calls("RUN-1")
+    assert rows[0]["version_changed"] is False  # nothing expected yet -- first call ever
+
+    second = gw.call(task="classify", seq=2, messages=[{"role": "user", "content": "q"}],
+                      desired_params={"max_tokens": 10}, ctx=_ctx())
+    rows = persistence.list_llm_calls("RUN-1")
+    second_row = next(r for r in rows if r["response_text"] == "second")
+    assert second_row["version_changed"] is True  # expected v1 (from `first`), got v2
+    assert first.source == "live" and second.source == "live"
+
+
+def test_replay_mode_prefers_the_latest_observed_live_version_when_several_are_cached():
+    persistence = _persistence()
+    client = FakeModelClient(responses={"databricks-gpt-oss-120b": [
+        _resp(text="P answered by v1", model="v1"),
+        _resp(text="Q answered by v2", model="v2"),
+        _resp(text="P answered by v2", model="v2"),   # forced live because the v1 cache entry is stale
+    ]})
+    live_gw = _gateway(client, persistence=persistence, settings=_Settings(llm_cache_mode="live"))
+    prompt_p = [{"role": "user", "content": "prompt p"}]
+    prompt_q = [{"role": "user", "content": "prompt q"}]
+    live_gw.call(task="classify", seq=1, messages=prompt_p, desired_params={"max_tokens": 10}, ctx=_ctx())
+    live_gw.call(task="classify", seq=2, messages=prompt_q, desired_params={"max_tokens": 10}, ctx=_ctx())
+    live_gw.call(task="classify", seq=3, messages=prompt_p, desired_params={"max_tokens": 10}, ctx=_ctx())
+    # Prompt P now has two cached responses (v1 and v2) for the identical
+    # prompt/endpoint/params. Replay must prefer the latest observed live
+    # version (v2) and must never return the older v1 response.
+    replay_gw = _gateway(client, persistence=persistence, settings=_Settings(llm_cache_mode="replay"))
+    result = replay_gw.call(task="classify", seq=4, messages=prompt_p, desired_params={"max_tokens": 10}, ctx=_ctx())
+    assert result.status == "ok"
+    assert result.source == "cache"
+    assert result.text == "P answered by v2"
+    assert len(client.calls) == 3  # replay never calls the endpoint
+
+
+def test_replay_mode_raises_ambiguous_replay_miss_when_no_cached_version_matches_the_latest_live_one():
+    persistence = _persistence()
+    client = FakeModelClient(responses={"databricks-gpt-oss-120b": [
+        _resp(text="P answered by v1", model="v1"),   # 1. prompt P -> v1
+        _resp(text="Q answered by v2", model="v2"),   # 2. prompt Q -> v2 (last_live becomes v2)
+        _resp(text="P answered by v3", model="v3"),   # 3. prompt P again (stale at v2) -> v3; P now {v1, v3}
+        _resp(text="R answered by v4", model="v4"),   # 4. prompt R -> v4 (last_live becomes v4, matches neither)
+    ]})
+    live_gw = _gateway(client, persistence=persistence, settings=_Settings(llm_cache_mode="live"))
+    prompt_p = [{"role": "user", "content": "prompt p"}]
+    live_gw.call(task="classify", seq=1, messages=prompt_p, desired_params={"max_tokens": 10}, ctx=_ctx())
+    live_gw.call(task="classify", seq=2, messages=[{"role": "user", "content": "prompt q"}],
+                 desired_params={"max_tokens": 10}, ctx=_ctx())
+    live_gw.call(task="classify", seq=3, messages=prompt_p, desired_params={"max_tokens": 10}, ctx=_ctx())
+    live_gw.call(task="classify", seq=4, messages=[{"role": "user", "content": "prompt r"}],
+                 desired_params={"max_tokens": 10}, ctx=_ctx())
+
+    replay_gw = _gateway(client, persistence=persistence, settings=_Settings(llm_cache_mode="replay"))
+    with pytest.raises(LLMReplayMiss):
+        replay_gw.call(task="classify", seq=5, messages=prompt_p, desired_params={"max_tokens": 10}, ctx=_ctx())
+    rows = persistence.list_llm_calls("RUN-1")
+    replay_row = next(r for r in rows if r["outcome"] == "replay_miss")
+    assert "ambiguous" in replay_row["error_message"]
+    assert len(client.calls) == 4  # replay never calls the endpoint
+
+
 # ── per-call prompt_template_id/version (WP N6) ───────────────────────────
 
 

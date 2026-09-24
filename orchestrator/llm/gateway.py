@@ -205,12 +205,25 @@ class LLMGateway:
 
         prompt_sha256 = _sha256_text(_canonical_json(final_messages))
         params_json = _canonical_json(sent)
+        cache_mode = getattr(self.settings, "llm_cache_mode", "live") or "live"
 
-        # Replayability (CLAUDE.md §3 non-negotiable 8): a prior successful
-        # call with the exact same prompt/endpoint/params is served from
-        # llm_cache instead of calling the endpoint again -- in EITHER cache
-        # mode. Only a miss branches on the mode.
-        cache_matches = self.persistence.find_llm_cache(prompt_sha256, endpoint, params_json)
+        # Replayability (CLAUDE.md §3 non-negotiable 8) is scoped to the
+        # full NN8 cache key -- (prompt_sha256, endpoint, served_model_
+        # version, params_json) -- not just the first cached response for
+        # this prompt/endpoint/params (docs/specs/P6_P8_explorer_llm_
+        # design.md §3.6 steps 5-7, WP N6): after a provider model upgrade,
+        # an unscoped lookup could keep returning an older model's response
+        # forever. Resolve the expected served version first, then look the
+        # cache up by the full key.
+        expected_version, ambiguous_reason = self._resolve_expected_version(
+            cache_mode, endpoint, prompt_sha256, params_json,
+        )
+        cache_matches = (
+            self.persistence.find_llm_cache(
+                prompt_sha256, endpoint, params_json, served_model_version=expected_version,
+            )
+            if expected_version and not ambiguous_reason else []
+        )
         if cache_matches:
             cached = cache_matches[0]
             return self._log_and_return(
@@ -224,21 +237,23 @@ class LLMGateway:
                 prompt_template_version=prompt_template_version,
             )
 
-        cache_mode = getattr(self.settings, "llm_cache_mode", "live") or "live"
         if cache_mode == "replay":
             # docs/specs/P6_P8_explorer_llm_design.md §3.6 step 7: replay
-            # mode never makes a live call. The miss is logged (NN7 -- even
-            # a failure to answer is a logged outcome) before it is raised.
+            # mode never makes a live call. The miss -- including an
+            # ambiguous served version among several cached responses -- is
+            # logged (NN7 -- even a failure to answer is a logged outcome)
+            # before it is raised.
+            reason = ambiguous_reason or "no cached response for this prompt/endpoint/params (LLM_CACHE_MODE=replay)"
             self._log_and_return(
                 task=task, seq=seq, role=role, endpoint=endpoint, messages=final_messages,
                 params_sent=sent, params_dropped=dropped, ctx=ctx, transport_attempt=1,
                 outcome="replay_miss", status="unavailable", error_type="LLMReplayMiss",
-                error_message="no cached response for this prompt/endpoint/params (LLM_CACHE_MODE=replay)",
+                error_message=reason,
                 prompt_sha256=prompt_sha256, params_json=params_json,
                 prompt_template_id=prompt_template_id, prompt_template_version=prompt_template_version,
                 _return=False,
             )
-            raise LLMReplayMiss(endpoint)
+            raise LLMReplayMiss(endpoint, reason)
 
         return self._call_live(
             task=task, seq=seq, role=role, endpoint=endpoint, messages=final_messages,
@@ -246,6 +261,32 @@ class LLMGateway:
             params_json=params_json, schema=schema, transport_attempt=1,
             prompt_template_id=prompt_template_id, prompt_template_version=prompt_template_version,
         )
+
+    # ── §3.6 step 5: which served version a cache hit must match ───────────
+
+    def _resolve_expected_version(
+        self, cache_mode: str, endpoint: str, prompt_sha256: str, params_json: str,
+    ) -> tuple[str | None, str | None]:
+        """Returns (expected_version, ambiguous_reason). In live mode the
+        expected version is simply the endpoint's last observed live
+        version (§3.6 step 5, live). In replay mode it is the single
+        distinct served_model_version among this prompt/endpoint/params'
+        cached rows; with none, (None, None) -- a plain miss; with several,
+        the latest observed live version wins if it is among them, else the
+        version is ambiguous and no cache lookup or live call may proceed
+        (step 5, replay)."""
+        if cache_mode != "replay":
+            return self.persistence.last_live_version(endpoint), None
+        candidates = self.persistence.find_llm_cache(prompt_sha256, endpoint, params_json)
+        versions = sorted({c["served_model_version"] for c in candidates})
+        if not versions:
+            return None, None
+        if len(versions) == 1:
+            return versions[0], None
+        last_live = self.persistence.last_live_version(endpoint)
+        if last_live in versions:
+            return last_live, None
+        return None, "ambiguous served model version among cached responses for this prompt/endpoint/params"
 
     # ── live call, with one transport retry and one JSON-validation retry ──
 
