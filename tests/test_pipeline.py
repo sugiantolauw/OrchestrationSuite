@@ -219,3 +219,31 @@ def test_node_trace_events_use_ui_status_vocabulary_and_stage_labels(local_persi
     assert by_type["node_started"]["status"] == "running"
     assert by_type["node_completed"]["status"] == "complete"
     assert by_type["node_started"]["stage"] == "Source data"
+
+
+def test_node_completed_trace_event_carries_the_nodes_own_message(local_persistence, clock):
+    # Independent review 2026-09-24 (CLAUDE.md §9B scenario 8): every
+    # orchestrator/nodes/fieldwork.py node computes and appends a specific,
+    # informative message to RunState.events (e.g. act's "Management
+    # actions not generated (option off)" or "N management action(s)
+    # drafted") -- CLAUDE.md §4.2's node table names exactly this kind of
+    # label as each node's "Event". The persisted node_completed
+    # trace_events row must carry that message, not the generic
+    # "<node> completed" placeholder that discards it -- the /trace page
+    # reads only trace_events, so a discarded message is invisible to an
+    # auditor, not merely uncosmetic.
+    persistence = local_persistence
+    fp = _fingerprint()
+
+    def fake_node(skill, state):
+        return dataclasses.replace(
+            state, events=state.events + [{"node": "discover", "message": "3 source(s) bound", "at": clock()}]
+        )
+
+    nodes_for = {"fieldwork": {"plan": [("discover", fake_node)], "execute": [], "export": []}}
+    state = _create(persistence, clock, fp)
+    run_phase(persistence, state.run_id, nodes_for=nodes_for, clock=clock, current_fingerprint=fp)
+
+    events = [e for e in persistence.list_trace_events(state.run_id) if e["node_name"] == "discover"]
+    by_type = {e["event_type"]: e for e in events}
+    assert by_type["node_completed"]["message"] == "3 source(s) bound"

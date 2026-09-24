@@ -42,6 +42,22 @@ def _node_event_id(execution_key: str, event_type: str) -> str:
     return hashlib.sha256(f"{execution_key}:{event_type}".encode("utf-8")).hexdigest()[:32]
 
 
+def _node_completed_message(node_name: str, events: list[dict]) -> str:
+    # Independent review 2026-09-24 (CLAUDE.md §9B scenario 8 / §4.2's node
+    # table, whose "Event" column names a specific label per node, e.g.
+    # act -> "Actions drafted"): every node in orchestrator/nodes/
+    # fieldwork.py already appends its own specific, informative message to
+    # RunState.events (population counts, "N drafted" vs "not generated
+    # (option off)", etc.) -- use it for the persisted node_completed
+    # trace_events row instead of the generic "<node> completed"
+    # placeholder, which discarded it. Falls back to the placeholder only
+    # if the node genuinely appended nothing (defensive, not expected for
+    # any real fieldwork node).
+    if events and events[-1].get("node") == node_name:
+        return events[-1].get("message") or f"{node_name} completed"
+    return f"{node_name} completed"
+
+
 def _emit_node_event(
     persistence, state: RunState, attempt: dict, *, event_type: str, message: str, now: str, duration_s: float | None = None
 ) -> None:
@@ -228,7 +244,8 @@ def run_phase(
                 state = persistence.save_state(recovered)
                 _emit_node_event(
                     persistence, state, recovered_attempt, event_type="node_completed",
-                    message=f"{node_name} completed", now=recovered_attempt.get("completed_at") or clock(),
+                    message=_node_completed_message(node_name, recovered.events),
+                    now=recovered_attempt.get("completed_at") or clock(),
                 )
                 idx += 1
                 continue
@@ -298,7 +315,7 @@ def run_phase(
             state = persistence.save_state(new_state)
             _emit_node_event(
                 persistence, state, attempt, event_type="node_completed",
-                message=f"{node_name} completed", now=now_end, duration_s=duration,
+                message=_node_completed_message(node_name, new_state.events), now=now_end, duration_s=duration,
             )
             idx += 1
 
