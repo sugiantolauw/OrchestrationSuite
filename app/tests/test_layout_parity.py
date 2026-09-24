@@ -56,7 +56,11 @@ def test_landing_page_matches_prototype(monkeypatch, reference_fixtures):
     monkeypatch.setattr(adapters, "list_skills", lambda filters=None: reference_fixtures["DEMO_SKILLS"])
     monkeypatch.setattr(
         adapters, "search_governed_data",
-        lambda q: assets if not q else [a for a in assets if q.lower() in a["name"].lower()],
+        lambda q, limit=None: (
+            assets if not q else [a for a in assets if q.lower() in a["name"].lower()]
+        )[:limit] if limit is not None else (
+            assets if not q else [a for a in assets if q.lower() in a["name"].lower()]
+        ),
     )
     monkeypatch.setattr(adapters, "is_demo_mode", lambda: True)
     # Any string works here: the tree comparison is structural (tag/id/

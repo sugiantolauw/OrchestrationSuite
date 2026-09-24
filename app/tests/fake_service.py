@@ -123,6 +123,28 @@ def list_governed_tables(ctx) -> list:
     return _GOVERNED_TABLES
 
 
+_DATA_ASSET_CARDS = [
+    {"name": "test_catalog.tne_source.expense_report", "type": "Table",
+     "description": "Local test data", "access": "Available",
+     "owner": "fake-owner@example.com", "last_refreshed": "2026-09-01", "rows": 92798},
+    {"name": "test_catalog.tne_source.attendee_validity", "type": "Table",
+     "description": "Local test data", "access": "Available",
+     "owner": "fake-owner@example.com", "last_refreshed": "2026-09-01", "rows": 1200},
+    {"name": "test_catalog.restricted.secret_table", "type": "Table",
+     "description": "Local test data", "access": "Restricted"},
+]
+
+
+def list_data_asset_cards(ctx, query: str = "", limit=None) -> list:
+    cards = _DATA_ASSET_CARDS
+    if query:
+        q = query.lower()
+        cards = [c for c in cards if q in c["name"].lower() or q in c.get("description", "").lower()]
+    if limit is not None:
+        cards = cards[:limit]
+    return cards
+
+
 def suggest_bindings(ctx, skill_id: str) -> dict:
     return {"expense_report": "test_catalog.tne_source.expense_report", "attendee_validity": None}
 

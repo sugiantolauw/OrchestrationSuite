@@ -13,6 +13,7 @@ Public API (signatures kept stable for the UI to import against):
     list_skills(ctx) -> list[dict]
     get_skill(ctx, skill_id) -> dict | None
     list_governed_tables(ctx) -> list[dict]
+    list_data_asset_cards(ctx, query='', limit=None) -> list[dict]
     suggest_bindings(ctx, skill_id) -> dict[str, str | None]
     start_audit_run(ctx, *, skill_id, bindings, audit_period, objective, run_owner,
                      mode='playbook', review_plan_first=False, engagement_id='ENG-DEFAULT') -> str
@@ -450,16 +451,24 @@ def list_governed_tables(ctx: AppContext) -> list[dict]:
         out = []
         for name, cfg in sorted(configs.items()):
             file_name = cfg.get("file", name)
-            out.append(
-                {
-                    "fqn": file_name,
-                    "catalog": None,
-                    "schema": None,
-                    "table": name,
-                    "comment": "Local test data" if (Path(root) / file_name).is_file() else "File not found",
-                    "columns": list((cfg or {}).get("columns", {}).keys()),
-                }
-            )
+            file_path = Path(root) / file_name
+            entry = {
+                "fqn": file_name,
+                "catalog": None,
+                "schema": None,
+                "table": name,
+                "comment": "Local test data" if file_path.is_file() else "File not found",
+                "columns": list((cfg or {}).get("columns", {}).keys()),
+            }
+            # A local source has no UC owner and no row count worth
+            # computing here (CLAUDE.md §5 UI item 3: "owner omitted" for
+            # files) -- but it does have a real filesystem mtime, so
+            # "Refreshed" need not render the literal None either.
+            if file_path.is_file():
+                import datetime
+
+                entry["last_refreshed"] = datetime.date.fromtimestamp(file_path.stat().st_mtime).isoformat()
+            out.append(entry)
         return out
 
     data_source = ctx.data_source_factory({})
@@ -472,6 +481,58 @@ def list_governed_tables(ctx: AppContext) -> list[dict]:
             "work has not landed in this checkout yet"
         )
     return list_tables()
+
+
+def list_data_asset_cards(ctx: AppContext, query: str = "", limit: int | None = None) -> list[dict]:
+    """The data_asset_card component's shape, filtered by `query` the same
+    way the UI's search box always has (fully-qualified name / catalog /
+    schema / table / comment), and never carrying a literal None for a field
+    the source cannot supply (CLAUDE.md §5 UI item 3): a key is present only
+    when there is a real value, so components.data_asset_card's own existing
+    "—" / "File" fallbacks render instead of the word "None".
+
+    Row count and UC tag classification are real per-table queries -- too
+    expensive to run for a whole catalog listing, so they are fetched only
+    for `limit` entries (the cards a caller is actually about to render),
+    after filtering. Omit `limit` to shape every match with no row count or
+    classification lookups at all (e.g. a caller that filters further
+    itself)."""
+    tables = list_governed_tables(ctx)
+    if query:
+        q = query.lower()
+        tables = [
+            t for t in tables
+            if q in (t.get("fqn") or "").lower()
+            or q in (t.get("catalog") or "").lower()
+            or q in (t.get("schema") or "").lower()
+            or q in (t.get("table") or "").lower()
+            or q in (t.get("comment") or "").lower()
+        ]
+    if limit is not None:
+        tables = tables[:limit]
+
+    data_source = ctx.data_source_factory({}) if ctx.backend != "local" else None
+
+    cards = []
+    for t in tables:
+        card = {
+            "name": t.get("fqn") or t.get("table") or "",
+            "type": "Table",
+            "description": t.get("comment") or "",
+            "access": "Restricted" if t.get("restricted") else "Available",
+        }
+        if t.get("owner"):
+            card["owner"] = t["owner"]
+        if t.get("last_refreshed"):
+            card["last_refreshed"] = t["last_refreshed"]
+        if limit is not None and data_source is not None and not t.get("restricted") and t.get("fqn"):
+            fqn = t["fqn"]
+            card["rows"] = data_source.get_row_count(fqn)
+            classification = data_source.get_classification(fqn)
+            if classification:
+                card["classification"] = classification
+        cards.append(card)
+    return cards
 
 
 def suggest_bindings(ctx: AppContext, skill_id: str) -> dict[str, str | None]:

@@ -107,44 +107,15 @@ def suggest_bindings(skill_id: str) -> dict:
     return service.suggest_bindings(get_context(), skill_id)
 
 
-def _asset_card_shape(table: dict) -> dict:
-    """orchestrator.service.list_governed_tables()'s real shape (fqn/catalog/
-    schema/table/comment/columns/restricted) mapped to the data_asset_card
-    component's fields, matching the reference prototype's fixture shape
-    (reference_app/src/platform/fixtures.py DEMO_DATA_ASSETS) field-for-field.
-    Nothing here is invented: a field the real listing does not carry (owner,
-    row count, last-refreshed date, classification) is simply left unset, and
-    the component's own existing fallback text (already in components.py,
-    ported unchanged from the prototype) renders for it."""
-    return {
-        "name": table.get("fqn") or table.get("table") or "",
-        "type": "Table",
-        "owner": table.get("owner"),
-        "last_refreshed": table.get("last_refreshed"),
-        "classification": table.get("classification"),
-        "description": table.get("comment") or "",
-        "rows": table.get("rows"),
-        "access": "Restricted" if table.get("restricted") else "Available",
-    }
-
-
-def search_governed_data(query: str) -> list[dict]:
+def search_governed_data(query: str, limit: int | None = None) -> list[dict]:
     """Real Unity Catalog / local-source discovery (orchestrator.service.
-    list_governed_tables), filtered by `query` against the fully-qualified
+    list_data_asset_cards), filtered by `query` against the fully-qualified
     name and comment -- the same fields the prototype's mock filtered on
-    (name, description)."""
-    tables = service.list_governed_tables(get_context())
-    if query:
-        q = query.lower()
-        tables = [
-            t for t in tables
-            if q in (t.get("fqn") or "").lower()
-            or q in (t.get("catalog") or "").lower()
-            or q in (t.get("schema") or "").lower()
-            or q in (t.get("table") or "").lower()
-            or q in (t.get("comment") or "").lower()
-        ]
-    return [_asset_card_shape(t) for t in tables]
+    (name, description). `limit`, when given, is the number of cards the
+    caller is actually about to render -- row count and UC tag
+    classification are only fetched for that many (CLAUDE.md §5 UI item 3),
+    never for every matching table."""
+    return service.list_data_asset_cards(get_context(), query=query, limit=limit)
 
 
 # ── File upload ──────────────────────────────────────────────────────────────

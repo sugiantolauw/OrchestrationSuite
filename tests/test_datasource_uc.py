@@ -157,6 +157,50 @@ def test_resolve_source_versions_takes_source_names():
     assert ds.resolve_source_versions(["expense_report"]) == {"expense_report": "3"}
 
 
+# ── get_row_count() / get_classification() (data_asset_card metadata) ───────
+# CLAUDE.md §5 UI item 3: real per-table queries, run only for cards actually
+# rendered, cached by (fqn, Delta version) so re-rendering the same card never
+# re-counts a table it already counted.
+
+
+def test_get_row_count_queries_and_caches_by_fqn_and_version(monkeypatch):
+    from orchestrator.adapters import datasource_uc as duc
+
+    monkeypatch.setattr(duc, "_ROW_COUNT_CACHE", {})
+    handlers = {
+        "DESCRIBE HISTORY": lambda sql, p: (["version"], [(5,)]),
+        "SELECT COUNT(*)": lambda sql, p: (["count(1)"], [(92798,)]),
+    }
+    ds, conn = _ds(handlers, bindings={})
+
+    count = ds.get_row_count("cat.sch.expense_report")
+    assert count == 92798
+    assert "VERSION AS OF 5" in conn.calls[-1][0]
+
+    count_again = ds.get_row_count("cat.sch.expense_report")
+    assert count_again == 92798
+    count_queries = [c for c in conn.calls if "SELECT COUNT" in c[0]]
+    assert len(count_queries) == 1, "the second call must hit the cache, not re-run COUNT(*)"
+
+
+def test_get_classification_returns_matching_tag_case_insensitive():
+    handlers = {
+        "information_schema.table_tags": lambda sql, p: (
+            ["tag_name", "tag_value"], [("Classification", "PII"), ("owner_team", "IA")],
+        ),
+    }
+    ds, _ = _ds(handlers, bindings={})
+    assert ds.get_classification("cat.sch.expense_report") == "PII"
+
+
+def test_get_classification_returns_none_when_no_tag_present():
+    handlers = {
+        "information_schema.table_tags": lambda sql, p: (["tag_name", "tag_value"], []),
+    }
+    ds, _ = _ds(handlers, bindings={})
+    assert ds.get_classification("cat.sch.expense_report") is None
+
+
 # ── read_population ──────────────────────────────────────────────────────────
 
 
@@ -371,10 +415,12 @@ class _FakeColumn:
 
 
 class _FakeTable:
-    def __init__(self, name, comment, columns):
+    def __init__(self, name, comment, columns, owner=None, updated_at=None):
         self.name = name
         self.comment = comment
         self.columns = [_FakeColumn(c) for c in columns]
+        self.owner = owner
+        self.updated_at = updated_at
 
 
 class _FakeNamed:
@@ -457,6 +503,35 @@ def test_list_tables_returns_expected_shape_including_restricted_catalog():
         "comment": "T&E expense claims",
         "columns": ["Employee ID", "Expense Amount"],
     }
+
+
+def test_list_tables_includes_owner_and_last_refreshed_when_uc_reports_them():
+    """CLAUDE.md §5 UI item 3: data_asset_card must never render the literal
+    None for Owner/Refreshed. UCTableDataSource itself must not invent them
+    either -- a key is only added to the result dict when the SDK actually
+    returned a value, so a table UC has no owner/updated_at for is simply
+    left without that key (unchanged from the exact-equality test above)."""
+
+    class _TablesWithMetadata:
+        def list(self, catalog_name, schema_name):
+            return [
+                _FakeTable("expense_report", "T&E expense claims", ["Employee ID"],
+                           owner="alex@example.com", updated_at=1758585600000),
+                _FakeTable("no_metadata", None, []),
+            ]
+
+    class _WSClientWithMetadata(_FakeWorkspaceClient):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self.tables = _TablesWithMetadata()
+
+    ds, _ = _ds({}, bindings={}, workspace_client_factory=_WSClientWithMetadata)
+    results = {r["table"]: r for r in ds.list_tables() if not r.get("restricted")}
+
+    assert results["expense_report"]["owner"] == "alex@example.com"
+    assert results["expense_report"]["last_refreshed"] == "2025-09-23"
+    assert "owner" not in results["no_metadata"]
+    assert "last_refreshed" not in results["no_metadata"]
 
 
 def test_list_tables_caches_workspace_client_across_calls():

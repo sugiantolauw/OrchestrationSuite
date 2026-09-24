@@ -67,7 +67,11 @@ def _request_owner() -> str:
 
 def home_layout() -> html.Div:
     skills = adapters.list_skills()
-    assets = adapters.search_governed_data("")
+    # limit=4 matches the [:4] this page has always rendered -- passing it
+    # through means row-count/classification lookups (real per-table
+    # queries) only ever run for the cards actually shown here, not every
+    # governed table (CLAUDE.md §5 UI item 3).
+    assets = adapters.search_governed_data("", limit=4)
 
     return html.Div([
         # Hero section
@@ -334,7 +338,7 @@ def register_callbacks(app) -> None:
     )
     def search_data_assets(query):
         """Search governed data assets via adapter."""
-        results = adapters.search_governed_data(query or "")
+        results = adapters.search_governed_data(query or "", limit=6)
         if not results:
             return html.P("No matching data assets found.", style={"color": "#6b7283", "fontSize": 13})
         return [data_asset_card(a) for a in results[:6]]

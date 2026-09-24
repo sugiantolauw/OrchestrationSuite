@@ -36,6 +36,13 @@ _IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 # App container's memory (CLAUDE.md §2.3 rule 4). Overridden by DBX_MAX_CELLS.
 _DEFAULT_MAX_CELLS = 20_000_000
 
+# Process-wide, not per-instance: ctx.data_source_factory (orchestrator/service.py)
+# builds a fresh UCTableDataSource on every call, so an instance-level cache would
+# never actually be hit across separate service.list_data_asset_cards() calls (e.g.
+# every keystroke in the data-search box). Keyed by (fqn, version) -- CLAUDE.md §5
+# UI item 3's "cache by table fqn + Delta version".
+_ROW_COUNT_CACHE: dict[tuple[str, str], int] = {}
+
 
 class UCSourceError(Exception):
     """Raised for anything that would otherwise force a silent guess: an unknown
@@ -69,6 +76,12 @@ def _split_and_validate_fqn(fqn: str) -> tuple[str, str, str]:
 def _quoted_fqn(fqn: str) -> str:
     catalog, schema, table = _split_and_validate_fqn(fqn)
     return f"{_quote_ident(catalog)}.{_quote_ident(schema)}.{_quote_ident(table)}"
+
+
+def _epoch_ms_to_date(epoch_ms: int) -> str:
+    import datetime
+
+    return datetime.datetime.fromtimestamp(epoch_ms / 1000, tz=datetime.timezone.utc).date().isoformat()
 
 
 def _resolve_max_cells(explicit: int | None) -> int:
@@ -199,19 +212,21 @@ class UCTableDataSource:
 
     # ── DataSourceAdapter protocol ──────────────────────────────────────────
 
-    def resolve_version(self, source: str) -> str:
-        """Latest Delta version via DESCRIBE HISTORY, resolved BEFORE any read
-        (CLAUDE.md §4.1 TOCTOU ordering) -- callers pass this straight into
-        read_population's `version=`."""
-        fqn = self._fqn(source)
+    def _resolve_version_for_fqn(self, fqn: str) -> str:
         quoted = _quoted_fqn(fqn)
         cur = self._execute(f"DESCRIBE HISTORY {quoted} LIMIT 1")
         columns = [d[0] for d in cur.description]
         row = cur.fetchone()
         if row is None:
-            raise UCSourceError(f"{source}: DESCRIBE HISTORY returned no rows for {fqn} -- table has no commits")
+            raise UCSourceError(f"DESCRIBE HISTORY returned no rows for {fqn} -- table has no commits")
         idx = columns.index("version")
         return str(row[idx])
+
+    def resolve_version(self, source: str) -> str:
+        """Latest Delta version via DESCRIBE HISTORY, resolved BEFORE any read
+        (CLAUDE.md §4.1 TOCTOU ordering) -- callers pass this straight into
+        read_population's `version=`."""
+        return self._resolve_version_for_fqn(self._fqn(source))
 
     def resolve_source_versions(self, sources: list[str]) -> dict[str, str]:
         # Matches orchestrator.contract.LocalFileDataSource.resolve_source_versions:
@@ -452,6 +467,46 @@ class UCTableDataSource:
                 max_date = pd.Timestamp(v_max).date().isoformat()
         return {"amount": amount, "min_date": min_date, "max_date": max_date}
 
+    # ── UI helper (data_asset_card metadata) ────────────────────────────────
+
+    def get_row_count(self, fqn: str) -> int:
+        """Real row count for one table, pinned to the version DESCRIBE
+        HISTORY resolves right now (never an estimate from table properties,
+        which can be stale). Cached by (fqn, version) on this adapter
+        instance so re-rendering the same card (e.g. the search box firing
+        again) never re-counts a table it already counted this process
+        (CLAUDE.md §5 UI item 3: "cheap; cache by table fqn + Delta
+        version"). Callers are expected to call this only for the small
+        number of cards actually rendered, never for a whole catalog
+        listing."""
+        version = self._resolve_version_for_fqn(fqn)
+        key = (fqn, version)
+        cached = _ROW_COUNT_CACHE.get(key)
+        if cached is not None:
+            return cached
+        quoted = _quoted_fqn(fqn)
+        cur = self._execute(f"SELECT COUNT(*) FROM {quoted} VERSION AS OF {version}")
+        row = cur.fetchone()
+        count = int(row[0]) if row is not None else 0
+        _ROW_COUNT_CACHE[key] = count
+        return count
+
+    def get_classification(self, fqn: str) -> str | None:
+        """A UC tag named (case-insensitively) 'classification' on this
+        table, if the workspace has tagged it -- never invented when no tag
+        exists. `information_schema.table_tags` is catalog-scoped, so the
+        query runs against the table's own catalog."""
+        catalog, schema, table = _split_and_validate_fqn(fqn)
+        cur = self._execute(
+            f"SELECT tag_name, tag_value FROM {_quote_ident(catalog)}.information_schema.table_tags "
+            f"WHERE schema_name = :schema_name AND table_name = :table_name",
+            {"schema_name": schema, "table_name": table},
+        )
+        for tag_name, tag_value in cur.fetchall():
+            if str(tag_name).lower() == "classification":
+                return tag_value
+        return None
+
     # ── UI helper (source-binding dropdowns) ────────────────────────────────
 
     def list_tables(self, catalog: str | None = None, schema: str | None = None) -> list[dict]:
@@ -482,16 +537,22 @@ class UCTableDataSource:
             for sch in schemas:
                 try:
                     for t in w.tables.list(catalog_name=cat, schema_name=sch):
-                        results.append(
-                            {
-                                "fqn": f"{cat}.{sch}.{t.name}",
-                                "catalog": cat,
-                                "schema": sch,
-                                "table": t.name,
-                                "comment": t.comment,
-                                "columns": [c.name for c in (t.columns or [])],
-                            }
-                        )
+                        entry = {
+                            "fqn": f"{cat}.{sch}.{t.name}",
+                            "catalog": cat,
+                            "schema": sch,
+                            "table": t.name,
+                            "comment": t.comment,
+                            "columns": [c.name for c in (t.columns or [])],
+                        }
+                        # UC-reported metadata, included only when the SDK
+                        # actually returned it -- never a placeholder for a
+                        # field UC left unset (CLAUDE.md NN14).
+                        if t.owner:
+                            entry["owner"] = t.owner
+                        if t.updated_at:
+                            entry["last_refreshed"] = _epoch_ms_to_date(t.updated_at)
+                        results.append(entry)
                 except DatabricksError:
                     results.append({"fqn": f"{cat}.{sch}", "restricted": True})
         return results
