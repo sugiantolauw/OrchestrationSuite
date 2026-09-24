@@ -238,6 +238,21 @@ def real_completed_tne_run(tmp_path_factory):
     yield real_service, ctx, run_id
 
 
+# landmarks() does not capture "sub" paragraph text (only headings, KPI
+# titles and table headers -- see landmarks.py's own docstring), so neither
+# of these two intentional wording changes trips any assertion below. Named
+# here anyway so a reviewer who extends landmarks() to also capture "sub"
+# text finds the reason on file rather than a fresh unexplained failure.
+_ALLOWED_TEXT_DIVERGENCES = {
+    # text change: user decision 2026-09-24 (prototype wording untrue)
+    "Priority is determined from severity, recurrence and financial exposure.":
+        "Priority is determined from severity and financial exposure.",
+    # text change: user decision 2026-09-24 (prototype wording untrue)
+    "Action ownership and responses are maintained in this session for the showcase.":
+        "Action ownership and responses are saved with this run.",
+}
+
+
 _DYNAMIC_IN_PROTOTYPE_NOTE = (
     "reference_app's finding cards and Management Action Tracker table are populated by "
     "session-store Dash callbacks (render_action_summary, the filtered-findings-container "

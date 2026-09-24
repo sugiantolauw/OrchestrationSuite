@@ -619,7 +619,7 @@ def _executive_tab(run: dict, findings: list[dict], payload: dict | None, action
         html.Div([
             html.Div([
                 html.H3("Risk distribution", style={"margin": "0 0 2px", "fontSize": 14.5, "fontWeight": 700}),
-                html.P("Priority is determined from severity and de-duplicated financial exposure.", className="sub"),
+                html.P("Priority is determined from severity and financial exposure.", className="sub"),
                 dcc.Graph(figure=charts.findings_by_severity_donut(findings),
                           config={"displayModeBar": False}),
             ], className="panel"),
@@ -647,7 +647,7 @@ def _executive_tab(run: dict, findings: list[dict], payload: dict | None, action
             ], className="panel"),
             html.Div([
                 html.H3("Management action status", style={"margin": "0 0 2px", "fontSize": 14.5, "fontWeight": 700}),
-                html.P("Action ownership and responses are maintained in this session for the showcase.",
+                html.P("Action ownership and responses are saved with this run.",
                        className="sub"),
                 action_summary,
             ], className="panel"),
