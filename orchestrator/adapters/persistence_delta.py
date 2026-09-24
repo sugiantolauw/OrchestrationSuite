@@ -1552,6 +1552,71 @@ class DeltaPersistence:
             rows = _fetchall_dicts(cur)
         return {r["metric_name"]: _metric_dict_from_row(r) for r in rows}
 
+    def put_test_line_values(self, run_id: str, rows: list[dict]) -> None:
+        # P6 WP N4: a minimal write-through for the `test_line_values` table
+        # (migration 011) ahead of N3b's own full persistence-contract
+        # methods for it (docs/specs/P6_narration_design.md WP N3b) -- MERGE
+        # + prune, the same pattern write_flagged_rows/write_run_metrics use
+        # (never DELETE-then-INSERT, which leaves a window where this run's
+        # test_line_values are entirely absent to a concurrent reader).
+        # Batched (_MERGE_BATCH_SIZE rows' USING clause per MERGE), typed
+        # (spend_amount/excess_amount are money -- CLAUDE.md P2/P3 gate
+        # review item 1 -- bound as an explicit DOUBLE, never the driver's
+        # implicit inference).
+        new_keys = {(r["test_id"], r["source"], r["row_key"]) for r in rows}
+        with self._cursor_ctx() as conn:
+            cur = self._execute(
+                conn,
+                f"SELECT test_id, source, row_key FROM {self._table('test_line_values')} "
+                "WHERE run_id = :run_id",
+                {"run_id": run_id},
+            )
+            existing_keys = {(r["test_id"], r["source"], r["row_key"]) for r in _fetchall_dicts(cur)}
+
+            for batch in _batched(rows, _MERGE_BATCH_SIZE):
+                values_sql = ", ".join(
+                    f"(:run_id, :t{i}, :s{i}, :rk{i}, :lk{i}, :sa{i}, :ea{i})" for i in range(len(batch))
+                )
+                params: dict = {"run_id": run_id}
+                for i, r in enumerate(batch):
+                    params[f"t{i}"] = r["test_id"]
+                    params[f"s{i}"] = r["source"]
+                    params[f"rk{i}"] = r["row_key"]
+                    params[f"lk{i}"] = r["line_key"]
+                    params[f"sa{i}"] = float(r["spend_amount"])
+                    excess = r.get("excess_amount")
+                    params[f"ea{i}"] = float(excess) if excess is not None else None
+                merge_sql = (
+                    f"MERGE INTO {self._table('test_line_values')} t "
+                    "USING (SELECT col1 AS run_id, col2 AS test_id, col3 AS source, col4 AS row_key, "
+                    "col5 AS line_key, col6 AS spend_amount, col7 AS excess_amount "
+                    f"FROM (VALUES {values_sql})) s "
+                    "ON t.run_id = s.run_id AND t.test_id = s.test_id AND t.source = s.source "
+                    "AND t.row_key = s.row_key "
+                    "WHEN MATCHED THEN UPDATE SET line_key = s.line_key, spend_amount = s.spend_amount, "
+                    "excess_amount = s.excess_amount "
+                    "WHEN NOT MATCHED THEN INSERT (run_id, test_id, source, row_key, line_key, "
+                    "spend_amount, excess_amount) VALUES (s.run_id, s.test_id, s.source, s.row_key, "
+                    "s.line_key, s.spend_amount, s.excess_amount)"
+                )
+                self._execute_typed(conn, merge_sql, params)
+
+            orphans = existing_keys - new_keys
+            if orphans:
+                clauses = []
+                params = {"run_id": run_id}
+                for i, (test_id, source, row_key) in enumerate(orphans):
+                    clauses.append(f"(test_id = :t{i} AND source = :s{i} AND row_key = :rk{i})")
+                    params[f"t{i}"] = test_id
+                    params[f"s{i}"] = source
+                    params[f"rk{i}"] = row_key
+                self._execute(
+                    conn,
+                    f"DELETE FROM {self._table('test_line_values')} WHERE run_id = :run_id "
+                    f"AND ({' OR '.join(clauses)})",
+                    params,
+                )
+
     def get_run_metrics_for_runs(self, run_ids: list[str]) -> dict[str, dict[str, dict]]:
         out: dict[str, dict[str, dict]] = {rid: {} for rid in run_ids}
         if not run_ids:

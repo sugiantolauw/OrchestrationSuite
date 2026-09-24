@@ -1168,6 +1168,44 @@ class LocalPersistence:
             self._release(conn)
         return {r["metric_name"]: _metric_dict_from_row(dict(r)) for r in rows}
 
+    def put_test_line_values(self, run_id: str, rows: list[dict]) -> None:
+        # P6 WP N4: a minimal write-through for the `test_line_values` table
+        # (migration 011) ahead of N3b's own full persistence-contract
+        # methods for it (docs/specs/P6_narration_design.md WP N3b) -- upsert
+        # + prune, the same per-run replace idiom write_run_metrics/
+        # write_flagged_rows already use (CLAUDE.md §2.3 rule 1): a
+        # re-executed prioritise overwrites this run's whole prior set,
+        # never appends.
+        new_keys = {(r["test_id"], r["source"], r["row_key"]) for r in rows}
+        with self._writer() as conn:
+            existing_keys = {
+                (r["test_id"], r["source"], r["row_key"])
+                for r in conn.execute(
+                    "SELECT test_id, source, row_key FROM test_line_values WHERE run_id = ?", (run_id,)
+                ).fetchall()
+            }
+            conn.executemany(
+                "INSERT INTO test_line_values (run_id, test_id, source, row_key, line_key, "
+                "spend_amount, excess_amount) VALUES (?,?,?,?,?,?,?) "
+                "ON CONFLICT(run_id, test_id, source, row_key) DO UPDATE SET "
+                "line_key = excluded.line_key, spend_amount = excluded.spend_amount, "
+                "excess_amount = excluded.excess_amount",
+                [
+                    (
+                        run_id, r["test_id"], r["source"], r["row_key"], r["line_key"],
+                        r["spend_amount"], r.get("excess_amount"),
+                    )
+                    for r in rows
+                ],
+            )
+            orphans = existing_keys - new_keys
+            if orphans:
+                conn.executemany(
+                    "DELETE FROM test_line_values WHERE run_id = ? AND test_id = ? "
+                    "AND source = ? AND row_key = ?",
+                    [(run_id, test_id, source, row_key) for test_id, source, row_key in orphans],
+                )
+
     def get_run_metrics_for_runs(self, run_ids: list[str]) -> dict[str, dict[str, dict]]:
         out: dict[str, dict[str, dict]] = {rid: {} for rid in run_ids}
         if not run_ids:
