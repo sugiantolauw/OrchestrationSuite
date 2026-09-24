@@ -935,7 +935,12 @@ def _create_with_fingerprint(persistence, run_id: str, now_fn, fingerprint: dict
 def _fingerprint_for_settings(fp_id: str, settings: Settings) -> dict:
     fp = _fingerprint(fp_id)
     fp["code_revision"] = settings.code_revision
-    fp["runtime_config_hash"] = runtime_config_hash(settings)
+    # CLAUDE.md §11 "Paused runs across a code deploy" / independent review
+    # 2026-09-24 gap #11: matches orchestrator.fingerprint.compute_fingerprint
+    # (and ThreadExecutor's own comparison value) -- runtime_config_hash is
+    # computed with code_revision zeroed, so it never varies with
+    # code_revision alone.
+    fp["runtime_config_hash"] = runtime_config_hash(dataclasses.replace(settings, code_revision=None))
     return fp
 
 
@@ -1044,6 +1049,83 @@ def test_two_executors_with_different_revisions_each_take_only_their_own_runs(lo
     finally:
         executor_a.stop()
         executor_b.stop()
+
+
+# ── §11 "Paused runs across a code deploy" / independent review 2026-09-24
+# gap #11: unlike a plan/execute-phase run (left queued for the matching
+# deployment, proven above), a run already at its export phase is eligible
+# for ANY worker on code_revision alone -- it must never be stranded the
+# way a redeployed-away deployment's signed-off run otherwise would be. ────
+
+
+def test_executor_admits_an_export_phase_run_on_a_different_code_revision(local_persistence):
+    persistence = local_persistence
+    clock = _make_clock()
+    run_id = "RUN-EXPORT-PHASE-DIFFERENT-REVISION"
+
+    creator_settings = dataclasses.replace(Settings(), code_revision="rev-creator")
+    worker_settings = dataclasses.replace(Settings(), code_revision="rev-worker")
+    fp = _fingerprint_for_settings(f"FP-{run_id}", creator_settings)
+    state = _create_with_fingerprint(persistence, run_id, clock, fp)
+    # Fast-forward straight to the export phase (this test is about
+    # admission affinity, not the pipeline itself) -- the same state sign_off
+    # leaves a signed-off run in (CLAUDE.md §2.4).
+    persistence.save_state(dataclasses.replace(state, phase="export", status="queued"))
+
+    node_entered = threading.Event()
+
+    def node(ctx, state):
+        node_entered.set()
+        return state
+
+    executor = ThreadExecutor(
+        persistence=persistence, settings=worker_settings, worker_id="worker-new-revision",
+        ctx_factory=lambda rid: object(),
+        fingerprint_factory=lambda rid: _fingerprint_for_settings(f"FP-{rid}", worker_settings),
+        clock=clock, nodes_for={"fieldwork": {"plan": [], "execute": [], "export": [("export", node)]}},
+        poll_interval_s=0.03,
+    )
+    try:
+        executor.start()
+        assert node_entered.wait(timeout=2), "an export-phase run on a different code revision was not admitted"
+    finally:
+        executor.stop()
+
+
+def test_executor_still_leaves_an_export_phase_run_queued_if_runtime_config_hash_also_differs(local_persistence):
+    """The relaxation is code_revision ONLY -- a run whose runtime_config_hash
+    ALSO differs (a real configuration change, not just a code deploy) must
+    still be left alone at the admission-affinity check, the same as any
+    other genuinely different deployment."""
+    persistence = local_persistence
+    clock = _make_clock()
+    run_id = "RUN-EXPORT-PHASE-OTHER-CONFIG-DIFFERS"
+
+    creator_settings = dataclasses.replace(Settings(), code_revision="rev-creator", demo_mode=False)
+    worker_settings = dataclasses.replace(Settings(), code_revision="rev-worker", demo_mode=True)
+    fp = _fingerprint_for_settings(f"FP-{run_id}", creator_settings)
+    state = _create_with_fingerprint(persistence, run_id, clock, fp)
+    persistence.save_state(dataclasses.replace(state, phase="export", status="queued"))
+
+    node_entered = threading.Event()
+
+    def node(ctx, state):
+        node_entered.set()
+        return state
+
+    executor = ThreadExecutor(
+        persistence=persistence, settings=worker_settings, worker_id="worker-different-config",
+        ctx_factory=lambda rid: object(),
+        fingerprint_factory=lambda rid: _fingerprint_for_settings(f"FP-{rid}", worker_settings),
+        clock=clock, nodes_for={"fieldwork": {"plan": [], "execute": [], "export": [("export", node)]}},
+        poll_interval_s=0.03,
+    )
+    try:
+        executor.start()
+        assert not node_entered.wait(timeout=1), "a run with a genuinely different runtime config was admitted"
+        assert persistence.load_state(run_id).status == "queued"
+    finally:
+        executor.stop()
 
 
 # ── lost start signal recovered without idle warehouse polling (P3 gap-audit

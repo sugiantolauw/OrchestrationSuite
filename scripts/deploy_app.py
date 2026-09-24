@@ -59,6 +59,43 @@ sys.path.insert(0, str(REPO_ROOT))
 from orchestrator.config import load_settings  # noqa: E402
 
 
+_ACTIVE_RUN_STATUSES = ("queued", "running", "awaiting_confirmation", "awaiting_signoff", "interrupted")
+
+
+def _warn_about_active_runs(persistence) -> None:
+    """CLAUDE.md §11 "Paused runs across a code deploy" / independent review
+    2026-09-24 gap #11: printed from the OLD code, right before this deploy
+    replaces it, so whoever is deploying sees exactly which runs it may
+    affect and how (each one's own phase decides whether it can simply
+    continue at export, or needs a restart -- section 11 of CLAUDE.md). A
+    warning only -- there is no `--quiet` to suppress it, and it never
+    blocks or changes what this script does next; a persistence problem
+    here (no warehouse reachable yet, say) is reported and swallowed rather
+    than failing an otherwise-unrelated deploy."""
+    try:
+        rows = [r for r in persistence.list_runs() if r.get("status") in _ACTIVE_RUN_STATUSES]
+    except Exception as exc:
+        print(f"Could not check for paused/running runs before deploying: {exc!r}")
+        return
+    if not rows:
+        return
+    fingerprints = persistence.get_fingerprints(
+        [r["fingerprint_id"] for r in rows if r.get("fingerprint_id")]
+    )
+    print(f"\n{len(rows)} run(s) are paused or running -- this deploy may affect them:")
+    for r in rows:
+        fp = fingerprints.get(r.get("fingerprint_id")) or {}
+        print(
+            f"  {r['run_id']}: status={r['status']} phase={r.get('phase')} "
+            f"code_revision={fp.get('code_revision', '<unknown>')}"
+        )
+    print(
+        "A run paused at sign-off may continue its export under the new code; a run paused "
+        "before its tests run (or interrupted before execute completed) must be restarted "
+        "with the same parameters (CLAUDE.md §11 \"Paused runs across a code deploy\").\n"
+    )
+
+
 def _git_head(repo_root: Path) -> str | None:
     try:
         out = subprocess.run(
@@ -388,6 +425,16 @@ def main(argv: list[str] | None = None) -> int:
 
         w = WorkspaceClient()
         warehouse_id, http_path = _resolve_warehouse(w, settings)
+
+        # CLAUDE.md §11 "Paused runs across a code deploy" / independent
+        # review 2026-09-24 gap #11: a warning, not a gate -- see
+        # _warn_about_active_runs. Only reachable once http_path is resolved
+        # (never in --dry-run, which touches nothing).
+        import dataclasses
+
+        from orchestrator.adapters.persistence_delta import DeltaPersistence
+
+        _warn_about_active_runs(DeltaPersistence(dataclasses.replace(settings, warehouse_http_path=http_path)))
 
     env_vars["DBX_WAREHOUSE_HTTP_PATH"] = http_path
     app_yaml_text = _render_app_yaml(env_vars)

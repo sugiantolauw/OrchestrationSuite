@@ -212,9 +212,17 @@ def run_phase(
         # (CLAUDE.md §3 non-negotiable 8, §9C non-blocking item): a run must never
         # execute a node against a setup that has drifted from the one it was created
         # under. A mismatch fails the run outright -- it never runs a node.
+        #
+        # CLAUDE.md §11 "Paused runs across a code deploy" / independent review
+        # 2026-09-24 gap #11: the one narrow exception is the export phase of a
+        # run whose execute phase already completed (state.phase == "export" --
+        # reachable only via sign_off, which requires execute to have produced
+        # this run's numbers already). Its code_revision alone may differ from
+        # what it was created under; every OTHER field must still match exactly.
         stored_fingerprint = persistence.get_fingerprint(state.fingerprint_id)
+        allow_code_revision_diff = state.phase == "export"
         try:
-            verify_fingerprint(stored_fingerprint, current_fingerprint)
+            verify_fingerprint(stored_fingerprint, current_fingerprint, allow_code_revision_diff=allow_code_revision_diff)
         except FingerprintMismatch as exc:
             now_fail = clock()
             failed_state = transition(
@@ -224,6 +232,17 @@ def run_phase(
             saved = persistence.save_state(failed_state)
             _end_pipeline_trace(tracing, run_id, status="FAILED")
             return saved
+        if allow_code_revision_diff:
+            current_code_revision = current_fingerprint.get("code_revision")
+            if stored_fingerprint.get("code_revision") != current_code_revision:
+                # Recorded, never silent (CLAUDE.md NN14): run_fingerprints stays
+                # immutable, so the code revision actually exporting this run is
+                # recorded on the run record and in the append-only override
+                # history instead of being lost.
+                persistence.record_export_code_revision(
+                    run_id, fingerprint_id=state.fingerprint_id,
+                    code_revision=current_code_revision, now=clock(),
+                )
         state = _transition_and_save(persistence, state, "running", now=clock())
 
     if state.status != "running":

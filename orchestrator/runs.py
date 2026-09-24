@@ -4,7 +4,13 @@ import dataclasses
 import hashlib
 import uuid
 
-from orchestrator.errors import CandidatesUndecided, EngagementNotFound, FingerprintMismatch, RunNotAwaitingSignoff
+from orchestrator.errors import (
+    CandidatesUndecided,
+    EngagementNotFound,
+    FingerprintMismatch,
+    RunCodeRevisionStale,
+    RunNotAwaitingSignoff,
+)
 from orchestrator.fingerprint import verify_fingerprint
 from orchestrator.signoff_policy import evaluate_signoff
 from orchestrator.state import ENGAGEMENT_SCOPED_KINDS, RunState, validate
@@ -264,7 +270,32 @@ def reject(persistence, run_id: str, *, actor: str, reason: str, now: str) -> Ru
 def resume(persistence, run_id: str, *, actor: str, now: str, current_fingerprint: dict) -> RunState:
     state = persistence.load_state(run_id)
     stored_fingerprint = persistence.get_fingerprint(state.fingerprint_id)
-    verify_fingerprint(stored_fingerprint, current_fingerprint)
+    # CLAUDE.md §11 "Paused runs across a code deploy" / independent review
+    # 2026-09-24 gap #11: an interrupted run's own fingerprint check follows
+    # the same phase rule as the executor's admission-time one (orchestrator/
+    # executor.py, orchestrator/pipeline.py) -- code_revision may differ ONLY
+    # once the execute phase has completed (state.phase == "export"; sign_off
+    # is what advances phase to "export", and it requires execute to have
+    # already produced this run's numbers). Every other hashed field must
+    # still match exactly either way.
+    allow_code_revision_diff = state.phase == "export"
+    try:
+        verify_fingerprint(stored_fingerprint, current_fingerprint, allow_code_revision_diff=allow_code_revision_diff)
+    except FingerprintMismatch as exc:
+        if allow_code_revision_diff:
+            raise  # some OTHER field differs too -- a real mismatch, not the narrow allowed case
+        raise RunCodeRevisionStale(run_id, state.phase, exc.differing_fields) from exc
+    if allow_code_revision_diff:
+        current_code_revision = current_fingerprint.get("code_revision")
+        if stored_fingerprint.get("code_revision") != current_code_revision:
+            # Recorded, never silent (CLAUDE.md NN14): run_fingerprints stays
+            # immutable, so the code revision actually resuming this run's
+            # export is recorded on the run record and in the append-only
+            # override history instead.
+            persistence.record_export_code_revision(
+                run_id, fingerprint_id=state.fingerprint_id,
+                code_revision=current_code_revision, now=now,
+            )
     new_state = transition(state, "queued", now=now)
     saved = persistence.save_state(new_state)
     _emit(persistence, saved, event_type="resumed", actor=actor, message="Run resumed after interruption", now=now)

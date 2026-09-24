@@ -224,3 +224,69 @@ def test_main_raises_without_app_name(monkeypatch):
 
     with pytest.raises(SystemExit):
         deploy_app.main(["--dry-run"])
+
+
+# ── §11 "Paused runs across a code deploy" / independent review 2026-09-24
+# gap #11: a warning before deploying, never a block, listing every paused
+# or running run so whoever is deploying can see what this deploy may
+# affect. ────────────────────────────────────────────────────────────────
+
+
+class _FakePersistenceForDeployWarning:
+    """A minimal stand-in for PersistenceAdapter -- only the two methods
+    _warn_about_active_runs actually calls, never a real workspace
+    connection (this test never touches the Databricks SDK, matching the
+    module docstring's own rule for this file)."""
+
+    def __init__(self, rows, fingerprints):
+        self._rows = rows
+        self._fingerprints = fingerprints
+
+    def list_runs(self, filters=None):
+        return self._rows
+
+    def get_fingerprints(self, fingerprint_ids):
+        return {fid: self._fingerprints[fid] for fid in fingerprint_ids if fid in self._fingerprints}
+
+
+def test_warn_about_active_runs_lists_paused_and_running_runs(capsys):
+    rows = [
+        {"run_id": "RUN-PAUSED", "status": "awaiting_signoff", "phase": "execute", "fingerprint_id": "FP-1"},
+        {"run_id": "RUN-RUNNING", "status": "running", "phase": "execute", "fingerprint_id": "FP-2"},
+        {"run_id": "RUN-DONE", "status": "completed", "phase": "export", "fingerprint_id": "FP-3"},
+    ]
+    fingerprints = {
+        "FP-1": {"code_revision": "rev-old-1"},
+        "FP-2": {"code_revision": "rev-old-2"},
+        "FP-3": {"code_revision": "rev-old-3"},
+    }
+    persistence = _FakePersistenceForDeployWarning(rows, fingerprints)
+
+    deploy_app._warn_about_active_runs(persistence)
+
+    out = capsys.readouterr().out
+    assert "RUN-PAUSED" in out
+    assert "rev-old-1" in out
+    assert "RUN-RUNNING" in out
+    assert "rev-old-2" in out
+    # A completed run is not paused or running -- not this deploy's concern.
+    assert "RUN-DONE" not in out
+
+
+def test_warn_about_active_runs_prints_nothing_when_nothing_is_active(capsys):
+    persistence = _FakePersistenceForDeployWarning(
+        [{"run_id": "RUN-DONE", "status": "completed", "phase": "export", "fingerprint_id": "FP-1"}],
+        {"FP-1": {"code_revision": "rev-1"}},
+    )
+    deploy_app._warn_about_active_runs(persistence)
+    assert capsys.readouterr().out == ""
+
+
+def test_warn_about_active_runs_never_raises_on_a_persistence_error(capsys):
+    class _BrokenPersistence:
+        def list_runs(self, filters=None):
+            raise RuntimeError("warehouse unreachable")
+
+    deploy_app._warn_about_active_runs(_BrokenPersistence())
+    out = capsys.readouterr().out
+    assert "Could not check" in out

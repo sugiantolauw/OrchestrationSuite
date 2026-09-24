@@ -21,7 +21,12 @@ worker_alive() check).
 
 A third: queue environment affinity, which never even attempts a lease for a
 run created under a different deployment's code_revision/runtime_config_hash,
-leaving it queued for the deployment it actually belongs to (§4).
+leaving it queued for the deployment it actually belongs to (§4) -- except a
+run already at its export phase (CLAUDE.md §11 "Paused runs across a code
+deploy", independent review 2026-09-24 gap #11): its numbers were already
+fixed by execute, so ANY deployment may pick it up on code_revision alone,
+and pipeline.run_phase's own verify_fingerprint call is told the same thing.
+`runtime_config_hash` is never relaxed.
 
 Two more, from the P3 gap-audit review (2026-09-24): a run whose direct
 `start(run_id, phase)` admission attempt does not resolve on the spot (e.g. a
@@ -39,6 +44,7 @@ read as orphaned (§9C)."""
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -289,7 +295,16 @@ class ThreadExecutor:
         # existing full fingerprint check inside run_phase remains the backstop.
         own_code_revision = getattr(settings, "code_revision", None)
         try:
-            own_runtime_config_hash = runtime_config_hash(settings)
+            # CLAUDE.md §11 "Paused runs across a code deploy" / independent
+            # review 2026-09-24 gap #11: orchestrator.fingerprint.compute_
+            # fingerprint computes its stored runtime_config_hash field from
+            # `settings` with code_revision zeroed (so a code_revision
+            # difference alone -- the one field this gate now relaxes for an
+            # export-phase run -- never also changes runtime_config_hash).
+            # This worker's own comparison value must be computed the exact
+            # same way, or the two would never agree even when code_revision
+            # matches exactly.
+            own_runtime_config_hash = runtime_config_hash(dataclasses.replace(settings, code_revision=None))
         except Exception:
             own_runtime_config_hash = None
         self._own_environment: dict[str, str | None] = {
@@ -508,15 +523,32 @@ class ThreadExecutor:
         never the full fingerprint (source table versions, skill content
         hash, ...), which is per-run by design and belongs to
         pipeline.run_phase's own verify_fingerprint call, not an admission
-        gate every queued run would otherwise pay for on every poll tick."""
+        gate every queued run would otherwise pay for on every poll tick.
+
+        CLAUDE.md §11 "Paused runs across a code deploy" / independent
+        review 2026-09-24 gap #11: the one exception is `code_revision` on a
+        run whose `phase` is already "export" -- reachable only via
+        sign_off, which requires the execute phase to have already produced
+        this run's numbers. Such a run is stranded FOREVER by this same
+        cheap check otherwise: once the deployment that created it is gone,
+        no worker's code_revision will ever match it again, and it is not
+        this admission-time check's job to decide that (it fails open on a
+        lookup error, never a "nobody will ever come" verdict) -- it is
+        simply the one field pipeline.run_phase's own verify_fingerprint is
+        now told it may relax for this phase (orchestrator/pipeline.py),
+        so this cheap pre-check must not reject it first. `runtime_config_hash`
+        is never relaxed, at any phase."""
         try:
             state = self._persistence.load_state(run_id)
             stored_fingerprint = self._persistence.get_fingerprint(state.fingerprint_id)
         except Exception:  # pragma: no cover - defensive
             logger.exception("environment-affinity fingerprint lookup failed for run_id=%s", run_id)
             return True  # fail open -- never block admission on a lookup error
+        allow_code_revision_diff = state.phase == "export"
         for field, own_value in self._own_environment.items():
             if own_value is None:
+                continue
+            if field == "code_revision" and allow_code_revision_diff:
                 continue
             stored_value = (stored_fingerprint or {}).get(field)
             if stored_value is not None and stored_value != own_value:

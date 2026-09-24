@@ -48,6 +48,29 @@ class FingerprintMismatch(Exception):
         super().__init__(f"fingerprint mismatch on fields: {sorted(differing_fields)}")
 
 
+class RunCodeRevisionStale(Exception):
+    """CLAUDE.md §11 "Paused runs across a code deploy": a run paused BEFORE
+    its tests ran (plan confirmation, or an interrupted run whose execute
+    phase never completed) on an older code revision cannot proceed -- unlike
+    a run paused at sign-off (whose numbers execute already fixed), its
+    execute phase has not yet run under the setup it was created for, and it
+    must not silently run under a different one. Raised in place of a bare
+    FingerprintMismatch at the two explicit human action points (confirm_plan,
+    resume) so the caller gets a message that names the resolution (restart),
+    not just a list of differing hashes."""
+
+    def __init__(self, run_id: str, phase: str, differing_fields: dict):
+        self.run_id = run_id
+        self.phase = phase
+        self.differing_fields = differing_fields
+        super().__init__(
+            f"run {run_id!r} was created under a code revision that no longer matches this "
+            f"deployment, and its {phase!r} phase has not completed -- it cannot continue on the "
+            f"new code. Start a fresh run with the same parameters instead "
+            f"(differing fields: {sorted(differing_fields)})"
+        )
+
+
 class MigrationError(Exception):
     pass
 

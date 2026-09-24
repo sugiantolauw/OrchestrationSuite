@@ -133,6 +133,62 @@ def test_fingerprint_conflict(persistence, uid):
         persistence.create_run(_state(f"RUN-D-{uid}", fingerprint_id=fp_id), conflicting)
 
 
+# ── §11 "Paused runs across a code deploy" / independent review 2026-09-24
+# gap #11: get_run_row, mark_run_superseded and record_export_code_revision
+# -- run_fingerprints stays immutable and append-only throughout every one
+# of these. ─────────────────────────────────────────────────────────────
+
+
+def test_get_run_row_returns_none_for_unknown_run(persistence):
+    assert persistence.get_run_row("RUN-DOES-NOT-EXIST") is None
+
+
+def test_get_run_row_returns_the_runs_projection_row(persistence, uid):
+    run_id = f"RUN-GETROW-{uid}"
+    fp_id = f"FP-{run_id}"
+    persistence.create_run(_state(run_id, fingerprint_id=fp_id), _fingerprint(fp_id))
+    row = persistence.get_run_row(run_id)
+    assert row is not None
+    assert row["run_id"] == run_id
+    assert row["export_code_revision"] is None
+
+
+def test_mark_run_superseded_sets_superseded_by_without_touching_run_state(persistence, uid):
+    run_id = f"RUN-SUPERSEDE-{uid}"
+    fp_id = f"FP-{run_id}"
+    persistence.create_run(_state(run_id, fingerprint_id=fp_id), _fingerprint(fp_id))
+    new_run_id = f"RUN-SUPERSEDE-NEW-{uid}"
+    persistence.mark_run_superseded(run_id, superseded_by=new_run_id, now=canonical_ts(1))
+    row = persistence.get_run_row(run_id)
+    assert row["superseded_by"] == new_run_id
+    # Never deleted, never a status change (CLAUDE.md §9A Q2) -- the old
+    # run's own RunState is untouched.
+    assert persistence.load_state(run_id).status == "queued"
+
+
+def test_record_export_code_revision_updates_runs_row_and_leaves_the_fingerprint_immutable(persistence, uid):
+    run_id = f"RUN-EXPORTREV-{uid}"
+    fp_id = f"FP-{run_id}"
+    persistence.create_run(_state(run_id, fingerprint_id=fp_id), _fingerprint(fp_id, code_revision="rev-old"))
+
+    persistence.record_export_code_revision(
+        run_id, fingerprint_id=fp_id, code_revision="rev-new", now=canonical_ts(1),
+    )
+    row = persistence.get_run_row(run_id)
+    assert row["export_code_revision"] == "rev-new"
+
+    # Idempotent: calling it again with the SAME value never raises or duplicates.
+    persistence.record_export_code_revision(
+        run_id, fingerprint_id=fp_id, code_revision="rev-new", now=canonical_ts(2),
+    )
+    row2 = persistence.get_run_row(run_id)
+    assert row2["export_code_revision"] == "rev-new"
+
+    # run_fingerprints (CLAUDE.md P1A: immutable) is untouched -- it still
+    # names the ORIGINAL code revision this run was created under.
+    assert persistence.get_fingerprint(fp_id)["code_revision"] == "rev-old"
+
+
 def test_begin_node_attempt_idempotent(persistence, uid):
     run_id = f"RUN-NODE-{uid}"
     persistence.create_run(_state(run_id), _fingerprint(f"FP-{run_id}"))
@@ -369,6 +425,20 @@ def test_append_only_and_no_delete_enforced_locally():
         conn.execute("UPDATE run_fingerprints SET code_revision = 'x' WHERE fingerprint_id = 'FP-APPEND-ONLY'")
     with pytest.raises(Exception):
         conn.execute("DELETE FROM run_fingerprints WHERE fingerprint_id = 'FP-APPEND-ONLY'")
+
+    # CLAUDE.md §11 "Paused runs across a code deploy" / independent review
+    # 2026-09-24 gap #11: run_fingerprint_overrides is append-only too --
+    # run_fingerprints itself stays untouched by an accepted code_revision
+    # difference; this is where that override is recorded instead.
+    p.record_export_code_revision(
+        created.run_id, fingerprint_id="FP-APPEND-ONLY", code_revision="rev-new", now=canonical_ts(2),
+    )
+    with pytest.raises(Exception):
+        conn.execute(
+            "UPDATE run_fingerprint_overrides SET override_value = 'x' WHERE run_id = ?", (created.run_id,)
+        )
+    with pytest.raises(Exception):
+        conn.execute("DELETE FROM run_fingerprint_overrides WHERE run_id = ?", (created.run_id,))
 
 
 # ── batch read methods (independent review 2026-09-24 item 6) ──────────────
