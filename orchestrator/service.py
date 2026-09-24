@@ -192,6 +192,7 @@ def build_node_context(ctx: AppContext, state: RunState) -> NodeContext:
         skill=skill,
         clock=ctx.clock,
         export_storage=ctx.export_storage,
+        backend=ctx.backend,
     )
 
 

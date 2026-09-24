@@ -38,6 +38,7 @@ from orchestrator.findings import build_findings
 from orchestrator.frames import build_row_snapshots, frame_parquet_bytes, sha256_bytes
 from orchestrator.nodes.context import NodeContext
 from orchestrator.populations import PopulationContext, build_populations
+from orchestrator.pptx_export import generate_pptx, load_catalogue_rows
 from orchestrator.signoff_policy import SELF_APPROVED_LABEL
 from orchestrator.skills import plan_test_amount_metrics, plan_test_flags
 from orchestrator.state import RunState
@@ -1339,6 +1340,24 @@ def export(ctx: NodeContext, state: RunState) -> RunState:
 
     exports = {**(state.exports or {}), "xlsx": {"path": written_path, "sha256": sha256, "kind": "xlsx"}}
 
+    # PPTX audit pack (CLAUDE.md §4.7): same "persisted outputs only, never
+    # recomputed" rule as the XLSX above -- generate_pptx reads `state`,
+    # `findings`, `metrics` and this Skill's own static catalogue.yaml,
+    # nothing else.
+    catalogue_rows = load_catalogue_rows(ctx.skill.skill_dir)
+    data_mode = "Local test data" if ctx.backend == "local" else "Unity Catalog"
+    pptx_content = generate_pptx(
+        state, findings, metrics, catalogue_rows, ctx.skill,
+        data_mode=data_mode, template_path=ctx.settings.pptx_template_path, now=now,
+    )
+    pptx_sha256 = hashlib.sha256(pptx_content).hexdigest()
+    pptx_rel_path = f"exports/{state.run_id}/audit_pack.pptx"
+    pptx_written_path = ctx.export_storage.write(pptx_rel_path, pptx_content)
+    ctx.persistence.record_export(
+        state.run_id, "pptx", path=pptx_written_path, sha256=pptx_sha256, created_by=state.run_owner, now=now,
+    )
+    exports["pptx"] = {"path": pptx_written_path, "sha256": pptx_sha256, "kind": "pptx"}
+
     if ticket_previews:
         preview_content = json.dumps(
             {"run_id": state.run_id, "status": TICKET_PREVIEW_STATUS, "ticket_previews": ticket_previews},
@@ -1356,7 +1375,10 @@ def export(ctx: NodeContext, state: RunState) -> RunState:
             "status": TICKET_PREVIEW_STATUS, "ticket_previews": ticket_previews,
         }
 
-    message = f"XLSX workpaper written to {written_path} ({len(content)} bytes)"
+    message = (
+        f"XLSX workpaper written to {written_path} ({len(content)} bytes); "
+        f"PPTX audit pack written to {pptx_written_path} ({len(pptx_content)} bytes)"
+    )
     if ticket_previews:
         message += f"; {len(ticket_previews)} ticket preview(s) prepared ({TICKET_PREVIEW_STATUS})"
     return dataclasses.replace(

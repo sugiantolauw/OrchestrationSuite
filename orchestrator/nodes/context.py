@@ -69,7 +69,14 @@ class NodeContext:
     `_CachingDataSource` on construction so every node sharing this one
     NodeContext (i.e. one executor pass, CLAUDE.md build brief P3 §3) sees the
     same read_population() result rather than each re-reading. `export_storage`
-    is only used by the `export` node."""
+    is only used by the `export` node.
+
+    `backend` is "local" or "uc" (AppContext.backend, CLAUDE.md build brief
+    P3 §3's data_mode label -- "Local test data" vs "Unity Catalog"), threaded
+    through so `export`'s PPTX cover slide can state which without a node
+    branching on Dash/service-layer state it has no other access to. Defaults
+    to "uc" so every existing direct NodeContext(...) construction (tests
+    that never pass it) keeps meaning what it already implied."""
 
     settings: Any
     persistence: Any
@@ -78,6 +85,7 @@ class NodeContext:
     clock: Callable[[], str]
     export_storage: Any = None
     tracer: Any = None
+    backend: str = "uc"
 
     def __post_init__(self) -> None:
         if self.data_source is not None and not isinstance(self.data_source, _CachingDataSource):

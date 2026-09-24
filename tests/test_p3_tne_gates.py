@@ -35,6 +35,7 @@ import pytest
 
 from orchestrator import runs as runs_module
 from orchestrator.adapters.export_storage import LocalExportStorage
+from orchestrator.config import DEFAULT_PPTX_TEMPLATE_PATH
 from orchestrator.contract import ContractViolation, LocalFileDataSource
 from orchestrator.errors import ReconciliationError
 from orchestrator.nodes.context import NodeContext
@@ -71,6 +72,7 @@ def _fingerprint(fp_id: str, skill_content_hash: str | None) -> dict:
 class _Settings:
     catalog = None
     schema = None
+    pptx_template_path = DEFAULT_PPTX_TEMPLATE_PATH
 
 
 def _make_ctx_and_state(persistence, data_dir: Path, *, run_id: str):

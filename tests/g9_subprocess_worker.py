@@ -41,6 +41,7 @@ from tests.conftest import canonical_ts  # noqa: E402
 from orchestrator import runs as runs_module  # noqa: E402
 from orchestrator.adapters.export_storage import LocalExportStorage  # noqa: E402
 from orchestrator.adapters.persistence_local import LocalPersistence  # noqa: E402
+from orchestrator.config import DEFAULT_PPTX_TEMPLATE_PATH  # noqa: E402
 from orchestrator.contract import LocalFileDataSource  # noqa: E402
 from orchestrator.nodes.context import NodeContext  # noqa: E402
 from orchestrator.nodes.fieldwork import act, discover, execute, export, find, prioritise  # noqa: E402
@@ -60,6 +61,7 @@ _FOOTER_MARKER = "Generated "
 class _Settings:
     catalog = None
     schema = None
+    pptx_template_path = DEFAULT_PPTX_TEMPLATE_PATH
 
 
 def _fingerprint(fp_id: str, skill_content_hash: str | None) -> dict:
