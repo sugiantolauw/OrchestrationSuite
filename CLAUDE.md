@@ -1967,6 +1967,17 @@ Asked how much the model should decide about findings at run time, the user chos
 - **The auditor sets the severity of an accepted proposal** with a dropdown. The model's proposed severity and reason are shown and stored alongside the decision.
 - **Auditors edit model text freely, but every typed number must equal a figure the finding cites**, or the edit is refused. Every edit is recorded (who, when, before/after).
 
+### Paused runs across a code deploy (user decision, 2026-09-24)
+
+A run pins the code revision it started on. When new code is deployed:
+- **A run paused at sign-off may continue on the new code.** Its numbers were already fixed by `execute`. The run page and both exports state "computed under code revision X, exported under Y", and the run fingerprint records both.
+- **A run paused before its tests run (plan confirmation) must be restarted.** It is marked superseded, never deleted, and one click starts a fresh run on the new code.
+- `scripts/deploy_app.py` warns, listing them, when any run is paused or running.
+
+### Self-approval label placement (reconciled 2026-09-24)
+
+The self-approval text appears only where the prototype already shows who signed off: `/run/<id>`, `/runs`, the trace event and the XLSX run metadata. It does not appear on `/workspace/tne`, whose prototype has no sign-off display. This follows the later "UI is the prototype's, exactly" decision, which supersedes the `/workspace/tne` mention in "Approval decisions from the user (2026-09-23)".
+
 ### Further decisions from the user (2026-09-23)
 
 - **UI is the prototype's, exactly.** Every page matches `reference_app/src/platform/pages.py` and
