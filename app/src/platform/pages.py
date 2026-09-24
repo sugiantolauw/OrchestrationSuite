@@ -197,9 +197,23 @@ def management_actions_page() -> html.Div:
     # figure once did. Each *completed* run already carries its own
     # de-duplicated headline (run_exposure_headline, one number per run,
     # see orchestrator/service.py list_runs "potential_exposure") -- sum
-    # that, once per run, instead of once per finding.
+    # that, once per run, instead of once per finding. Independent review
+    # 2026-09-24 item 2: a re-run of the SAME Skill over the SAME engagement
+    # and audit period is the same underlying population re-tested, not
+    # additional exposure -- summing every completed run (rather than only
+    # the latest per skill/engagement/period) double-counted a re-run's
+    # exposure alongside its predecessor's. "—" (never a fabricated $0)
+    # when there is no completed run to report at all.
     completed_runs = [r for r in adapters.list_audit_runs() if r.get("status") == "Completed"]
-    total_exposure = sum(r.get("potential_exposure") or 0 for r in completed_runs)
+    latest_by_group: dict[tuple, dict] = {}
+    for r in completed_runs:
+        key = (r.get("skill_id"), r.get("engagement_id"), r.get("audit_period"))
+        current = latest_by_group.get(key)
+        if current is None or (r.get("run_timestamp") or "") > (current.get("run_timestamp") or ""):
+            latest_by_group[key] = r
+    total_exposure = None
+    if latest_by_group:
+        total_exposure = sum(r.get("potential_exposure") or 0 for r in latest_by_group.values())
     open_count = sum(1 for a in actions if a.get("status") in ("Open", "Under review"))
     high_count = sum(1 for a in actions if a.get("risk") == "High")
 
@@ -212,16 +226,10 @@ def management_actions_page() -> html.Div:
         demo_indicator() if adapters.is_demo_mode() else None,
 
         html.Div([
-            html.Span("◆", style={"color": "#e0952a", "marginRight": 4}),
-            html.Span("Session-only persistence in demo mode — actions reset when the app restarts",
-                      style={"fontSize": 12, "color": "#6b4a00"}),
-        ], style={"marginBottom": 12}),
-
-        html.Div([
             kpi_card("Total actions", str(len(actions))),
             kpi_card("Open / Under review", str(open_count)),
             kpi_card("High risk", str(high_count)),
-            kpi_card("Total exposure", f"${total_exposure:,.0f}"),
+            kpi_card("Total exposure", f"${total_exposure:,.0f}" if total_exposure is not None else "—"),
         ], className="plat-kpi-row", style={"marginBottom": 16}),
 
         html.Div([

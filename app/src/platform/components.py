@@ -10,6 +10,14 @@ from dash import dcc, html
 import dash_bootstrap_components as dbc
 
 
+def format_money_or_dash(value) -> str:
+    """Independent review 2026-09-24 item 3: a missing/never-computed dollar
+    figure renders as "—", never a fabricated "$0" that reads as "genuinely
+    zero at risk" -- a real zero (a clean run, a fully remediated action)
+    still renders as "$0"; only `None` renders as "—"."""
+    return f"${value:,.0f}" if value is not None else "—"
+
+
 # ── KPI card ─────────────────────────────────────────────────────────────────
 
 def kpi_card(label: str, value: str, unit: str = "", trend: str = "", status: str = "") -> html.Div:
@@ -138,7 +146,7 @@ def run_card(run: dict) -> html.Div:
         html.Div([
             kpi_card("Findings", str(run.get("findings_count", 0))),
             kpi_card("High risk", str(run.get("high_risk_count", 0))),
-            kpi_card("Exposure", f"${(run.get('potential_exposure') or 0):,.0f}"),
+            kpi_card("Exposure", format_money_or_dash(run.get("potential_exposure"))),
             kpi_card("Open actions", str(run.get("open_actions", 0))),
         ], className="plat-kpi-row"),
         html.Div([
@@ -183,7 +191,7 @@ def action_row(action: dict) -> html.Tr:
         html.Td(action.get("owner", ""), style={"fontSize": 12}),
         html.Td(html.Span(st, className="chip", style={**st_style, "fontSize": 10, "border": "none"})),
         html.Td(action.get("target_date", ""), style={"fontSize": 12}),
-        html.Td(f"${(action.get('potential_exposure') or 0):,.0f}", style={"fontSize": 12, "fontFamily": "monospace"}),
+        html.Td(format_money_or_dash(action.get("potential_exposure")), style={"fontSize": 12, "fontFamily": "monospace"}),
         html.Td(action.get("evidence_link", ""), style={"fontSize": 11, "fontFamily": "monospace", "color": "#6b7283"}),
     ])
 
