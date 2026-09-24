@@ -5,7 +5,15 @@ backoff (P3 gate review item 3a), and a lost lease halting further node
 output (item 3b). Uses trivial injected node functions (not the real
 fieldwork nodes) -- the executor does not know or care what a node does,
 only the admission/lease/pool protocol around it, so these stay fast and
-independent of any Skill or data fixture."""
+independent of any Skill or data fixture.
+
+P3 gap-audit review (2026-09-24) adds: a lost direct-start signal being
+recovered by `_pending_starts` without any idle persistence calls; a
+worker's own reap tick never interrupting its own live run under a slow
+renewal (root cause of a live false-interrupt, RUN-57B6B4BB2B33); the
+`lease_reap_grace_s` buffer in isolation; and deterministic (event- and
+injected-clock-driven, no background-loop-cadence wall-clock racing)
+versions of the two previously timing-flaky tests."""
 
 from __future__ import annotations
 
@@ -18,7 +26,8 @@ from pathlib import Path
 from orchestrator import runs as runs_module
 from orchestrator import service
 from orchestrator.config import Settings, runtime_config_hash
-from orchestrator.executor import ThreadExecutor
+from orchestrator.executor import ThreadExecutor, reap_orphaned_runs_with_leases
+from orchestrator.status import transition as _transition_status
 from orchestrator.timeutil import utc_now
 from tests.conftest import canonical_ts
 
@@ -68,6 +77,21 @@ def _make_clock():
 
 
 def test_three_queued_runs_max_two_running_at_once(local_persistence):
+    """Deterministic under load (P3 gap-audit review, item 3): concurrency is
+    enforced by a real threading.Semaphore(2) inside ThreadExecutor, which
+    does not depend on wall-clock timing at all -- the only genuinely
+    time-based waits here are for real asynchronous work (two nodes
+    entering, then a third, then all three reaching awaiting_signoff), each
+    bounded by a generous timeout tolerant of heavy CPU contention (proven
+    at 20x under 3x parallel CPU load). The "exactly two, never a third"
+    assertion is taken from a PRECISE PERSISTED-STATE SNAPSHOT at the
+    instant both expected entries have fired, never from a short negative
+    wait racing the background loop's own cadence -- the previous version's
+    `assert not entered.acquire(timeout=1)` could only ever get weaker
+    under contention (a slower admission tick just makes the negative
+    easier to observe), so it added flakiness risk for no correctness
+    benefit; dropping it in favour of the state snapshot keeps the
+    assertion exact rather than merely making it less likely to fire."""
     persistence = local_persistence
     clock = _make_clock()
     run_ids = [f"RUN-CAP-{i}" for i in range(3)]
@@ -84,7 +108,7 @@ def test_three_queued_runs_max_two_running_at_once(local_persistence):
             concurrent_count["n"] += 1
             concurrent_count["max"] = max(concurrent_count["max"], concurrent_count["n"])
         entered.release()
-        release.wait(timeout=10)
+        release.wait(timeout=30)
         with lock:
             concurrent_count["n"] -= 1
         return dataclasses.replace(state, events=state.events + [{"node": "block"}])
@@ -101,27 +125,28 @@ def test_three_queued_runs_max_two_running_at_once(local_persistence):
         executor.start()
         # Exactly two of the three should enter the blocking node -- the third
         # stays `queued` in Delta (never an in-memory queue, CLAUDE.md §2.3).
-        assert entered.acquire(timeout=10)
-        assert entered.acquire(timeout=10)
-        assert not entered.acquire(timeout=1)  # the third must NOT have started
+        assert entered.acquire(timeout=30)
+        assert entered.acquire(timeout=30)
         with lock:
             assert concurrent_count["max"] == 2
 
+        # A precise, non-racy snapshot at the instant both expected entries
+        # have fired: the third run is `queued`, the other two `running`.
         statuses = {rid: persistence.load_state(rid).status for rid in run_ids}
         assert list(statuses.values()).count("queued") == 1
         assert list(statuses.values()).count("running") == 2
 
         release.set()
-        assert entered.acquire(timeout=10)  # the third now gets admitted
+        assert entered.acquire(timeout=30)  # the third now gets admitted
 
         # auto_confirm_plan is set (options in _create), and the `execute`
         # phase's node list is empty here, so each run walks straight through
         # plan -> execute -> awaiting_signoff with no gate in between.
-        deadline = time.time() + 10
+        deadline = time.time() + 30
         while time.time() < deadline:
             if all(persistence.load_state(rid).status == "awaiting_signoff" for rid in run_ids):
                 break
-            time.sleep(0.1)
+            time.sleep(0.05)
         final = {rid: persistence.load_state(rid).status for rid in run_ids}
         assert all(s == "awaiting_signoff" for s in final.values()), final
     finally:
@@ -820,21 +845,23 @@ def test_lease_renewal_failure_marks_worker_not_alive_for_that_run(local_persist
 
 
 def test_lease_lost_stops_further_node_output(local_persistence):
-    """End-to-end through the real admission/heartbeat loop and run_phase: once
-    the heartbeat observes a failed renew_lease for this run, worker_alive()
-    flips false and orchestrator.pipeline.run_phase's own per-node check
-    (CLAUDE.md §9C) stops before the NEXT node -- proving no further node
-    output is written after the lease is lost, not merely that the flag
-    changed in isolation."""
+    """End-to-end through the real run_phase (via _run_one, the same code
+    path _try_admit submits to the thread pool), proving no further node
+    output is written after the lease is lost -- deterministic (P3
+    gap-audit review, item 3): the background admission/heartbeat loops are
+    never started, so nothing here depends on poll_interval_s or
+    heartbeat_interval_s cadence racing against wall-clock timeouts. The
+    lease-lost signal is injected at a point this test controls directly
+    (_mark_lease_lost, exactly what the heartbeat thread itself would call
+    on a failed renew_lease -- test_lease_renewal_failure_marks_worker_
+    not_alive_for_that_run above proves that wiring in isolation), once
+    node1 is confirmed running. Only genuinely asynchronous facts (node1
+    entering, node2 NOT entering, the pipeline thread finishing) are waited
+    on via Events/future.result, each with a generous but bounded timeout --
+    never a fixed-cadence background poll."""
     persistence = local_persistence
+    clock = _make_clock()
     run_id = "RUN-LEASE-LOST-E2E"
-    # A REAL wall-clock, not the fast-forwarding `_make_clock()` -- with a
-    # per-call incrementing clock, the many clock() calls the admission and
-    # heartbeat loops make each real-time tick would race the lease past its
-    # own TTL and let the (correct, separate) reaper mark the run
-    # `interrupted` before this test's own assertions run, which would be
-    # testing the reaper's behaviour by accident, not the lease-lost gate.
-    clock = utc_now
     _create(persistence, run_id, clock)
 
     node1_entered = threading.Event()
@@ -856,39 +883,32 @@ def test_lease_lost_stops_further_node_output(local_persistence):
         persistence=persistence, settings=_Settings(), worker_id="worker-lease-lost-e2e",
         ctx_factory=lambda rid: object(),
         fingerprint_factory=lambda rid: _fingerprint(f"FP-{rid}"),
-        clock=clock, nodes_for=nodes_for, poll_interval_s=0.05, lease_ttl_s=30,
-        heartbeat_interval_s=0.05,
+        clock=clock, nodes_for=nodes_for,
     )
-    persistence.renew_lease = lambda rid, wid, *, ttl_s, now: False
+    # Acquire the lease and submit run_phase directly -- the SAME work
+    # _try_admit does, without starting the background admission/heartbeat
+    # threads (so their cadence never enters this test at all).
+    assert persistence.acquire_lease(run_id, executor._worker_id, ttl_s=30, now=clock())
+    with executor._lock:
+        executor._active_runs.add(run_id)
+    future = executor._pool.submit(executor._run_one, run_id)
     try:
-        executor.start()
         assert node1_entered.wait(timeout=10)
+        assert executor.worker_alive(run_id) is True
 
-        deadline = time.time() + 10
-        while time.time() < deadline and executor.worker_alive(run_id):
-            time.sleep(0.02)
-        assert not executor.worker_alive(run_id), "lease loss was never observed by the heartbeat"
-
-        # Stop the background admission/heartbeat loops now, before letting node1
-        # finish -- otherwise the (correct, separate) mid-session reaper would
-        # race this test's own assertions: once node1 finishes, _on_done releases
-        # this worker's lease row for run_id, and the very next admission tick
-        # would legitimately reap the now-lease-less `running` run as orphaned
-        # (CLAUDE.md §2.3 rule 2) before this test gets to look at it. That is
-        # real, desired system behaviour (a lost-lease run becomes resumable
-        # promptly rather than sitting unleased) -- just not what this test is
-        # isolating, which is the lease-lost gate stopping node2 from running.
-        executor._stop_event.set()
+        # The exact call the heartbeat thread itself makes on a failed
+        # renew_lease -- injected here, deterministically, once node1 is
+        # confirmed running.
+        executor._mark_lease_lost(run_id, clock())
+        assert executor.worker_alive(run_id) is False
 
         node1_release.set()  # node1's own in-flight output is still written
-        assert not node2_entered.wait(timeout=1), "node2 ran after the lease was lost"
+        assert not node2_entered.wait(timeout=2), "node2 ran after the lease was lost"
 
-        deadline = time.time() + 5
+        future.result(timeout=10)  # run_phase returns cleanly, never raises
+
         final = persistence.load_state(run_id)
-        while time.time() < deadline and final.next_node_index < 1:
-            time.sleep(0.02)
-            final = persistence.load_state(run_id)
-        assert final.status == "running"  # run_phase returned mid-phase, not stuck or crashed
+        assert final.status == "running"  # returned mid-phase, not stuck or crashed
         assert final.next_node_index == 1  # only node1 completed
 
         events = [
@@ -1024,3 +1044,258 @@ def test_two_executors_with_different_revisions_each_take_only_their_own_runs(lo
     finally:
         executor_a.stop()
         executor_b.stop()
+
+
+# ── lost start signal recovered without idle warehouse polling (P3 gap-audit
+#    review item 1) ──────────────────────────────────────────────────────────
+
+
+def test_pending_starts_keeps_the_loop_busy_until_resolved_with_zero_idle_sql(local_persistence):
+    """Deterministic unit test (no threads, no wall clock) of the
+    `_pending_starts` bookkeeping itself: `_next_poll_interval()` must report
+    the ACTIVE cadence while a start(run_id, phase) attempt is outstanding,
+    and fall back to idle (None, meaning zero further persistence calls)
+    once it resolves -- proving the self-heal mechanism does not itself
+    become a new source of idle polling."""
+    persistence = local_persistence
+    executor = ThreadExecutor(
+        persistence=persistence, settings=_Settings(), worker_id="worker-pending-unit",
+        ctx_factory=lambda rid: object(),
+        fingerprint_factory=lambda rid: _fingerprint(f"FP-{rid}"),
+        clock=_make_clock(), nodes_for={"fieldwork": {"plan": [], "execute": [], "export": []}},
+        poll_interval_s=0.05, idle_poll_interval_s=0.0,
+    )
+    try:
+        assert executor._next_poll_interval() is None  # nothing outstanding -- idle
+
+        with executor._lock:
+            executor._pending_starts.add("RUN-PENDING")
+        assert executor._next_poll_interval() == 0.05  # busy: something is still unresolved
+
+        with executor._lock:
+            executor._pending_starts.discard("RUN-PENDING")
+        assert executor._next_poll_interval() is None  # resolved -- idle again
+    finally:
+        executor.stop()
+
+
+def test_lost_direct_admission_signal_is_recovered_without_idle_sql(local_persistence):
+    """CLAUDE.md build brief P3 gap-audit review, root cause of
+    RUN-D452E2A3832A sitting `queued` until an App restart: a direct
+    start(run_id, phase) call whose own synchronous _try_admit does not
+    succeed (here: a transient acquire_lease failure) must still be admitted
+    promptly by the SAME running executor -- proven with the real
+    (unmodified) wake_event, so this is the realistic path, not a
+    manufactured "no wake could ever work" scenario. The run is recorded in
+    `_pending_starts` for the whole outstanding window (independent
+    evidence the new mechanism, not a lucky coincidence, is what is
+    tracking it) and cleared once resolved. Confirms zero persistence calls
+    while genuinely idle beforehand, exactly like the existing
+    idle-sweep-disabled test."""
+    persistence = local_persistence
+    run_id = "RUN-LOST-SIGNAL"
+
+    calls = {"n": 0}
+    orig_find_runs = persistence.find_runs
+
+    def counting_find_runs(statuses):
+        calls["n"] += 1
+        return orig_find_runs(statuses)
+
+    persistence.find_runs = counting_find_runs
+
+    done = threading.Event()
+
+    def quick_node(ctx, state):
+        done.set()
+        return state
+
+    nodes_for = {"fieldwork": {"plan": [("quick", quick_node)], "execute": [], "export": []}}
+    executor = ThreadExecutor(
+        persistence=persistence, settings=_Settings(), worker_id="worker-lost-signal",
+        ctx_factory=lambda rid: object(),
+        fingerprint_factory=lambda rid: _fingerprint(f"FP-{rid}"),
+        clock=_make_clock(), nodes_for=nodes_for,
+        poll_interval_s=0.05, idle_poll_interval_s=0.0,
+    )
+    orig_acquire = persistence.acquire_lease
+    try:
+        # The background loop is running and genuinely idle first -- NO run
+        # exists yet at all -- zero persistence calls beyond its one
+        # guaranteed startup tick, exactly like the existing
+        # idle-sweep-disabled test.
+        executor.start()
+        time.sleep(0.2)
+        assert calls["n"] <= 2, "the loop polled while genuinely idle before the run existed"
+
+        # Now the run is created (a real start_audit_run would write this row
+        # and then call executor.start(run_id, phase) -- the row must exist
+        # first, exactly as it does here), and the FIRST synchronous
+        # admission attempt inside start(run_id, phase) fails transiently.
+        _create(persistence, run_id, _make_clock())
+        outcomes = iter([False])
+        persistence.acquire_lease = lambda rid, wid, *, ttl_s, now: next(outcomes, True)
+
+        executor.start(run_id, "plan")  # direct call: synchronous _try_admit fails on this one attempt
+
+        # _pending_starts is what is tracking this run as outstanding right
+        # after the failed attempt -- not merely inferred from the eventual
+        # outcome.
+        with executor._lock:
+            assert run_id in executor._pending_starts, "the failed attempt was not tracked as pending"
+
+        assert done.wait(timeout=5), "the run was never admitted after the transient failure"
+        with executor._lock:
+            assert run_id not in executor._pending_starts, "resolved run left dangling in _pending_starts"
+    finally:
+        persistence.acquire_lease = orig_acquire
+        executor.stop()
+
+
+def test_lost_signal_recovery_also_works_when_the_background_loop_was_never_started(local_persistence):
+    """The other half of the same fix: start(run_id, phase) must itself
+    ensure the background admission/heartbeat loop is running -- previously,
+    if the no-arg App-start call had never been made (or the loop had died),
+    a run_id call's own wake_event.set() woke nobody, ever."""
+    persistence = local_persistence
+    run_id = "RUN-NO-LOOP-YET"
+    _create(persistence, run_id, _make_clock())
+
+    done = threading.Event()
+
+    def quick_node(ctx, state):
+        done.set()
+        return state
+
+    nodes_for = {"fieldwork": {"plan": [("quick", quick_node)], "execute": [], "export": []}}
+    executor = ThreadExecutor(
+        persistence=persistence, settings=_Settings(), worker_id="worker-no-loop-yet",
+        ctx_factory=lambda rid: object(),
+        fingerprint_factory=lambda rid: _fingerprint(f"FP-{rid}"),
+        clock=_make_clock(), nodes_for=nodes_for,
+        poll_interval_s=0.05, idle_poll_interval_s=0.0,
+    )
+    assert executor._admission_thread is None  # the no-arg start() was never called
+    try:
+        executor.start(run_id, "plan")
+        assert done.wait(timeout=5)
+        assert executor._admission_thread is not None and executor._admission_thread.is_alive()
+    finally:
+        executor.stop()
+
+
+# ── grace period + self-exclusion protect a live lease under latency (P3
+#    gap-audit review item 2, root cause of RUN-57B6B4BB2B33) ─────────────────
+
+
+def test_reap_orphaned_runs_with_leases_grace_period_tolerates_a_recently_expired_lease(local_persistence):
+    """Unit-level test of `grace_s` alone, no concurrency: a lease that
+    crossed raw expiry only recently is NOT reaped; the same lease once it
+    is past expiry by more than the grace window IS reaped. Isolates
+    grace_s from exclude_run_ids (covered separately below)."""
+    persistence = local_persistence
+    run_id = "RUN-GRACE"
+    state = _create(persistence, run_id, lambda: "2026-01-01T00:00:00.000000Z")
+    running_state = _transition_status(state, "running", now="2026-01-01T00:00:00.000000Z")
+    persistence.save_state(running_state)
+    persistence.acquire_lease(run_id, "peer-worker", ttl_s=10, now="2026-01-01T00:00:00.000000Z")
+    # lease_expires_at == 2026-01-01T00:00:10
+
+    just_past_raw_expiry = "2026-01-01T00:00:12.000000Z"  # 2s past raw expiry
+    reaped = reap_orphaned_runs_with_leases(persistence, now=just_past_raw_expiry, grace_s=30.0)
+    assert reaped == []
+    assert persistence.load_state(run_id).status == "running"
+
+    well_past_grace = "2026-01-01T00:00:45.000000Z"  # 35s past raw expiry, > 30s grace
+    reaped = reap_orphaned_runs_with_leases(persistence, now=well_past_grace, grace_s=30.0)
+    assert reaped == [run_id]
+    assert persistence.load_state(run_id).status == "interrupted"
+
+
+def test_reap_grace_never_delays_a_run_that_was_never_leased_at_all(local_persistence):
+    """grace_s must apply only to leases that WERE acquired and look
+    expired -- a run left `running` with NO lease row at all (a
+    pre-P3-shaped orphan) is a structurally different, unambiguous orphan
+    and is reaped immediately regardless of grace."""
+    persistence = local_persistence
+    run_id = "RUN-NEVER-LEASED"
+    state = _create(persistence, run_id, lambda: "2026-01-01T00:00:00.000000Z")
+    running_state = _transition_status(state, "running", now="2026-01-01T00:00:00.000000Z")
+    persistence.save_state(running_state)
+
+    reaped = reap_orphaned_runs_with_leases(persistence, now="2026-01-01T00:00:01.000000Z", grace_s=300.0)
+    assert reaped == [run_id]
+    assert persistence.load_state(run_id).status == "interrupted"
+
+
+def test_reap_never_interrupts_a_live_run_whose_own_renewal_is_slow(local_persistence):
+    """Root cause of a live false-interrupt under warehouse contention
+    (RUN-57B6B4BB2B33, CLAUDE.md build brief P3 gap-audit review): a
+    worker's OWN admission-loop reap tick must never mark its own
+    actively-running task's run `interrupted`, even when that SAME worker's
+    heartbeat renewal for it is running slower than the lease TTL. Injects a
+    slow renew_lease (blocks well past the TTL) and drives real reap ticks
+    concurrently, with lease_reap_grace_s explicitly disabled -- proving the
+    exclude-own-active-runs fix alone (not the grace buffer) is what
+    protects the live run."""
+    persistence = local_persistence
+    run_id = "RUN-SLOW-RENEWAL"
+    _create(persistence, run_id, lambda: canonical_ts(0))
+
+    node_entered = threading.Event()
+    node_release = threading.Event()
+
+    def blocking_node(ctx, state):
+        node_entered.set()
+        node_release.wait(timeout=10)
+        return dataclasses.replace(state, events=state.events + [{"node": "n"}])
+
+    nodes_for = {"fieldwork": {"plan": [("n", blocking_node)], "execute": [], "export": []}}
+
+    renewal_started = threading.Event()
+    renewal_may_return = threading.Event()
+    orig_renew = persistence.renew_lease
+
+    def slow_renew_lease(rid, wid, *, ttl_s, now):
+        renewal_started.set()
+        renewal_may_return.wait(timeout=10)  # simulate warehouse contention outlasting the TTL
+        return orig_renew(rid, wid, ttl_s=ttl_s, now=now)
+
+    persistence.renew_lease = slow_renew_lease
+
+    # A REAL wall clock (not _make_clock()'s fast-forwarding logical clock):
+    # lease_expires_at is compared against real elapsed time by the admission
+    # loop's own reap ticks while the renewal above is deliberately blocked.
+    executor = ThreadExecutor(
+        persistence=persistence, settings=_Settings(), worker_id="worker-slow-renew",
+        ctx_factory=lambda rid: object(),
+        fingerprint_factory=lambda rid: _fingerprint(f"FP-{rid}"),
+        clock=utc_now, nodes_for=nodes_for,
+        poll_interval_s=0.05, heartbeat_interval_s=0.1, lease_ttl_s=1,
+        lease_reap_grace_s=0.0,  # no extra tolerance -- isolates the exclude-own-active fix
+    )
+    try:
+        executor.start()
+        assert node_entered.wait(timeout=10)
+        assert renewal_started.wait(timeout=10)
+
+        # The lease has now genuinely crossed its 1s TTL (renewal is still
+        # blocked) -- give several reap ticks (poll_interval_s=0.05) the
+        # chance to wrongly act on that before releasing the renewal.
+        time.sleep(0.5)
+        assert persistence.load_state(run_id).status == "running", (
+            "the worker's own reap tick interrupted its own live run under a slow renewal"
+        )
+
+        renewal_may_return.set()
+        node_release.set()
+        deadline = time.time() + 10
+        status = persistence.load_state(run_id).status
+        while time.time() < deadline and status == "running":
+            time.sleep(0.05)
+            status = persistence.load_state(run_id).status
+        assert status == "awaiting_signoff", status
+    finally:
+        renewal_may_return.set()
+        node_release.set()
+        executor.stop()

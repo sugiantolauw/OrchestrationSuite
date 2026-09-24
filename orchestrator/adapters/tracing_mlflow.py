@@ -151,4 +151,25 @@ class MLflowTracingAdapter:
         status = "FINISHED" if outcome == "succeeded" else "FAILED"
         self._client.set_terminated(span_id, status=status)
 
+    def end_run(self, run_id: str, *, status: str) -> None:
+        """P3 gap-audit review: the parent run (start_run) previously had no
+        counterpart to end_span -- it stayed RUNNING forever, including
+        across a paused run's whole wait for a human and across an App
+        restart, since MLflow has no notion of "paused". `status` must be
+        one of MLflow's terminal states ("FINISHED"/"FAILED"/"KILLED");
+        callers use FINISHED for both a genuine completion and a HITL pause
+        gate (the executor pass itself finished cleanly either way).
+        start_run's own idempotent, tag-keyed lookup is what makes this safe
+        to call multiple times across a run's life (e.g. FINISHED at a pause
+        gate, then FINISHED or FAILED again once the run's true final
+        outcome is known) -- it always resolves to the SAME mlflow run_id,
+        never creates a second one, so set_terminated here just updates that
+        one run's final status and end_time."""
+        if not self.available:
+            return
+        mlflow_run_id = self.start_run(run_id)
+        if not mlflow_run_id:
+            return
+        self._client.set_terminated(mlflow_run_id, status=status)
+
 
