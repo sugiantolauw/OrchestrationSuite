@@ -1594,6 +1594,23 @@ models: `implement` (Sonnet), `mechanical` (Haiku), `review` (Opus).
 **If the session model is Opus and the task is implementation, delegate to the `implement`
 subagent — do not edit files directly on Opus.**
 
+**Model split in practice (user decision, 2026-09-24).** Most token cost is agents re-reading
+their own context, not the model tier. So:
+- **Haiku (`mechanical`)** takes every exact-spec, low-judgement task:
+  - DDL migration files with specified columns;
+  - YAML (thresholds, finding templates, plan entries) written to a given spec;
+  - `.env.example`, `docs/CAPABILITY_MATRIX.md` and `docs/PLATFORM_REQUIREMENTS.md` updates;
+  - recording user decisions in this file;
+  - formatting reports and spreadsheets from numbers the coordinator computed;
+  - turning a finished test report into the user's test script;
+  - portability and developer-string sweeps, and renames.
+- **Sonnet (`implement`)** is for implementation and debugging only, in **small, narrowly scoped
+  batches**.
+  - Run the tests you touched while iterating, and the full suite once before the final commit.
+  - Split mechanical steps (screenshots, Delta checks) into separate short tasks.
+- **Opus** is for design, gate reviews and coordination only. It does not edit files directly
+  except for trivial fixes.
+
 Opus kickoff is warranted for P1, P2, P6, P8 (design-only, then hand off).
 Sonnet kickoff is sufficient for P3, P4, P5, P7, P9.
 
