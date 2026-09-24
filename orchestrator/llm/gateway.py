@@ -369,6 +369,22 @@ class LLMGateway:
                 **common, transport_attempt=transport_attempt, outcome="invalid_output", status="invalid_output",
                 error_type="TruncatedOutput", error_message=str(exc),
             )
+        except Exception as exc:
+            # NN7 (independent review 2026-09-24 item 3): an exception from
+            # self.client.chat() outside the known transport-error set
+            # (ModelUnavailable/LLMConfigError/RateLimited/
+            # TransientModelError/TruncatedOutput, each already handled
+            # above) must still leave an llm_calls row before it escapes --
+            # logged the same way a first-attempt transient failure already
+            # is (outcome 'failed_transport', an existing outcome in
+            # migration 008's CHECK), with error_type set to the exception's
+            # own class name, then re-raised unchanged so the node sees it
+            # exactly as before.
+            self._log_and_return(
+                **common, transport_attempt=transport_attempt, outcome="failed_transport", status="unavailable",
+                error_type=type(exc).__name__, error_message=str(exc), _return=False,
+            )
+            raise
 
         parsed = None
         if schema is not None:

@@ -314,6 +314,32 @@ def test_bad_request_logs_outcome_and_reraises_llm_config_error():
     assert row["run_id"] == "RUN-1"
 
 
+def test_unclassified_exception_logs_failed_transport_before_reraising():
+    # Independent review 2026-09-24 item 3 (NN7): an exception from the
+    # ModelClient outside the known transport-error set (ModelUnavailable/
+    # LLMConfigError/RateLimited/TransientModelError/TruncatedOutput) must
+    # still leave an llm_calls row -- logged as 'failed_transport' with
+    # error_type the exception's own class name -- before it escapes
+    # _call_live, never silently unlogged.
+    persistence = _persistence()
+    client = FakeModelClient(responses={"databricks-gpt-oss-120b": [KeyError("boom")]})
+    gw = _gateway(client, persistence=persistence)
+    with pytest.raises(KeyError):
+        gw.call(task="classify", seq=1, messages=[{"role": "user", "content": "hi"}],
+                 desired_params={"max_tokens": 10}, ctx=_ctx())
+    assert len(client.calls) == 1  # not retried -- unclassified, not a known transient error
+
+    rows = persistence.list_llm_calls("RUN-1")
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["outcome"] == "failed_transport"
+    assert row["error_type"] == "KeyError"
+    assert "boom" in row["error_message"]
+    assert row["endpoint"] == "databricks-gpt-oss-120b"
+    assert row["node_name"] == "classify"
+    assert row["run_id"] == "RUN-1"
+
+
 def test_truncated_output_already_logs_invalid_output_without_raising():
     # Audit finding, not a fix: TruncatedOutput is caught in `_call_live`
     # and turned into a normal (logged) LLMResult -- it never propagates as
