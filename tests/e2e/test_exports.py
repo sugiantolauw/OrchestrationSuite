@@ -9,26 +9,26 @@ demo XLSX, not this engine's), not the real workpaper
 orchestrator.nodes.fieldwork._write_xlsx_workpaper actually produces
 ("Findings" / "Metrics" / "Test Results" / "Reconciliation" / "Flagged Row
 Counts", plus "Ticket Preview" when requested). test_export_excel_... is
-fixed to match. The PPTX rebuild (CLAUDE.md §4.7) has not shipped yet --
-`export()` writes no "pptx" kind at all yet, so the "Export PPTX" button
-always shows "PPTX export is not available for this run" -- fixing this
-test's assertions to match today's reality would mean asserting a
-not-available message, which is not what X1 (features.py) claims to cover;
-skipped instead of quietly asserting the wrong thing, so it starts failing
-loudly (a `pytest.mark.skip` shows as skipped, never as a false pass) the
-moment PPTX export actually ships and this skip is removed.
+fixed to match.
+
+CLAUDE.md §4.7's PPTX rebuild has shipped: `export()` writes a "pptx" kind
+alongside the xlsx one (orchestrator.pptx_export.generate_pptx), so X1 below
+asserts against the real deck's own bounded structure -- slide count equal
+to `expected_slide_count()`, at least one native chart, and a footer
+(run_id + generated_at) on every slide -- rather than the prototype's demo
+deck it used to be written against.
 """
 
 from __future__ import annotations
 
+import re
+
 import openpyxl
-import pytest
 from pptx import Presentation
 
 from tests.e2e.conftest import goto_workspace
 
 
-@pytest.mark.skip(reason="PPTX export has not shipped yet (CLAUDE.md §4.7) -- export() writes no 'pptx' kind")
 def test_export_pptx_downloads_valid_deck_with_charts(watched_page, app_base_url, tmp_path):
     """X1."""
     page, watcher = watched_page
@@ -50,6 +50,23 @@ def test_export_pptx_downloads_valid_deck_with_charts(watched_page, app_base_url
 
     slide_count = len(prs.slides._sldIdLst)
     assert slide_count > 0
+
+    # Footer on every slide (CLAUDE.md §4.7 rule 3 / §9A.2): run_id +
+    # generated_at, and the SAME run_id on every slide -- never a mix, which
+    # would mean a stale/cached deck was served instead of this run's own.
+    footer_re = re.compile(r"run_id=(\S+) \| generated_at=(\S+)")
+    run_ids = set()
+    for slide in prs.slides:
+        footer_texts = [
+            m.group(1)
+            for shape in slide.shapes
+            if shape.has_text_frame
+            for m in [footer_re.search(shape.text_frame.text)]
+            if m
+        ]
+        assert footer_texts, "slide has no footer stamping run_id + generated_at"
+        run_ids.update(footer_texts)
+    assert len(run_ids) == 1, f"footer run_id is not consistent across slides: {run_ids}"
 
     has_chart = False
     for slide in prs.slides:
