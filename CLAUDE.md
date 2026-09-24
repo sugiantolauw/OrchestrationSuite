@@ -1793,6 +1793,9 @@ Never restart the App on a build that lacks the idle-polling fix.
   until the LLM layer lands; nothing is fabricated.
 - **Remove the `/actions` line "Session-only persistence in demo mode — actions reset when the app
   restarts".** It is false on the Delta backend.
+- **Correct two untrue phrases on `/workspace/tne`.** The risk-distribution subtitle drops
+  "recurrence": nothing uses it until prior-period comparison exists. The action-panel subtitle
+  becomes "Action ownership and responses are saved with this run."
 
 ### Further decisions from the user (2026-09-23)
 
