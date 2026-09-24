@@ -66,3 +66,12 @@ Not yet confirmed one way or the other by the corporate-workspace assessment; tr
 - Delta constraint features beyond basic table creation (row 10).
 - `VERSION AS OF` behaviour on whatever sources do land in Delta there (row 11).
 - Data residency / region for model inference (row 16).
+
+## Platform behaviour measured in the development workspace (2026-09-24)
+
+| Fact | Measured | Consequence |
+|---|---|---|
+| Warehouse stop latency | Serverless SQL warehouse with `auto_stop_mins=1` reached STOPPED 21.1 min and ~22 min after the App's last query (two separate measurements, via `system.compute.warehouse_events`) | Each burst of activity costs about 20 minutes of warehouse time, whatever the auto-stop setting. Budget for it, and keep the App from polling while idle. |
+| Background thread outlives App STOPPED | An executor thread kept running for ~1 min after the App reported STOPPED | Harmless: the late state write is rejected by CAS on `state_version`. The reaper marks the run `interrupted` on the next start. |
+| `apps.start` redeploys | Starting a stopped App automatically redeploys its last deployed source | Never start an App whose last deployment lacks the idle-polling fix (see CLAUDE.md §11 cost incident). |
+| Runs created outside the App | A run created by a standalone script with no executor stays `queued` until the App restarts and its startup sweep admits it | Create runs through the App, or restart the App afterwards. Automated test scripts must do the same. |
