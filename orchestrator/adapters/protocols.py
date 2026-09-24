@@ -400,10 +400,27 @@ class PersistenceAdapter(Protocol):
 
 
 class PromptRepository(Protocol):
-    def get_prompt(self, task: str, *, skill_id: str | None = None) -> str:
+    """Matches orchestrator.llm.prompts.FilePromptRepository (WP N6:
+    reconciled with the concrete implementation, which is keyed by
+    `template_id` -- e.g. "explorer/planner", not by `task` -- and renders
+    with `string.Template.substitute`, never an f-string or `str.format`
+    the caller builds itself, docs/specs/P6_P8_explorer_llm_design.md
+    §3.10)."""
+
+    def get_template(self, template_id: str) -> Any:
+        """Returns a `PromptTemplate(template_id, system, user, version)` --
+        `version` is the sha256 over the template files' paths and bytes."""
         ...
 
-    def prompt_template_version(self, task: str, *, skill_id: str | None = None) -> str:
+    def template_set_version(self, template_ids: list[str]) -> str:
+        """The hash over the union of `template_ids`' files -- what a run's
+        fingerprint's `prompt_template_version` is built from."""
+        ...
+
+    def render(self, template_id: str, **params) -> list[dict]:
+        """Renders one template into chat messages `[{"role": "system", ...},
+        {"role": "user", ...}]`. Raises on a placeholder the caller did not
+        supply -- never a literal `$name` left in a rendered prompt."""
         ...
 
 

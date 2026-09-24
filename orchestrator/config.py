@@ -127,10 +127,21 @@ class Settings:
     # config). All of these ARE part of the runtime config hash (below) --
     # unlike the operational knobs above, each one changes what a run
     # actually computes or what a prompt actually contains.
-    llm_cache_mode: str = "live"  # "live" | "replay" -- consumed by a later step (gateway replay mode)
+    llm_cache_mode: str = "live"  # "live" | "replay" -- orchestrator.llm.gateway.LLMGateway (WP N6)
     # Explorer refuses to start with this unset (CLAUDE.md NN14) -- there is
     # no reasonable default for an audit-period timezone.
     audit_timezone: str | None = None
+    # docs/specs/P6_narration_design.md §8 (WP N6 additive keys). Off by
+    # default everywhere except the dev `.env`, which sets both true
+    # (§8's own default proposal) -- neither switch has a code-level
+    # default other than false, so an unconfigured deployment never
+    # narrates or proposes findings by accident.
+    narration_enabled: bool = False
+    ai_proposed_findings_enabled: bool = False
+    # §5.1: the `find_candidates` task's schema caps `candidates` at this
+    # many items -- a hard ceiling on how many AI-proposed findings one run
+    # can produce, never just a UI truncation.
+    narration_max_candidates: int = 3
     # Explicit override of which repo Skills the planner sees as reference
     # examples (§4.4); empty means "the first two valid repo Skills sorted by
     # id" -- a later step's concern to resolve, this field only carries an
@@ -247,6 +258,9 @@ def load_settings(env: dict | None = None) -> Settings:
         mlflow_experiment_path=env.get("MLFLOW_EXPERIMENT_PATH") or None,
         llm_cache_mode=env.get("LLM_CACHE_MODE") or "live",
         audit_timezone=env.get("AUDIT_TIMEZONE") or None,
+        narration_enabled=_parse_bool(env.get("NARRATION_ENABLED"), False),
+        ai_proposed_findings_enabled=_parse_bool(env.get("AI_PROPOSED_FINDINGS_ENABLED"), False),
+        narration_max_candidates=_parse_int(env.get("NARRATION_MAX_CANDIDATES"), 3),
         explorer_reference_skill_ids=_parse_csv(env.get("EXPLORER_REFERENCE_SKILL_IDS")),
         explorer_category_max_distinct=_parse_int(env.get("EXPLORER_CATEGORY_MAX_DISTINCT"), 30),
         explorer_category_min_count=_parse_int(env.get("EXPLORER_CATEGORY_MIN_COUNT"), 5),
