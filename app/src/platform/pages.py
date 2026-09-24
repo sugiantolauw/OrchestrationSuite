@@ -191,7 +191,15 @@ def management_actions_page() -> html.Div:
     actions = adapters.list_management_actions()
     skills_for_filter = sorted(set(a.get("skill_name", "") for a in actions))
 
-    total_exposure = sum(a.get("potential_exposure") or 0 for a in actions)
+    # CLAUDE.md §0.3: findings' potential_exposure figures overlap the same
+    # underlying spend (a claim can be cited by more than one finding), so
+    # summing them here would double-count exactly the way the exec-brief
+    # figure once did. Each *completed* run already carries its own
+    # de-duplicated headline (run_exposure_headline, one number per run,
+    # see orchestrator/service.py list_runs "potential_exposure") -- sum
+    # that, once per run, instead of once per finding.
+    completed_runs = [r for r in adapters.list_audit_runs() if r.get("status") == "Completed"]
+    total_exposure = sum(r.get("potential_exposure") or 0 for r in completed_runs)
     open_count = sum(1 for a in actions if a.get("status") in ("Open", "Under review"))
     high_count = sum(1 for a in actions if a.get("risk") == "High")
 

@@ -99,6 +99,53 @@ def test_management_actions_page_renders_none_exposure_without_crashing(monkeypa
     assert "$0" in text
 
 
+def test_management_actions_page_exposure_is_not_double_counted(monkeypatch):
+    """CLAUDE.md §0.3: reference_app/app.py summed financial_exposure across
+    findings, and the same claim can be cited by more than one finding, so
+    the total inflates. Two findings on one run, each citing an overlapping
+    $8,000 of flagged spend (potential_exposure=8000 each -- a naive sum
+    would show $16,000), must roll up to that run's own de-duplicated
+    run_exposure_headline of $8,000, and a second completed run's headline
+    ($3,000) adds once, not once per finding. A non-completed run's headline
+    must not be counted at all."""
+    import fake_service
+
+    def _fake_list_management_actions(ctx, filters=None):
+        return [
+            {"action_id": "MA-1", "finding_id": "F1", "finding_title": "Split claims",
+             "run_id": "RUN-1", "skill_id": "SKILL-001", "skill_name": "T&E ExCo",
+             "risk": "High", "owner": None, "status": "Open", "target_date": None,
+             "potential_exposure": 8000, "evidence_link": "T5.1"},
+            {"action_id": "MA-2", "finding_id": "F2", "finding_title": "Duplicate claims",
+             "run_id": "RUN-1", "skill_id": "SKILL-001", "skill_name": "T&E ExCo",
+             "risk": "High", "owner": None, "status": "Open", "target_date": None,
+             "potential_exposure": 8000, "evidence_link": "T5.2"},
+            {"action_id": "MA-3", "finding_id": "F3", "finding_title": "Missing receipts",
+             "run_id": "RUN-2", "skill_id": "SKILL-001", "skill_name": "T&E ExCo",
+             "risk": "Medium", "owner": None, "status": "Open", "target_date": None,
+             "potential_exposure": 3000, "evidence_link": "T4.1"},
+        ]
+
+    def _fake_list_audit_runs(ctx, filters=None):
+        return [
+            {"run_id": "RUN-1", "skill_id": "SKILL-001", "status": "Completed",
+             "potential_exposure": 8000},
+            {"run_id": "RUN-2", "skill_id": "SKILL-001", "status": "Completed",
+             "potential_exposure": 3000},
+            {"run_id": "RUN-3", "skill_id": "SKILL-001", "status": "Running",
+             "potential_exposure": 5000},
+        ]
+
+    monkeypatch.setattr(fake_service, "list_management_actions", _fake_list_management_actions)
+    monkeypatch.setattr(fake_service, "list_runs", _fake_list_audit_runs)
+    layout = management_actions_page()
+    text = str(layout)
+    assert "Total exposure" in text
+    assert "$11,000" in text
+    assert "$16,000" not in text
+    assert "$19,000" not in text
+
+
 def test_run_page_builds_for_unknown_run():
     layout = run_status.run_page("RUN-DOES-NOT-EXIST")
     assert layout is not None
