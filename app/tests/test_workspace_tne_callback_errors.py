@@ -144,3 +144,51 @@ def test_p1_callback_renders_charts_normally_when_load_succeeds():
     assert len(out) == 10
     kpis = out[0]
     assert "could not be loaded" not in str(kpis)
+
+
+# ── "Export PPTX" button (CLAUDE.md §4.7 item 5) ────────────────────────────
+
+
+def test_export_pptx_button_streams_bytes_when_export_exists():
+    run_id = _completed_run()
+    callbacks = _register()
+
+    data, error = callbacks["_export_pptx"](1, run_id)
+    assert data is not None
+    assert error == ""
+
+
+def test_export_pptx_button_shows_plain_message_for_a_run_that_predates_pptx(monkeypatch):
+    """A run exported before PPTX export shipped has no "pptx" kind recorded
+    at all -- adapters.get_export raises FileNotFoundError (never
+    NotImplementedError or a generic Exception), and the button must show a
+    specific, plain message (never the raw exception text, NN13)."""
+    run_id = _completed_run()
+    callbacks = _register()
+
+    def _raise(rid, kind):
+        raise FileNotFoundError(f"no {kind!r} export recorded for run {rid!r}")
+
+    monkeypatch.setattr(adapters, "get_export", _raise)
+
+    data, error = callbacks["_export_pptx"](1, run_id)
+    assert data is None
+    assert error == "This run was exported before PowerPoint export was available."
+    assert "FileNotFoundError" not in error
+    assert run_id not in error
+
+
+def test_export_pptx_button_shows_generic_message_for_any_other_failure(monkeypatch):
+    run_id = _completed_run()
+    callbacks = _register()
+
+    def _raise(rid, kind):
+        raise _BoomError("sha256 mismatch")
+
+    monkeypatch.setattr(adapters, "get_export", _raise)
+
+    data, error = callbacks["_export_pptx"](1, run_id)
+    assert data is None
+    assert error == "PPTX export is not available for this run."
+    assert "_BoomError" not in error
+    assert "sha256" not in error

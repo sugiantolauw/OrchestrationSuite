@@ -511,8 +511,15 @@ def get_run_frames(ctx, run_id) -> dict:
 
 
 def get_export(ctx, run_id, kind: str):
+    """CLAUDE.md §4.7: the PPTX pack ships alongside the XLSX workpaper now,
+    so a fake run models both -- FileNotFoundError (never NotImplementedError)
+    for an unknown export kind, matching orchestrator.service.get_export's
+    own "no {kind!r} export recorded for run" for a run that predates a
+    given export kind, which is exactly the message
+    src.workspace_tne._export_pptx's FileNotFoundError branch turns into its
+    plain "exported before PowerPoint export was available" panel text."""
     if run_id not in ctx.runs:
         raise KeyError(run_id)
-    if kind == "pptx":
-        raise NotImplementedError("PPTX export arrives in P6")
+    if kind not in ("xlsx", "pptx"):
+        raise FileNotFoundError(f"no {kind!r} export recorded for run {run_id!r}")
     return f"{run_id}.{kind}", b"fake-bytes"

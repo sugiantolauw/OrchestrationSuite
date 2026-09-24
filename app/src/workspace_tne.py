@@ -1749,8 +1749,13 @@ def register_callbacks(app) -> None:
             raise PreventUpdate
         try:
             filename, blob = adapters.get_export(run_id, "pptx")
-        except Exception as exc:  # NN13 — never a broken button, say why
-            return None, f"PPTX export is not available for this run ({exc})"
+        except FileNotFoundError:
+            # A run completed before the PPTX export shipped (CLAUDE.md
+            # §4.7) has no "pptx" export recorded at all -- a plain,
+            # specific message, never the raw exception text (NN13).
+            return None, "This run was exported before PowerPoint export was available."
+        except Exception:  # NN13 — never a broken button, and never raw exception text either
+            return None, "PPTX export is not available for this run."
         return dcc.send_bytes(blob, filename), ""
 
     @app.callback(

@@ -89,12 +89,20 @@ def test_get_export_streams_bytes_for_a_known_run():
     assert isinstance(blob, (bytes, bytearray))
 
 
-def test_get_export_pptx_not_yet_available_is_a_clean_failure():
+def test_get_export_pptx_streams_bytes_for_a_known_run():
+    """CLAUDE.md §4.7: the PPTX pack ships alongside the XLSX workpaper."""
+    run_id = _new_run()
+    filename, blob = adapters.get_export(run_id, "pptx")
+    assert filename.endswith(".pptx")
+    assert isinstance(blob, (bytes, bytearray))
+
+
+def test_get_export_unknown_kind_is_a_clean_failure():
     run_id = _new_run()
     try:
-        adapters.get_export(run_id, "pptx")
+        adapters.get_export(run_id, "unknown-kind")
         raised = False
-    except NotImplementedError:
+    except FileNotFoundError:
         raised = True
     assert raised
 
