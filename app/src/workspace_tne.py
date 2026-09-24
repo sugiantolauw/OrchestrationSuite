@@ -162,10 +162,9 @@ def latest_completed_run_id() -> str | None:
 def _empty_state() -> html.Div:
     return html.Div([
         html.Div([
-            html.H2("No completed run yet", className="page-title"),
-            html.P("Start one from Home — select the ExCo T&E Skill and run the audit.",
-                   className="page-subtitle"),
-            dcc.Link("Go to Home", href="/", className="btn-generate",
+            html.H2("No completed run yet", className="showcase-headline"),
+            html.P("Start one from Start an Audit.", className="showcase-supporting"),
+            dcc.Link("Go to Start an Audit", href="/", className="btn-generate",
                      style={"display": "inline-block", "width": "auto", "padding": "10px 24px", "marginTop": 12}),
         ], className="showcase-hero"),
     ], className="shell dashboard-shell")
