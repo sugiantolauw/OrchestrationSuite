@@ -1797,6 +1797,43 @@ Never restart the App on a build that lacks the idle-polling fix.
   "recurrence": nothing uses it until prior-period comparison exists. The action-panel subtitle
   becomes "Action ownership and responses are saved with this run."
 
+### Corporate workspace assessment (Genie Code, 2026-09-24) — design consequences
+
+Genie Code assessed the corporate workspace against `docs/PLATFORM_REQUIREMENTS.md`. It looked at
+the **prototype** app already deployed there, so its env-var names (`UC_CATALOG`,
+`DATA_VOLUME_PATH`, `LLM_ENDPOINT_NAME`, ...) are the prototype's. Ours stay `DBX_*`/`MODEL_*`; the
+porting kit maps them. **No corporate names, ids or paths may be committed** (NN16): they live only
+in the gitignored corporate `.env`.
+
+Findings that change the design:
+- **`ai_query()`, `ai_classify()` and `ai_gen()` are denied on the corporate warehouse.** `classify`
+  (T4.3) calls Model Serving from Python in batches instead; §6's "`classify` via `ai_query()`" no
+  longer applies. Sending row text to a model needs its own governance approval. Until then T4.3
+  stays `not_testable`.
+- **`system.query.history` and `system.serving.endpoint_usage` are not available.**
+  - Idle-cost checks use `system.compute.warehouse_events`, or the warehouse state.
+  - LLM usage comes from the inference tables and `llm_calls`.
+  - Every system-table reader reports "not available" rather than failing.
+- **Source data there is Excel files in a UC Volume, not Delta tables.**
+  - Support Volume files as run sources, bound by explicit per-environment configuration (never
+    filename guessing), pinned by SHA-256 and contract-validated.
+  - Loading them into Delta stays an option.
+  - The corporate Volume has no per-diem file.
+- **Binary Python packages need vendored `manylinux` wheels.** Pure-Python packages install from
+  PyPI.
+- **Operations must run from a workspace cluster/notebook,** with notebook authentication and
+  Git-folder deploys. Genie Code there edits files but cannot execute code.
+- **Confirmed available:** Apps, a serverless warehouse (shared, 2X-Small, 1-min auto-stop), a UC
+  catalog/schema/Volume, MLflow under `/Shared`, `system.access.audit`, billing and compute system
+  tables, inference tables, UC tags, secret scopes (a new one must be requested), a READY Claude
+  Sonnet 4.5 endpoint and GPT-OSS endpoints, and PII/safety guardrail endpoints.
+- **Still to verify there:** Claude access from the App's service principal, the App compute
+  size, the identity headers, upload and timeout limits, Delta constraint features, `VERSION AS OF`
+  on sources, and data residency.
+- **No external egress** (ServiceNow, Glean) until requested. Genie's claim that the App's
+  "warehouse is not wired as a resource" is about the prototype; our deploy script attaches it. The
+  Volume `/dbfs` FUSE path does not apply: we use the Files API.
+
 ### Further decisions from the user (2026-09-23)
 
 - **UI is the prototype's, exactly.** Every page matches `reference_app/src/platform/pages.py` and
