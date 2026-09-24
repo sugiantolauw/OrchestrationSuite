@@ -53,6 +53,7 @@ def transition(
     now: str,
     reason: str | None = None,
     phase: str | None = None,
+    restart_at_index: int | None = None,
 ) -> RunState:
     from_status = state.status
     allowed = ALLOWED_TRANSITIONS.get(from_status, set())
@@ -103,6 +104,18 @@ def transition(
     }
     if new_phase != state.phase:
         updates["next_node_index"] = 0
+        updates["phase_epoch"] = state.state_version + 1
+    if restart_at_index is not None:
+        # P6 WP N9 (docs/specs/P6_narration_design.md §5.5 Regenerate): a
+        # same-phase "re-enter this phase from node N" transition -- unlike
+        # an ordinary phase change, next_node_index is set to the given
+        # index rather than reset to 0, but phase_epoch still advances so
+        # node execution keys (run_id:phase:phase_epoch:node_name:attempt,
+        # CLAUDE.md §4.1) are fresh and a replayed prior attempt is never
+        # mistaken for this generation's.
+        if restart_at_index < 0:
+            raise ValueError(f"restart_at_index must be >= 0, got {restart_at_index!r}")
+        updates["next_node_index"] = restart_at_index
         updates["phase_epoch"] = state.state_version + 1
     if to_status == "running" and state.started_at is None:
         updates["started_at"] = now
