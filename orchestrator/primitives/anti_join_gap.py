@@ -9,6 +9,12 @@ from orchestrator.primitives.common import (
     flags_from_rows,
 )
 
+DESCRIPTION = (
+    "Joins two populations on a key and flags rows on the left side that "
+    "have (anti) or have not (semi) found a matching row on the right -- a "
+    "gap check or a linkage check."
+)
+
 PARAMS_SCHEMA: dict = {
     "type": "object",
     "properties": {

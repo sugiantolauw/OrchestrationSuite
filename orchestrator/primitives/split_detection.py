@@ -14,6 +14,13 @@ from orchestrator.primitives.common import (
     resolve_scalar_threshold,
 )
 
+DESCRIPTION = (
+    "Flags claim groups that appear to have been split under a limit: rows "
+    "sharing a group key whose same-day total, or whose total over a "
+    "sliding day window, exceeds an aggregate threshold while every "
+    "individual line stays under an optional per-line ceiling."
+)
+
 PARAMS_SCHEMA: dict = {
     "type": "object",
     "properties": {

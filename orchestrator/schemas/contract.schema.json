@@ -7,7 +7,7 @@
       "additionalProperties": {
         "type": "object",
         "properties": {
-          "format": {"type": "string", "enum": ["xlsx", "csv"]},
+          "format": {"type": "string", "enum": ["xlsx", "csv", "parquet", "uc_table", "upload"]},
           "sheet": {"type": ["string", "integer"]},
           "file": {"type": "string"},
           "header_trim": {"type": "boolean"},
@@ -33,8 +33,13 @@
             }
           }
         },
-        "required": ["format", "file", "columns"],
-        "additionalProperties": false
+        "required": ["format", "columns"],
+        "additionalProperties": false,
+        "if": {
+          "properties": {"format": {"enum": ["xlsx", "csv", "parquet"]}},
+          "required": ["format"]
+        },
+        "then": {"required": ["file"]}
       }
     }
   },

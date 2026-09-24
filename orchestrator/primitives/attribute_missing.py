@@ -11,6 +11,11 @@ from orchestrator.primitives.common import (
     flags_from_rows,
 )
 
+DESCRIPTION = (
+    "Flags rows where a column is null, blank, or does not equal an "
+    "expected value -- a missing-attribute check."
+)
+
 PARAMS_SCHEMA: dict = {
     "type": "object",
     "properties": {

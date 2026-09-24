@@ -11,6 +11,12 @@ from orchestrator.primitives.common import (
     keyed_unit_id,
 )
 
+DESCRIPTION = (
+    "Groups rows by a key and flags every row in a group with more than one "
+    "member -- exact-key duplicates, with an optional sub-flag for a group "
+    "that mixes an out-of-pocket payment with a corporate-card payment."
+)
+
 PARAMS_SCHEMA: dict = {
     "type": "object",
     "properties": {

@@ -15,6 +15,13 @@ from orchestrator.primitives.common import (
     resolve_limit_spec,
 )
 
+DESCRIPTION = (
+    "Computes a ratio between two numeric columns -- optionally aggregated "
+    "per group -- and flags where it is above, below, at-or-above or "
+    "at-or-below a limit: a fixed value, or one of several limits selected "
+    "by another column's value."
+)
+
 PARAMS_SCHEMA: dict = {
     "type": "object",
     "properties": {
