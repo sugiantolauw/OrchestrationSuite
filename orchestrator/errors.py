@@ -190,6 +190,39 @@ class ConfiguredSourceUnavailable(Exception):
         )
 
 
+class CeilingReached(Exception):
+    """LIFECYCLE_design.md §2.6: a lifecycle run_kind's per-run Ceiling
+    (max_llm_calls / max_total_tokens / other budgeted dimensions) was
+    reached. Not a node failure: the node that catches this records
+    module_output.stop_reason = f"ceiling:{which}" and marks its own
+    coverage incomplete, then finishes cleanly -- there is never a silent
+    partial result (CLAUDE.md §9A item 7)."""
+
+    def __init__(self, which: str, used: int, limit: int):
+        self.which = which
+        self.used = used
+        self.limit = limit
+        super().__init__(f"ceiling reached: {which} used={used} limit={limit}")
+
+
+class MonthlyLLMBudgetExceeded(Exception):
+    """LIFECYCLE_design.md §2.6: LLM_MONTHLY_TOKEN_BUDGET is required to
+    start any lifecycle run_kind that calls a model. Raised at admission
+    (before the run does any model work) when the current UTC month's
+    summed llm_calls.total_tokens plus this run_kind's own ceiling would
+    exceed the configured budget -- refused with a reason, never a silent
+    partial run."""
+
+    def __init__(self, *, used_tokens: int, requested_tokens: int, budget: int):
+        self.used_tokens = used_tokens
+        self.requested_tokens = requested_tokens
+        self.budget = budget
+        super().__init__(
+            f"starting this run would exceed the monthly LLM token budget: "
+            f"used={used_tokens} + requested={requested_tokens} > budget={budget}"
+        )
+
+
 class MissingSeverityProvenance(Exception):
     """CLAUDE.md §0.4/G8, P2/P3 gate review item 3: a finding whose severity
     provenance (analyst_set_severity / severity_basis) was never persisted.

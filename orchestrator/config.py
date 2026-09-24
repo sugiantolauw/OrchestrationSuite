@@ -123,6 +123,19 @@ class Settings:
     # to select the right wheel for each binary dependency. A config value
     # (CLAUDE.md NN16), never hardcoded in the vendoring script itself.
     apps_python_version: str = "3.11"
+    # LIFECYCLE_design.md §2.6: required to start any lifecycle run_kind
+    # that calls a model at all (fieldwork never checks this -- `execute`
+    # never calls an LLM, CLAUDE.md non-negotiable 2). Unset means no
+    # lifecycle run that calls a model may start; there is no silent
+    # unlimited default. An operational spending cap, not computation --
+    # excluded from the runtime config hash below, same as the executor/
+    # admission knobs.
+    llm_monthly_token_budget: int | None = None
+    # A JSON blob of {role: price_per_million_tokens}, read only by whatever
+    # later displays an estimated cost ("estimate at configured rates").
+    # Unset means no price is shown anywhere -- never a fabricated number
+    # (CLAUDE.md non-negotiable 13). No prices appear in code.
+    llm_price_per_mtok_json: str | None = None
 
     def __post_init__(self) -> None:
         _validate_identifier("catalog", self.catalog)
@@ -152,6 +165,12 @@ def _parse_float(value: str | None, default: float) -> float:
     return float(value)
 
 
+def _parse_optional_int(value: str | None) -> int | None:
+    if value is None or value == "":
+        return None
+    return int(value)
+
+
 def load_settings(env: dict | None = None) -> Settings:
     env = os.environ if env is None else env
     return Settings(
@@ -179,6 +198,8 @@ def load_settings(env: dict | None = None) -> Settings:
         llm_retry_backoff_s=_parse_float(env.get("LLM_RETRY_BACKOFF_S"), 5.0),
         enable_row_level_llm=_parse_bool(env.get("ENABLE_ROW_LEVEL_LLM"), False),
         apps_python_version=env.get("DBX_APPS_PYTHON_VERSION") or "3.11",
+        llm_monthly_token_budget=_parse_optional_int(env.get("LLM_MONTHLY_TOKEN_BUDGET")),
+        llm_price_per_mtok_json=env.get("LLM_PRICE_PER_MTOK_JSON") or None,
         # P2/P3 gate review item 4 (MLflow per-node spans, CLAUDE.md §2.3).
         # Unset -- never hardcoded here -- means mlflow's own default
         # resolution: MLFLOW_TRACKING_URI if the process environment already
@@ -220,6 +241,8 @@ _RUNTIME_HASH_EXCLUDED_FIELDS = frozenset({
     "llm_timeout_s",
     "llm_retry_backoff_s",
     "apps_python_version",
+    "llm_monthly_token_budget",
+    "llm_price_per_mtok_json",
 })
 
 

@@ -449,7 +449,8 @@ def test_batch_read_methods_with_no_ids_return_empty(persistence):
 
 
 def _llm_call_row(call_id, *, run_id, endpoint="ep1", served_model_version="v1", source="live",
-                   outcome="succeeded", cache_hit=False, cache_key=None):
+                   outcome="succeeded", cache_hit=False, cache_key=None, total_tokens=2,
+                   created_at=None):
     return {
         "call_id": call_id, "run_id": run_id, "engagement_id": "ENG-DEFAULT", "node_name": "classify",
         "execution_key": f"EK-{call_id}", "task": "classify", "seq": 1, "transport_attempt": 1,
@@ -458,10 +459,10 @@ def _llm_call_row(call_id, *, run_id, endpoint="ep1", served_model_version="v1",
         "version_changed": False, "prompt_template_id": "t1", "prompt_template_version": "tv1",
         "prompt_sha256": "ph1", "messages_json": "[]", "params_sent_json": "{}", "params_withheld_json": "{}",
         "response_text": "hi", "reasoning_parts_stripped": 0, "finish_reason": "stop", "prompt_tokens": 1,
-        "completion_tokens": 1, "total_tokens": 2, "latency_ms": 10, "request_id": "req1", "outcome": outcome,
+        "completion_tokens": 1, "total_tokens": total_tokens, "latency_ms": 10, "request_id": "req1", "outcome": outcome,
         "error_type": None, "error_status_code": None, "error_message": None,
         "pii_columns_masked_json": "[]", "pii_whitelist_json": "[]", "actor": "alice",
-        "created_at": canonical_ts(0),
+        "created_at": created_at or canonical_ts(0),
     }
 
 
@@ -532,3 +533,38 @@ def test_find_llm_cache_scoped_to_exact_prompt_endpoint_and_params(persistence, 
     assert persistence.find_llm_cache(prompt_sha, endpoint, '{"max_tokens": 20}') == []
     assert persistence.find_llm_cache(prompt_sha, "a-different-endpoint", row["params_json"]) == []
     assert len(persistence.find_llm_cache(prompt_sha, endpoint, row["params_json"])) == 1
+
+
+# ── sum_llm_call_tokens_since (L0.3, LIFECYCLE_design.md §2.6 monthly admission) ──
+
+
+def test_sum_llm_call_tokens_since_sums_matching_rows_only(persistence, uid):
+    # Compares two sums (with/without the "before" row) rather than an
+    # absolute total, so this holds even against the shared live-delta
+    # session schema (tests/conftest.py's `delta_schema`), which other tests
+    # may also have written llm_calls rows into.
+    run_id = f"RUN-BUDGET-{uid}"
+    before_ts = "2026-01-31T23:59:59.999999Z"
+    since = "2026-02-01T00:00:00.000000Z"
+    persistence.record_llm_call(_llm_call_row(
+        f"CALL-BEFORE-{uid}", run_id=run_id, total_tokens=1_000, created_at=before_ts,
+    ))
+    persistence.record_llm_call(_llm_call_row(
+        f"CALL-AT-{uid}", run_id=run_id, total_tokens=100, created_at=since,
+    ))
+    persistence.record_llm_call(_llm_call_row(
+        f"CALL-AFTER-{uid}", run_id=run_id, total_tokens=250, created_at="2026-02-15T00:00:00.000000Z",
+    ))
+
+    sum_including_before = persistence.sum_llm_call_tokens_since(before_ts)
+    sum_excluding_before = persistence.sum_llm_call_tokens_since(since)
+    assert sum_including_before - sum_excluding_before >= 1_000
+    assert sum_excluding_before >= 350
+
+
+def test_sum_llm_call_tokens_since_returns_zero_for_a_future_month(persistence, uid):
+    run_id = f"RUN-BUDGET-FUTURE-{uid}"
+    persistence.record_llm_call(_llm_call_row(
+        f"CALL-{uid}", run_id=run_id, total_tokens=42, created_at=canonical_ts(0),
+    ))
+    assert persistence.sum_llm_call_tokens_since("2099-01-01T00:00:00.000000Z") == 0
