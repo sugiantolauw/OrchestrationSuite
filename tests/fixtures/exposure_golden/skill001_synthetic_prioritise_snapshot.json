@@ -1,0 +1,1391 @@
+{
+  "findings": [
+    {
+      "accepted_at": null,
+      "accepted_by": null,
+      "analyst_set_severity": true,
+      "assertion": "operating",
+      "candidate_id": null,
+      "control_id": "CTL-TNE-06",
+      "created_at": "2026-09-24T12:10:17.043201Z",
+      "engagement_id": "ENG-DEFAULT",
+      "evidence_refs": [],
+      "exposure_amount": null,
+      "exposure_basis": "non-monetary finding",
+      "finding_id": "RUN-E332116D538A:T4_2",
+      "management_questions": [
+        "Is there a process to retrospectively obtain attendee details for flagged claims?",
+        "Are staff aware of the requirement to document attendees for entertainment expenses?"
+      ],
+      "metrics_cited": {
+        "att_missing_count": {
+          "source_ref": {
+            "columns": [
+              "Employee ID",
+              "Transaction Date",
+              "Expense Type",
+              "Expense Amount (reimbursement currency)"
+            ],
+            "grain": "row",
+            "population": "t42_pop",
+            "sources": [
+              {
+                "name": "expense_report",
+                "version": "ea9402a77c0483bf9d42f27dc20abee0aa474e78c6e1073b1e93287f86d8e977"
+              }
+            ]
+          },
+          "test_id": "T4.2",
+          "unit": "count",
+          "value": 198.0
+        },
+        "att_missing_pct": {
+          "source_ref": {
+            "columns": [
+              "Employee ID",
+              "Transaction Date",
+              "Expense Type",
+              "Expense Amount (reimbursement currency)"
+            ],
+            "grain": "row",
+            "population": "t42_pop",
+            "sources": [
+              {
+                "name": "expense_report",
+                "version": "ea9402a77c0483bf9d42f27dc20abee0aa474e78c6e1073b1e93287f86d8e977"
+              }
+            ]
+          },
+          "test_id": "T4.2",
+          "unit": "%",
+          "value": 84.6
+        },
+        "att_total": {
+          "source_ref": {
+            "columns": [
+              "Employee ID",
+              "Transaction Date",
+              "Expense Type",
+              "Expense Amount (reimbursement currency)"
+            ],
+            "grain": "row",
+            "population": "t42_pop",
+            "sources": [
+              {
+                "name": "expense_report",
+                "version": "ea9402a77c0483bf9d42f27dc20abee0aa474e78c6e1073b1e93287f86d8e977"
+              }
+            ]
+          },
+          "test_id": "T4.2",
+          "unit": "count",
+          "value": 234.0
+        }
+      },
+      "monetary_basis": "none",
+      "observation": "198 of 234 entertainment-related claims (84.6%) are missing attendee information. The control objective is that entertainment claims must list attendees and business purpose, to demonstrate legitimate business use.\n",
+      "origin": null,
+      "prior_finding_id": null,
+      "proposed_severity": null,
+      "proposed_severity_reason": null,
+      "recommendation": "Mandate attendee fields as required for entertainment expense types in the expense system. Reject submissions without completed attendee details.\n",
+      "recurrence_count": 0,
+      "review_state": "draft",
+      "risk_id": "RSK-TNE-06",
+      "rule_id": "SKILL-001.T4_2",
+      "run_id": "RUN-E332116D538A",
+      "severity": "High",
+      "severity_basis": "threshold",
+      "severity_rule": "att_missing_pct > thresholds.att_missing_high_pct",
+      "skill_id": "SKILL-001",
+      "skill_version": "2.0.7-draft",
+      "test_id": "T4.2",
+      "theme_id": null,
+      "threshold_refs": [
+        {
+          "id": "att_missing_high_pct",
+          "pending_policy_confirmation": true,
+          "provenance_type": "analyst-set",
+          "unit": "%",
+          "value": 20
+        }
+      ],
+      "title": "Entertainment Claims Missing Attendee Details",
+      "updated_at": "2026-09-24T12:10:17.069699Z"
+    },
+    {
+      "accepted_at": null,
+      "accepted_by": null,
+      "analyst_set_severity": true,
+      "assertion": "operating",
+      "candidate_id": null,
+      "control_id": "CTL-TNE-10",
+      "created_at": "2026-09-24T12:10:17.043201Z",
+      "engagement_id": "ENG-DEFAULT",
+      "evidence_refs": [],
+      "exposure_amount": 1994.79,
+      "exposure_basis": "Sum of this finding's own cited amount metric(s) ['duplicate_amount'] -- the same figure(s) rendered into its observation text, never re-derived from raw rows.",
+      "finding_id": "RUN-E332116D538A:T5_2",
+      "management_questions": [
+        "What is the current process for detecting and resolving duplicate claims?",
+        "Have any of these duplicates already been identified and reversed?"
+      ],
+      "metrics_cited": {
+        "duplicate_amount": {
+          "source_ref": {
+            "columns": [
+              "Employee ID",
+              "Transaction Date",
+              "Vendor",
+              "Expense Amount (reimbursement currency)"
+            ],
+            "grain": "claim_group",
+            "population": "p_exp_dup",
+            "sources": [
+              {
+                "name": "expense_report",
+                "version": "ea9402a77c0483bf9d42f27dc20abee0aa474e78c6e1073b1e93287f86d8e977"
+              }
+            ]
+          },
+          "test_id": "T5.2",
+          "unit": "AUD",
+          "value": 1994.7900000000004
+        },
+        "duplicate_groups": {
+          "source_ref": {
+            "columns": [
+              "Employee ID",
+              "Transaction Date",
+              "Vendor",
+              "Expense Amount (reimbursement currency)"
+            ],
+            "grain": "claim_group",
+            "population": "p_exp_dup",
+            "sources": [
+              {
+                "name": "expense_report",
+                "version": "ea9402a77c0483bf9d42f27dc20abee0aa474e78c6e1073b1e93287f86d8e977"
+              }
+            ]
+          },
+          "test_id": "T5.2",
+          "unit": "count",
+          "value": 29.0
+        },
+        "duplicate_lines": {
+          "source_ref": {
+            "columns": [
+              "Employee ID",
+              "Transaction Date",
+              "Vendor",
+              "Expense Amount (reimbursement currency)"
+            ],
+            "grain": "claim_group",
+            "population": "p_exp_dup",
+            "sources": [
+              {
+                "name": "expense_report",
+                "version": "ea9402a77c0483bf9d42f27dc20abee0aa474e78c6e1073b1e93287f86d8e977"
+              }
+            ]
+          },
+          "test_id": "T5.2",
+          "unit": "count",
+          "value": 60.0
+        },
+        "duplicate_oop_card_groups": {
+          "source_ref": {
+            "columns": [
+              "Employee ID",
+              "Transaction Date",
+              "Vendor",
+              "Expense Amount (reimbursement currency)"
+            ],
+            "grain": "claim_group",
+            "population": "p_exp_dup",
+            "sources": [
+              {
+                "name": "expense_report",
+                "version": "ea9402a77c0483bf9d42f27dc20abee0aa474e78c6e1073b1e93287f86d8e977"
+              }
+            ]
+          },
+          "test_id": "T5.2",
+          "unit": "count",
+          "value": 1.0
+        }
+      },
+      "monetary_basis": "excess",
+      "observation": "29 potential duplicate claim groups (60 lines, $1,994.79 at risk) were identified, of which 1 groups contain both an out-of-pocket and a corporate-card line for the same claim. Duplicate claims result in double reimbursement and direct financial loss.\n",
+      "origin": null,
+      "prior_finding_id": null,
+      "proposed_severity": null,
+      "proposed_severity_reason": null,
+      "recommendation": "Review all flagged duplicates and recover any confirmed double payments. Enhance duplicate detection logic in the expense system to prevent submission.\n",
+      "recurrence_count": 0,
+      "review_state": "draft",
+      "risk_id": "RSK-TNE-10",
+      "rule_id": "SKILL-001.T5_2",
+      "run_id": "RUN-E332116D538A",
+      "severity": "High",
+      "severity_basis": "threshold",
+      "severity_rule": "duplicate_groups > thresholds.duplicate_high_count or duplicate_oop_card_groups > thresholds.duplicate_high_count",
+      "skill_id": "SKILL-001",
+      "skill_version": "2.0.7-draft",
+      "test_id": "T5.2",
+      "theme_id": null,
+      "threshold_refs": [
+        {
+          "id": "duplicate_high_count",
+          "pending_policy_confirmation": true,
+          "provenance_type": "analyst-set",
+          "unit": "count",
+          "value": 10
+        }
+      ],
+      "title": "Duplicate Expense Claims Identified",
+      "updated_at": "2026-09-24T12:10:17.069699Z"
+    },
+    {
+      "accepted_at": null,
+      "accepted_by": null,
+      "analyst_set_severity": true,
+      "assertion": "operating",
+      "candidate_id": null,
+      "control_id": "CTL-TNE-11",
+      "created_at": "2026-09-24T12:10:17.043201Z",
+      "engagement_id": "ENG-DEFAULT",
+      "evidence_refs": [],
+      "exposure_amount": null,
+      "exposure_basis": "non-monetary finding",
+      "finding_id": "RUN-E332116D538A:T6_1a",
+      "management_questions": [
+        "Are approvers aware of their obligation to review receipts before approving?",
+        "What training has been provided to approvers on their T&E oversight responsibilities?",
+        "Is there a mechanism to flag approvers who consistently approve without receipt review?"
+      ],
+      "metrics_cited": {
+        "approver_count": {
+          "source_ref": {
+            "columns": [
+              "Report Receipt Viewed",
+              "All Entry Receipts Viewed",
+              "Minutes of Approval from Receipt View",
+              "Receipts Viewed Date"
+            ],
+            "grain": "approval_step",
+            "population": "t61a_pop",
+            "sources": [
+              {
+                "name": "approval_aging",
+                "version": "473652609be9f5e7b869a3899ffa7857b9bfb2e7fda17c279a07de1676324e54"
+              }
+            ]
+          },
+          "test_id": "T6.1a",
+          "unit": "count",
+          "value": 11.0
+        },
+        "approver_instant_pct": {
+          "source_ref": {
+            "columns": [
+              "Report Receipt Viewed",
+              "All Entry Receipts Viewed",
+              "Minutes of Approval from Receipt View",
+              "Receipts Viewed Date"
+            ],
+            "grain": "approval_step",
+            "population": "t61a_pop",
+            "sources": [
+              {
+                "name": "approval_aging",
+                "version": "473652609be9f5e7b869a3899ffa7857b9bfb2e7fda17c279a07de1676324e54"
+              }
+            ]
+          },
+          "test_id": "T6.1a",
+          "unit": "%",
+          "value": 4.1
+        },
+        "approver_no_receipt_pct": {
+          "source_ref": {
+            "columns": [
+              "Report Receipt Viewed",
+              "All Entry Receipts Viewed",
+              "Minutes of Approval from Receipt View",
+              "Receipts Viewed Date"
+            ],
+            "grain": "approval_step",
+            "population": "t61a_pop",
+            "sources": [
+              {
+                "name": "approval_aging",
+                "version": "473652609be9f5e7b869a3899ffa7857b9bfb2e7fda17c279a07de1676324e54"
+              }
+            ]
+          },
+          "test_id": "T6.1a",
+          "unit": "%",
+          "value": 82.7
+        },
+        "approver_total_reports": {
+          "source_ref": {
+            "columns": [
+              "Report Receipt Viewed",
+              "All Entry Receipts Viewed",
+              "Minutes of Approval from Receipt View",
+              "Receipts Viewed Date"
+            ],
+            "grain": "approval_step",
+            "population": "t61a_pop",
+            "sources": [
+              {
+                "name": "approval_aging",
+                "version": "473652609be9f5e7b869a3899ffa7857b9bfb2e7fda17c279a07de1676324e54"
+              }
+            ]
+          },
+          "test_id": "T6.1a",
+          "unit": "count",
+          "value": 799.0
+        },
+        "approver_worst_case_n": {
+          "source_ref": {
+            "columns": [
+              "Report Receipt Viewed",
+              "All Entry Receipts Viewed",
+              "Minutes of Approval from Receipt View",
+              "Receipts Viewed Date"
+            ],
+            "grain": "approval_step",
+            "population": "t61a_pop",
+            "sources": [
+              {
+                "name": "approval_aging",
+                "version": "473652609be9f5e7b869a3899ffa7857b9bfb2e7fda17c279a07de1676324e54"
+              }
+            ]
+          },
+          "test_id": "T6.1a",
+          "unit": "count",
+          "value": 1.0
+        },
+        "approver_worst_case_pct": {
+          "source_ref": {
+            "columns": [
+              "Report Receipt Viewed",
+              "All Entry Receipts Viewed",
+              "Minutes of Approval from Receipt View",
+              "Receipts Viewed Date"
+            ],
+            "grain": "approval_step",
+            "population": "t61a_pop",
+            "sources": [
+              {
+                "name": "approval_aging",
+                "version": "473652609be9f5e7b869a3899ffa7857b9bfb2e7fda17c279a07de1676324e54"
+              }
+            ]
+          },
+          "test_id": "T6.1a",
+          "unit": "%",
+          "value": 0.1
+        }
+      },
+      "monetary_basis": "none",
+      "observation": "Of 799 expense reports reviewed by 11 approvers, 82.7% were approved without the approver viewing the receipt. Additionally, 4.1% of reports assessed as instant (among steps where a receipt was viewed) received approval in under the instant-approval threshold. 1 reports (0.1%) received both instant approval and no receipt review, representing the highest-risk approval behaviour.\n",
+      "origin": null,
+      "prior_finding_id": null,
+      "proposed_severity": null,
+      "proposed_severity_reason": null,
+      "recommendation": "Implement minimum review time controls in the expense system. Require mandatory receipt viewing before approval submission. Establish approver review KPIs and include in performance discussions.\n",
+      "recurrence_count": 0,
+      "review_state": "draft",
+      "risk_id": "RSK-TNE-11",
+      "rule_id": "SKILL-001.T6_1a",
+      "run_id": "RUN-E332116D538A",
+      "severity": "High",
+      "severity_basis": "threshold",
+      "severity_rule": "approver_no_receipt_pct > thresholds.approver_no_receipt_high_pct or approver_instant_pct > thresholds.approver_instant_high_pct",
+      "skill_id": "SKILL-001",
+      "skill_version": "2.0.7-draft",
+      "test_id": "T6.1a",
+      "theme_id": null,
+      "threshold_refs": [
+        {
+          "id": "approver_instant_high_pct",
+          "pending_policy_confirmation": true,
+          "provenance_type": "analyst-set",
+          "unit": "%",
+          "value": 40
+        },
+        {
+          "id": "approver_no_receipt_high_pct",
+          "pending_policy_confirmation": true,
+          "provenance_type": "analyst-set",
+          "unit": "%",
+          "value": 30
+        }
+      ],
+      "title": "Inadequate Approver Review of Expense Reports",
+      "updated_at": "2026-09-24T12:10:17.069699Z"
+    },
+    {
+      "accepted_at": null,
+      "accepted_by": null,
+      "analyst_set_severity": true,
+      "assertion": "operating",
+      "candidate_id": null,
+      "control_id": "CTL-TNE-01",
+      "created_at": "2026-09-24T12:10:17.043201Z",
+      "engagement_id": "ENG-DEFAULT",
+      "evidence_refs": [],
+      "exposure_amount": 182552.32,
+      "exposure_basis": "Sum of this finding's own cited amount metric(s) ['preapproval_unlinked_amount'] -- the same figure(s) rendered into its observation text, never re-derived from raw rows.",
+      "finding_id": "RUN-E332116D538A:T3_1a",
+      "management_questions": [
+        "Is there a follow-up process for pre-approved travel that doesn't result in an expense report?",
+        "What percentage of these represent cancelled travel vs missing expense reports?"
+      ],
+      "metrics_cited": {
+        "preapproval_employees": {
+          "source_ref": {
+            "columns": [
+              "Employee"
+            ],
+            "grain": "row",
+            "population": "t31a_pop",
+            "sources": [
+              {
+                "name": "travel_requests_no_expense",
+                "version": "c4f32eac37666b3cdd383cf7a4edfc5af3eb621c4fe3d8e45d89456299e0d829"
+              }
+            ]
+          },
+          "test_id": "T3.1a",
+          "unit": "count",
+          "value": 10.0
+        },
+        "preapproval_unlinked_amount": {
+          "source_ref": {
+            "columns": [
+              "Total Approved Amount (rpt)"
+            ],
+            "grain": "row",
+            "population": "t31a_pop",
+            "sources": [
+              {
+                "name": "travel_requests_no_expense",
+                "version": "c4f32eac37666b3cdd383cf7a4edfc5af3eb621c4fe3d8e45d89456299e0d829"
+              }
+            ]
+          },
+          "test_id": "T3.1a",
+          "unit": "AUD",
+          "value": 182552.31999999998
+        },
+        "preapproval_unlinked_count": {
+          "source_ref": {
+            "columns": [
+              "Approval Status"
+            ],
+            "grain": "row",
+            "population": "t31a_pop",
+            "sources": [
+              {
+                "name": "travel_requests_no_expense",
+                "version": "c4f32eac37666b3cdd383cf7a4edfc5af3eb621c4fe3d8e45d89456299e0d829"
+              }
+            ]
+          },
+          "test_id": "T3.1a",
+          "unit": "count",
+          "value": 85.0
+        }
+      },
+      "monetary_basis": "approved_not_spent",
+      "observation": "85 pre-approved travel requests totalling $182,552.32 across 10 employees do not have linked expense reports. This may indicate travel that was approved but not taken, or expense reports that were not properly linked to pre-approvals.\n",
+      "origin": null,
+      "prior_finding_id": null,
+      "proposed_severity": null,
+      "proposed_severity_reason": null,
+      "recommendation": "Reconcile unlinked travel requests with actual travel records. Implement automated matching between pre-approvals and expense reports.\n",
+      "recurrence_count": 0,
+      "review_state": "draft",
+      "risk_id": "RSK-TNE-01",
+      "rule_id": "SKILL-001.T3_1a",
+      "run_id": "RUN-E332116D538A",
+      "severity": "Medium",
+      "severity_basis": "fixed",
+      "severity_rule": "else",
+      "skill_id": "SKILL-001",
+      "skill_version": "2.0.7-draft",
+      "test_id": "T3.1a",
+      "theme_id": null,
+      "threshold_refs": [],
+      "title": "Travel Requests Without Linked Expense Reports",
+      "updated_at": "2026-09-24T12:10:17.069699Z"
+    },
+    {
+      "accepted_at": null,
+      "accepted_by": null,
+      "analyst_set_severity": true,
+      "assertion": "operating",
+      "candidate_id": null,
+      "control_id": "CTL-TNE-08",
+      "created_at": "2026-09-24T12:10:17.043201Z",
+      "engagement_id": "ENG-DEFAULT",
+      "evidence_refs": [],
+      "exposure_amount": 318785.6,
+      "exposure_basis": "Sum of this finding's own cited amount metric(s) ['hv_amount'] -- the same figure(s) rendered into its observation text, never re-derived from raw rows.",
+      "finding_id": "RUN-E332116D538A:T4_4",
+      "management_questions": [
+        "What additional controls exist for high-value expense claims?",
+        "Have any of these high-value claims been subject to post-approval review?"
+      ],
+      "metrics_cited": {
+        "hv_amount": {
+          "source_ref": {
+            "columns": [
+              "Expense Amount (reimbursement currency)"
+            ],
+            "grain": "row",
+            "population": "p_exp_hv",
+            "sources": [
+              {
+                "name": "expense_report",
+                "version": "ea9402a77c0483bf9d42f27dc20abee0aa474e78c6e1073b1e93287f86d8e977"
+              }
+            ]
+          },
+          "test_id": "T4.4",
+          "unit": "AUD",
+          "value": 318785.6000000001
+        },
+        "hv_count": {
+          "source_ref": {
+            "columns": [
+              "Expense Amount (reimbursement currency)"
+            ],
+            "grain": "row",
+            "population": "p_exp_hv",
+            "sources": [
+              {
+                "name": "expense_report",
+                "version": "ea9402a77c0483bf9d42f27dc20abee0aa474e78c6e1073b1e93287f86d8e977"
+              }
+            ]
+          },
+          "test_id": "T4.4",
+          "unit": "count",
+          "value": 38.0
+        },
+        "hv_employees": {
+          "source_ref": {
+            "columns": [
+              "Employee ID"
+            ],
+            "grain": "row",
+            "population": "p_exp_hv",
+            "sources": [
+              {
+                "name": "expense_report",
+                "version": "ea9402a77c0483bf9d42f27dc20abee0aa474e78c6e1073b1e93287f86d8e977"
+              }
+            ]
+          },
+          "test_id": "T4.4",
+          "unit": "count",
+          "value": 10.0
+        }
+      },
+      "monetary_basis": "spend",
+      "observation": "38 claims exceed the high-value threshold, totalling $318,785.60 across 10 employees. High-value claims carry elevated risk of misuse and warrant additional review beyond standard approval workflows.\n",
+      "origin": null,
+      "prior_finding_id": null,
+      "proposed_severity": null,
+      "proposed_severity_reason": null,
+      "recommendation": "Implement tiered approval for high-value claims, requiring secondary sign-off from finance. Conduct periodic deep-dive reviews of high-value transactions.\n",
+      "recurrence_count": 0,
+      "review_state": "draft",
+      "risk_id": "RSK-TNE-08",
+      "rule_id": "SKILL-001.T4_4",
+      "run_id": "RUN-E332116D538A",
+      "severity": "Medium",
+      "severity_basis": "fixed",
+      "severity_rule": "else",
+      "skill_id": "SKILL-001",
+      "skill_version": "2.0.7-draft",
+      "test_id": "T4.4",
+      "theme_id": null,
+      "threshold_refs": [],
+      "title": "High-Value Claims Requiring Enhanced Scrutiny",
+      "updated_at": "2026-09-24T12:10:17.069699Z"
+    },
+    {
+      "accepted_at": null,
+      "accepted_by": null,
+      "analyst_set_severity": true,
+      "assertion": "operating",
+      "candidate_id": null,
+      "control_id": "CTL-TNE-12",
+      "created_at": "2026-09-24T12:10:17.043201Z",
+      "engagement_id": "ENG-DEFAULT",
+      "evidence_refs": [],
+      "exposure_amount": null,
+      "exposure_basis": "non-monetary finding",
+      "finding_id": "RUN-E332116D538A:T6_1c",
+      "management_questions": [
+        "Is team entertainment (e.g., team lunches) a legitimate and expected expense for ExCo?",
+        "Should direct-report entertainment require separate approval from the next level?"
+      ],
+      "metrics_cited": {
+        "att_hierarchy_invalid": {
+          "source_ref": {
+            "columns": [
+              "Is Attendee also in Hierarchy?"
+            ],
+            "grain": "row",
+            "population": "t61c_pop",
+            "sources": [
+              {
+                "name": "attendee_validity",
+                "version": "61f564307ee1b86a596e4ec1187c88723d7d7d465a2215d85835849c90fca85c"
+              }
+            ]
+          },
+          "test_id": "T6.1c",
+          "unit": "count",
+          "value": 3.0
+        },
+        "att_hierarchy_total": {
+          "source_ref": {
+            "columns": [
+              "Is Attendee also in Hierarchy?"
+            ],
+            "grain": "row",
+            "population": "t61c_pop",
+            "sources": [
+              {
+                "name": "attendee_validity",
+                "version": "61f564307ee1b86a596e4ec1187c88723d7d7d465a2215d85835849c90fca85c"
+              }
+            ]
+          },
+          "test_id": "T6.1c",
+          "unit": "count",
+          "value": 4.0
+        }
+      },
+      "monetary_basis": "none",
+      "observation": "3 of 4 entertainment-entry attendee records have attendees within the claimant's reporting hierarchy. The control objective is that entertainment attendees should not be within the claimant's reporting hierarchy, to prevent self-serving approvals.\n",
+      "origin": null,
+      "prior_finding_id": null,
+      "proposed_severity": null,
+      "proposed_severity_reason": null,
+      "recommendation": "Implement hierarchical validation in the expense system to flag claims where attendees are within the claimant's reporting hierarchy. Require next-level-up approval for such claims.\n",
+      "recurrence_count": 0,
+      "review_state": "draft",
+      "risk_id": "RSK-TNE-12",
+      "rule_id": "SKILL-001.T6_1c",
+      "run_id": "RUN-E332116D538A",
+      "severity": "Medium",
+      "severity_basis": "fixed",
+      "severity_rule": "else",
+      "skill_id": "SKILL-001",
+      "skill_version": "2.0.7-draft",
+      "test_id": "T6.1c",
+      "theme_id": null,
+      "threshold_refs": [],
+      "title": "Attendee Hierarchy Validity Exceptions",
+      "updated_at": "2026-09-24T12:10:17.069699Z"
+    },
+    {
+      "accepted_at": null,
+      "accepted_by": null,
+      "analyst_set_severity": true,
+      "assertion": "operating",
+      "candidate_id": null,
+      "control_id": "CTL-TNE-13",
+      "created_at": "2026-09-24T12:10:17.043201Z",
+      "engagement_id": "ENG-DEFAULT",
+      "evidence_refs": [],
+      "exposure_amount": 1444.93,
+      "exposure_basis": "Sum of this finding's own cited amount metric(s) ['daily_over_amount_dom', 'daily_over_amount_int'] -- the same figure(s) rendered into its observation text, never re-derived from raw rows.",
+      "finding_id": "RUN-E332116D538A:T6_1d",
+      "management_questions": [
+        "Are there legitimate business scenarios that would exceed the daily per-diem in a single day?",
+        "Should the daily limit be adjusted for international travel days?",
+        "What controls exist to prevent excessive single-day spend?"
+      ],
+      "metrics_cited": {
+        "daily_over_amount_dom": {
+          "source_ref": {
+            "columns": [
+              "Expense Amount (reimbursement currency)"
+            ],
+            "grain": "Employee ID,Transaction Date,country",
+            "population": "t61d_pop_dom",
+            "sources": [
+              {
+                "name": "expense_report",
+                "version": "ea9402a77c0483bf9d42f27dc20abee0aa474e78c6e1073b1e93287f86d8e977"
+              }
+            ]
+          },
+          "test_id": "T6.1d_dom",
+          "unit": "AUD",
+          "value": 446.39761341999997
+        },
+        "daily_over_amount_int": {
+          "source_ref": {
+            "columns": [
+              "Expense Amount (reimbursement currency)"
+            ],
+            "grain": "Employee ID,Transaction Date,country",
+            "population": "t61d_pop_int",
+            "sources": [
+              {
+                "name": "expense_report",
+                "version": "ea9402a77c0483bf9d42f27dc20abee0aa474e78c6e1073b1e93287f86d8e977"
+              }
+            ]
+          },
+          "test_id": "T6.1d_int",
+          "unit": "AUD",
+          "value": 998.52770732
+        },
+        "daily_over_count_dom": {
+          "source_ref": {
+            "columns": [
+              "Expense Amount (reimbursement currency)"
+            ],
+            "grain": "Employee ID,Transaction Date,country",
+            "population": "t61d_pop_dom",
+            "sources": [
+              {
+                "name": "expense_report",
+                "version": "ea9402a77c0483bf9d42f27dc20abee0aa474e78c6e1073b1e93287f86d8e977"
+              }
+            ]
+          },
+          "test_id": "T6.1d_dom",
+          "unit": "count",
+          "value": 2.0
+        },
+        "daily_over_count_int": {
+          "source_ref": {
+            "columns": [
+              "Expense Amount (reimbursement currency)"
+            ],
+            "grain": "Employee ID,Transaction Date,country",
+            "population": "t61d_pop_int",
+            "sources": [
+              {
+                "name": "expense_report",
+                "version": "ea9402a77c0483bf9d42f27dc20abee0aa474e78c6e1073b1e93287f86d8e977"
+              }
+            ]
+          },
+          "test_id": "T6.1d_int",
+          "unit": "count",
+          "value": 2.0
+        },
+        "daily_over_max_dom": {
+          "source_ref": {
+            "columns": [
+              "Expense Amount (reimbursement currency)"
+            ],
+            "grain": "Employee ID,Transaction Date,country",
+            "population": "t61d_pop_dom",
+            "sources": [
+              {
+                "name": "expense_report",
+                "version": "ea9402a77c0483bf9d42f27dc20abee0aa474e78c6e1073b1e93287f86d8e977"
+              }
+            ]
+          },
+          "test_id": "T6.1d_dom",
+          "unit": "AUD",
+          "value": 437.92
+        },
+        "daily_over_max_int": {
+          "source_ref": {
+            "columns": [
+              "Expense Amount (reimbursement currency)"
+            ],
+            "grain": "Employee ID,Transaction Date,country",
+            "population": "t61d_pop_int",
+            "sources": [
+              {
+                "name": "expense_report",
+                "version": "ea9402a77c0483bf9d42f27dc20abee0aa474e78c6e1073b1e93287f86d8e977"
+              }
+            ]
+          },
+          "test_id": "T6.1d_int",
+          "unit": "AUD",
+          "value": 814.25
+        }
+      },
+      "monetary_basis": "excess",
+      "observation": "2 domestic and 2 international employee-days exceeded the applicable per-diem daily spend threshold, totalling $446.40 and $998.53 respectively in excess spend. The highest single domestic day was $437.92 and the highest single international day was $814.25. Concentrated daily spend may indicate bulk personal purchases or policy non-compliance.\n",
+      "origin": null,
+      "prior_finding_id": null,
+      "proposed_severity": null,
+      "proposed_severity_reason": null,
+      "recommendation": "Review high daily-spend instances to verify business purpose. Consider implementing real-time daily spend caps with automatic escalation for amounts exceeding policy limits.\n",
+      "recurrence_count": 0,
+      "review_state": "draft",
+      "risk_id": "RSK-TNE-13",
+      "rule_id": "SKILL-001.T6_1d",
+      "run_id": "RUN-E332116D538A",
+      "severity": "Medium",
+      "severity_basis": "threshold",
+      "severity_rule": "else",
+      "skill_id": "SKILL-001",
+      "skill_version": "2.0.7-draft",
+      "test_id": "T6.1d_dom",
+      "theme_id": null,
+      "threshold_refs": [
+        {
+          "id": "daily_over_high_count",
+          "pending_policy_confirmation": true,
+          "provenance_type": "analyst-set",
+          "unit": "count",
+          "value": 50
+        }
+      ],
+      "title": "Daily Spend Limit Exceedances",
+      "updated_at": "2026-09-24T12:10:17.069699Z"
+    },
+    {
+      "accepted_at": null,
+      "accepted_by": null,
+      "analyst_set_severity": true,
+      "assertion": "operating",
+      "candidate_id": null,
+      "control_id": "CTL-TNE-01",
+      "created_at": "2026-09-24T12:10:17.043201Z",
+      "engagement_id": "ENG-DEFAULT",
+      "evidence_refs": [],
+      "exposure_amount": null,
+      "exposure_basis": "non-monetary finding",
+      "finding_id": "RUN-E332116D538A:T3_1b",
+      "management_questions": [
+        "Are all ExCo members and their delegates aware of the pre-approval requirement?",
+        "Should certain expense types (e.g., local meals) be exempt from pre-approval?"
+      ],
+      "metrics_cited": {
+        "no_preapproval_bookings": {
+          "source_ref": {
+            "columns": [
+              "Lead Traveller Name",
+              "class"
+            ],
+            "grain": "row",
+            "population": "t31b_bookings_pop",
+            "sources": [
+              {
+                "name": "booking_detail",
+                "version": "5d639e8de1a01e7f84e68a256b82c309835835d00cd553826159bf73bc98ba61"
+              }
+            ]
+          },
+          "test_id": "T3.1b",
+          "unit": "count",
+          "value": 8.0
+        },
+        "no_preapproval_employees": {
+          "source_ref": {
+            "columns": [
+              "Lead Traveller Name"
+            ],
+            "grain": "row",
+            "population": "t31b_bookings_pop",
+            "sources": [
+              {
+                "name": "booking_detail",
+                "version": "5d639e8de1a01e7f84e68a256b82c309835835d00cd553826159bf73bc98ba61"
+              }
+            ]
+          },
+          "test_id": "T3.1b",
+          "unit": "count",
+          "value": 2.0
+        },
+        "t31b_name_match_rate": {
+          "source_ref": {
+            "columns": [
+              "Lead Traveller Name",
+              "class"
+            ],
+            "grain": "row",
+            "population": "t31b_bookings_pop",
+            "sources": [
+              {
+                "name": "booking_detail",
+                "version": "5d639e8de1a01e7f84e68a256b82c309835835d00cd553826159bf73bc98ba61"
+              }
+            ]
+          },
+          "test_id": "T3.1b",
+          "unit": "%",
+          "value": 33.3
+        }
+      },
+      "monetary_basis": "none",
+      "observation": "8 bookings (2 employees) have no matching travel request on file (name match rate 33.3%). The control objective is that all travel should be pre-approved before expenses are incurred, to support budgetary control and management oversight.\n",
+      "origin": null,
+      "prior_finding_id": null,
+      "proposed_severity": null,
+      "proposed_severity_reason": null,
+      "recommendation": "Enforce pre-approval requirements in the expense system by blocking submission without a linked travel request. Review non-compliant claims for policy violations.\n",
+      "recurrence_count": 0,
+      "review_state": "draft",
+      "risk_id": "RSK-TNE-01",
+      "rule_id": "SKILL-001.T3_1b",
+      "run_id": "RUN-E332116D538A",
+      "severity": "Low",
+      "severity_basis": "threshold",
+      "severity_rule": "else",
+      "skill_id": "SKILL-001",
+      "skill_version": "2.0.7-draft",
+      "test_id": "T3.1b",
+      "theme_id": null,
+      "threshold_refs": [
+        {
+          "id": "t31b_employee_medium_count",
+          "pending_policy_confirmation": true,
+          "provenance_type": "analyst-set",
+          "unit": "count",
+          "value": 5
+        }
+      ],
+      "title": "Employees Submitting Claims Without Pre-Approval",
+      "updated_at": "2026-09-24T12:10:17.069699Z"
+    },
+    {
+      "accepted_at": null,
+      "accepted_by": null,
+      "analyst_set_severity": true,
+      "assertion": "operating",
+      "candidate_id": null,
+      "control_id": "CTL-TNE-02",
+      "created_at": "2026-09-24T12:10:17.043201Z",
+      "engagement_id": "ENG-DEFAULT",
+      "evidence_refs": [],
+      "exposure_amount": null,
+      "exposure_basis": "non-monetary finding",
+      "finding_id": "RUN-E332116D538A:T3_2a",
+      "management_questions": [
+        "What is the estimated cost impact of non-preferred supplier usage?",
+        "Are there legitimate reasons (e.g., route availability) for the non-preferred bookings?"
+      ],
+      "metrics_cited": {
+        "pref_dom_airline": {
+          "source_ref": {
+            "columns": [
+              "Vendor"
+            ],
+            "grain": "row",
+            "population": "p_exp_pref_air_dom",
+            "sources": [
+              {
+                "name": "expense_report",
+                "version": "ea9402a77c0483bf9d42f27dc20abee0aa474e78c6e1073b1e93287f86d8e977"
+              }
+            ]
+          },
+          "test_id": "T3.2a_air_dom",
+          "unit": "count",
+          "value": 1.0
+        },
+        "pref_dom_car": {
+          "source_ref": {
+            "columns": [
+              "Vendor"
+            ],
+            "grain": "row",
+            "population": "p_exp_pref_car_dom",
+            "sources": [
+              {
+                "name": "expense_report",
+                "version": "ea9402a77c0483bf9d42f27dc20abee0aa474e78c6e1073b1e93287f86d8e977"
+              }
+            ]
+          },
+          "test_id": "T3.2a_car_dom",
+          "unit": "count",
+          "value": 1.0
+        },
+        "pref_int_airline": {
+          "source_ref": {
+            "columns": [
+              "Vendor"
+            ],
+            "grain": "row",
+            "population": "p_exp_pref_air_int",
+            "sources": [
+              {
+                "name": "expense_report",
+                "version": "ea9402a77c0483bf9d42f27dc20abee0aa474e78c6e1073b1e93287f86d8e977"
+              }
+            ]
+          },
+          "test_id": "T3.2a_air_int",
+          "unit": "count",
+          "value": 20.0
+        },
+        "pref_int_car": {
+          "source_ref": {
+            "columns": [
+              "Vendor"
+            ],
+            "grain": "row",
+            "population": "p_exp_pref_car_int",
+            "sources": [
+              {
+                "name": "expense_report",
+                "version": "ea9402a77c0483bf9d42f27dc20abee0aa474e78c6e1073b1e93287f86d8e977"
+              }
+            ]
+          },
+          "test_id": "T3.2a_car_int",
+          "unit": "count",
+          "value": 0.0
+        }
+      },
+      "monetary_basis": "none",
+      "observation": "1 domestic and 20 international airline bookings, and 1 domestic and 0 international car rental bookings, used non-preferred suppliers (accommodation not assessed -- no preferred-hotel list supplied). Use of non-preferred suppliers foregoes negotiated corporate rates and volume discounts, increasing travel costs.\n",
+      "origin": null,
+      "prior_finding_id": null,
+      "proposed_severity": null,
+      "proposed_severity_reason": null,
+      "recommendation": "Reinforce preferred supplier policy and ensure the corporate booking tool defaults to preferred suppliers. Require justification for non-preferred bookings exceeding a cost threshold.\n",
+      "recurrence_count": 0,
+      "review_state": "draft",
+      "risk_id": "RSK-TNE-02",
+      "rule_id": "SKILL-001.T3_2a",
+      "run_id": "RUN-E332116D538A",
+      "severity": "Low",
+      "severity_basis": "threshold",
+      "severity_rule": "else",
+      "skill_id": "SKILL-001",
+      "skill_version": "2.0.7-draft",
+      "test_id": "T3.2a_air_dom",
+      "theme_id": null,
+      "threshold_refs": [
+        {
+          "id": "pref_supplier_medium_count",
+          "pending_policy_confirmation": true,
+          "provenance_type": "analyst-set",
+          "unit": "count",
+          "value": 20
+        }
+      ],
+      "title": "Non-Preferred Supplier Usage",
+      "updated_at": "2026-09-24T12:10:17.069699Z"
+    },
+    {
+      "accepted_at": null,
+      "accepted_by": null,
+      "analyst_set_severity": true,
+      "assertion": "operating",
+      "candidate_id": null,
+      "control_id": "CTL-TNE-04",
+      "created_at": "2026-09-24T12:10:17.043201Z",
+      "engagement_id": "ENG-DEFAULT",
+      "evidence_refs": [],
+      "exposure_amount": 1384.27,
+      "exposure_basis": "Sum of this finding's own cited amount metric(s) ['ent_over_amount'] -- the same figure(s) rendered into its observation text, never re-derived from raw rows.",
+      "finding_id": "RUN-E332116D538A:T3_3b",
+      "management_questions": [
+        "Are the current per-head thresholds still appropriate?",
+        "Are there specific event types that legitimately exceed the thresholds?"
+      ],
+      "metrics_cited": {
+        "ent_assessed": {
+          "source_ref": {
+            "columns": [
+              "Entry Amount",
+              "Number of Attendees"
+            ],
+            "grain": "Employee ID,Report Name,Transaction Date,Vendor,Entry Amount",
+            "population": "t33b_pop",
+            "sources": [
+              {
+                "name": "attendee_validity",
+                "version": "61f564307ee1b86a596e4ec1187c88723d7d7d465a2215d85835849c90fca85c"
+              }
+            ]
+          },
+          "test_id": "T3.3b",
+          "unit": "count",
+          "value": 4.0
+        },
+        "ent_over_amount": {
+          "source_ref": {
+            "columns": [
+              "Entry Amount"
+            ],
+            "grain": "Employee ID,Report Name,Transaction Date,Vendor,Entry Amount",
+            "population": "t33b_pop",
+            "sources": [
+              {
+                "name": "attendee_validity",
+                "version": "61f564307ee1b86a596e4ec1187c88723d7d7d465a2215d85835849c90fca85c"
+              }
+            ]
+          },
+          "test_id": "T3.3b",
+          "unit": "AUD",
+          "value": 1384.27
+        },
+        "ent_over_external_count": {
+          "source_ref": {
+            "columns": [
+              "Entry Amount",
+              "Number of Attendees"
+            ],
+            "grain": "Employee ID,Report Name,Transaction Date,Vendor,Entry Amount",
+            "population": "t33b_pop",
+            "sources": [
+              {
+                "name": "attendee_validity",
+                "version": "61f564307ee1b86a596e4ec1187c88723d7d7d465a2215d85835849c90fca85c"
+              }
+            ]
+          },
+          "test_id": "T3.3b",
+          "unit": "count",
+          "value": 1.0
+        },
+        "ent_over_internal_count": {
+          "source_ref": {
+            "columns": [
+              "Entry Amount",
+              "Number of Attendees"
+            ],
+            "grain": "Employee ID,Report Name,Transaction Date,Vendor,Entry Amount",
+            "population": "t33b_pop",
+            "sources": [
+              {
+                "name": "attendee_validity",
+                "version": "61f564307ee1b86a596e4ec1187c88723d7d7d465a2215d85835849c90fca85c"
+              }
+            ]
+          },
+          "test_id": "T3.3b",
+          "unit": "count",
+          "value": 0.0
+        }
+      },
+      "monetary_basis": "spend",
+      "observation": "Of 4 entertainment entries assessed, 0 exceeded the internal per-head threshold and 1 exceeded the external per-head threshold, totalling $1,384.27 in over-threshold spend.\n",
+      "origin": null,
+      "prior_finding_id": null,
+      "proposed_severity": null,
+      "proposed_severity_reason": null,
+      "recommendation": "Review entries exceeding per-head limits to determine if business justification is adequate. Consider implementing real-time alerts in the expense system when per-head limits are breached.\n",
+      "recurrence_count": 0,
+      "review_state": "draft",
+      "risk_id": "RSK-TNE-04",
+      "rule_id": "SKILL-001.T3_3b",
+      "run_id": "RUN-E332116D538A",
+      "severity": "Low",
+      "severity_basis": "fixed",
+      "severity_rule": "else",
+      "skill_id": "SKILL-001",
+      "skill_version": "2.0.7-draft",
+      "test_id": "T3.3b",
+      "theme_id": null,
+      "threshold_refs": [],
+      "title": "Entertainment Spend Exceeding Per-Head Thresholds",
+      "updated_at": "2026-09-24T12:10:17.069699Z"
+    },
+    {
+      "accepted_at": null,
+      "accepted_by": null,
+      "analyst_set_severity": true,
+      "assertion": "operating",
+      "candidate_id": null,
+      "control_id": "CTL-TNE-05",
+      "created_at": "2026-09-24T12:10:17.043201Z",
+      "engagement_id": "ENG-DEFAULT",
+      "evidence_refs": [],
+      "exposure_amount": 1009.26,
+      "exposure_basis": "Sum of this finding's own cited amount metric(s) ['missing_receipt_amount'] -- the same figure(s) rendered into its observation text, never re-derived from raw rows.",
+      "finding_id": "RUN-E332116D538A:T4_1",
+      "management_questions": [
+        "What is the current policy for handling claims without receipts?",
+        "Are there legitimate reasons for the volume of missing receipts (e.g., system issues)?"
+      ],
+      "metrics_cited": {
+        "missing_receipt_amount": {
+          "source_ref": {
+            "columns": [
+              "Expense Amount (reimbursement currency)"
+            ],
+            "grain": "row",
+            "population": "p_exp",
+            "sources": [
+              {
+                "name": "expense_report",
+                "version": "ea9402a77c0483bf9d42f27dc20abee0aa474e78c6e1073b1e93287f86d8e977"
+              }
+            ]
+          },
+          "test_id": "T4.1",
+          "unit": "AUD",
+          "value": 1009.26
+        },
+        "missing_receipt_count": {
+          "source_ref": {
+            "columns": [
+              "Employee ID",
+              "Report Legacy Key",
+              "Transaction Date",
+              "Expense Type",
+              "Expense Amount (reimbursement currency)"
+            ],
+            "grain": "row",
+            "population": "p_exp",
+            "sources": [
+              {
+                "name": "expense_report",
+                "version": "ea9402a77c0483bf9d42f27dc20abee0aa474e78c6e1073b1e93287f86d8e977"
+              }
+            ]
+          },
+          "test_id": "T4.1",
+          "unit": "count",
+          "value": 27.0
+        },
+        "missing_receipt_no_affidavit_count": {
+          "source_ref": {
+            "columns": [
+              "Has Affidavit"
+            ],
+            "grain": "row",
+            "population": "p_exp",
+            "sources": [
+              {
+                "name": "expense_report",
+                "version": "ea9402a77c0483bf9d42f27dc20abee0aa474e78c6e1073b1e93287f86d8e977"
+              }
+            ]
+          },
+          "test_id": "T4.1",
+          "unit": "count",
+          "value": 0.0
+        },
+        "missing_receipt_pct": {
+          "source_ref": {
+            "columns": [
+              "Employee ID",
+              "Report Legacy Key",
+              "Transaction Date",
+              "Expense Type",
+              "Expense Amount (reimbursement currency)"
+            ],
+            "grain": "row",
+            "population": "p_exp",
+            "sources": [
+              {
+                "name": "expense_report",
+                "version": "ea9402a77c0483bf9d42f27dc20abee0aa474e78c6e1073b1e93287f86d8e977"
+              }
+            ]
+          },
+          "test_id": "T4.1",
+          "unit": "%",
+          "value": 0.7
+        }
+      },
+      "monetary_basis": "spend",
+      "observation": "27 claims (0.7% of total) are missing receipt documentation, representing $1,009.26 in unsupported spend, of which 0 have no affidavit on file. Without receipts, the business purpose and legitimacy of these expenses cannot be independently verified.\n",
+      "origin": null,
+      "prior_finding_id": null,
+      "proposed_severity": null,
+      "proposed_severity_reason": null,
+      "recommendation": "Enforce mandatory receipt attachment before expense report submission. Implement automated rejection for claims exceeding $50.00 without supporting documentation.\n",
+      "recurrence_count": 0,
+      "review_state": "draft",
+      "risk_id": "RSK-TNE-05",
+      "rule_id": "SKILL-001.T4_1",
+      "run_id": "RUN-E332116D538A",
+      "severity": "Low",
+      "severity_basis": "threshold",
+      "severity_rule": "else",
+      "skill_id": "SKILL-001",
+      "skill_version": "2.0.7-draft",
+      "test_id": "T4.1",
+      "theme_id": null,
+      "threshold_refs": [
+        {
+          "id": "missing_receipt_high_pct",
+          "pending_policy_confirmation": true,
+          "provenance_type": "analyst-set",
+          "unit": "%",
+          "value": 10
+        },
+        {
+          "id": "missing_receipt_medium_pct",
+          "pending_policy_confirmation": true,
+          "provenance_type": "analyst-set",
+          "unit": "%",
+          "value": 5
+        },
+        {
+          "id": "t41_auto_reject_amount",
+          "pending_policy_confirmation": true,
+          "provenance_type": "analyst-set",
+          "unit": "AUD",
+          "value": 50
+        }
+      ],
+      "title": "Missing Receipt Documentation",
+      "updated_at": "2026-09-24T12:10:17.069699Z"
+    }
+  ],
+  "run_approved_not_spent_total": {
+    "source_ref": {
+      "basis": "Sum of every 'approved_not_spent' finding's own exposure_amount -- money authorised (e.g. an approved travel request) but never turned into an actual reimbursed transaction. Reported separately because it is not spend at all; never included in the gross-flagged-spend headline above.",
+      "label": "Approved but never spent (not flagged spend)"
+    },
+    "test_id": null,
+    "unit": "AUD",
+    "value": 182552.32
+  },
+  "run_exposure_headline": {
+    "source_ref": {
+      "basis": "The amount at risk: every distinct flagged transaction line from findings whose monetary_basis is 'spend' or 'excess' counts exactly once, at the LARGEST amount at risk any finding attributes to it -- a 'spend' finding attributes the line's own full amount, an 'excess' finding attributes only the at-risk portion (the lines beyond the first in a duplicate group, or a per-diem day's over-limit amount allocated pro rata to that day's lines). Line identity is row identity for a row-grain source, or a declared repeats-grain entry_key (contract.yaml) where one source row is genuinely the same business entry as another (e.g. one row per attendee of one entertainment claim). Excludes 'approved_not_spent' findings (money approved but never actually spent -- see run_approved_not_spent_total) and 'none' (no dollar figure). Per-finding exposure_amount figures overlap with each other and with this headline by design (the same line can be cited by more than one finding) and must never be summed.",
+      "label": "Potential exposure",
+      "sources": [
+        {
+          "amount_column": "Entry Amount",
+          "entry_key": [
+            "Employee ID",
+            "Report Name",
+            "Transaction Date",
+            "Vendor",
+            "Entry Amount"
+          ],
+          "name": "attendee_validity",
+          "version": "61f564307ee1b86a596e4ec1187c88723d7d7d465a2215d85835849c90fca85c"
+        },
+        {
+          "amount_column": "Expense Amount (reimbursement currency)",
+          "entry_key": null,
+          "name": "expense_report",
+          "version": "ea9402a77c0483bf9d42f27dc20abee0aa474e78c6e1073b1e93287f86d8e977"
+        }
+      ]
+    },
+    "test_id": null,
+    "unit": "AUD",
+    "value": 324614.65
+  }
+}
