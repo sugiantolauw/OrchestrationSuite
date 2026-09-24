@@ -422,7 +422,7 @@ def _fmt_metric(value, unit) -> str:
     metric reads the same way in the evidence drawer as it does in the
     finding text it came from."""
     if value is None:
-        return "n/a"
+        return _NO_VALUE
     if unit == "AUD":
         return f"${value:,.2f}" if isinstance(value, (int, float)) else str(value)
     if unit == "%":
@@ -435,13 +435,13 @@ def _fmt_metric(value, unit) -> str:
 
 
 def _fmt_currency(value) -> str:
-    return f"${value:,.0f}" if isinstance(value, (int, float)) else "n/a"
+    return f"${value:,.0f}" if isinstance(value, (int, float)) else _NO_VALUE
 
 
 # CLAUDE.md §11 "—" decision: the same em dash format_money_or_dash
 # (components.py) already renders for a missing figure, reused here for
 # every non-money count/percentage this module cannot compute -- never a
-# second, independently-typed dash literal, and never "n/a".
+# second, independently-typed dash literal, and never "—".
 _NO_VALUE = '—'
 
 
@@ -491,7 +491,7 @@ def _build_header(run: dict, payload: dict | None = None) -> html.Div:
 
     # Run-level metrics (CLAUDE.md build brief P3 §2 "Run-level metrics (all
     # computed)"): total_records/total_files/months_covered — always read
-    # from this run's own persisted metrics, "n/a" when a run predates them
+    # from this run's own persisted metrics, "—" when a run predates them
     # rather than a hardcoded population count (CLAUDE.md §0.2, N6).
     total_records = _metric_value(payload, "total_records")
     total_files = _metric_value(payload, "total_files")
@@ -1166,16 +1166,16 @@ def _p1_update(bundle: dict, start_date, end_date, members, meta: dict[str, dict
     # silently rendering "0 missing receipts" instead of surfacing that the
     # figure could not be computed. `miss_mask` is None in that case, and
     # the KPI below shows _NO_VALUE -- CLAUDE.md §11 "—" decision: never a
-    # fabricated "0" (or "n/a") where no figure exists.
+    # fabricated "0" (or "—") where no figure exists.
     miss_mask = (
         pd.to_numeric(df[missing_col], errors="coerce").fillna(0).astype(int) == 1
         if missing_col in df.columns else None
     )
 
     kpis = [
-        kpi_card("Total T&E spend", _fmt_currency(amount_sum) if amount_sum is not None else "n/a"),
+        kpi_card("Total T&E spend", _fmt_currency(amount_sum) if amount_sum is not None else _NO_VALUE),
         kpi_card("Total breach count", f"{int(breach_mask.sum()):,}"),
-        kpi_card("Breach amount ($)", _fmt_currency(breach_amount) if breach_amount is not None else "n/a"),
+        kpi_card("Breach amount ($)", _fmt_currency(breach_amount) if breach_amount is not None else _NO_VALUE),
         kpi_card("Missing receipts", f"{int(miss_mask.sum()):,}" if miss_mask is not None else _NO_VALUE),
     ]
 
@@ -1288,8 +1288,8 @@ def _p2_update(bundle: dict, start_date, end_date, members, expense_types, meta:
     hv_label = f"High-value claims (>{_fmt_threshold_k(hv_limit)})" if hv_limit is not None else "High-value claims"
     kpis = [
         kpi_card("Total claims", f"{len(df):,}"),
-        kpi_card("Unique employees", f"{df['Employee'].nunique():,}" if "Employee" in df.columns else "n/a"),
-        kpi_card("Avg claim amount", _fmt_currency(avg_claim) if avg_claim is not None else "n/a"),
+        kpi_card("Unique employees", f"{df['Employee'].nunique():,}" if "Employee" in df.columns else _NO_VALUE),
+        kpi_card("Avg claim amount", _fmt_currency(avg_claim) if avg_claim is not None else _NO_VALUE),
         kpi_card(hv_label, f"{hv_count:,}" if hv_count is not None else _NO_VALUE),
     ]
 
