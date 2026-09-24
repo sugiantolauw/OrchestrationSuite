@@ -30,6 +30,7 @@ from decimal import Decimal
 import pandas as pd
 import xlsxwriter
 
+from orchestrator.adapters.issue_tracker_preview import PreviewOnlyIssueTracker, TICKET_PREVIEW_STATUS
 from orchestrator.contract import ContractViolation
 from orchestrator.errors import MissingSeverityProvenance, ReconciliationError
 from orchestrator.engine import execute_skill
@@ -819,9 +820,24 @@ def prioritise(ctx: NodeContext, state: RunState) -> RunState:
 
 def act(ctx: NodeContext, state: RunState) -> RunState:
     """One draft management action per finding (CLAUDE.md build brief P3 §2).
-    priority_rationale stays empty -- narration is a P6 deliverable."""
-    findings = ctx.persistence.list_findings(state.run_id)
+    priority_rationale stays empty -- narration is a P6 deliverable.
+
+    "Generate management actions after review" (CLAUDE.md §5 UI item 4,
+    NN13): unchecked at run setup means state.options["generate_management_
+    actions"] is False, and this node must actually honour that -- write no
+    actions and record why, rather than silently drafting them anyway (the
+    option existed on RunState since service.start_audit_run but nothing
+    upstream of this change ever read it)."""
     now = ctx.clock()
+
+    if not state.options.get("generate_management_actions", True):
+        ctx.persistence.write_management_actions(state.run_id, [], now=now)
+        message = "Management actions not generated (option off)"
+        return dataclasses.replace(
+            state, management_actions=[], events=state.events + [_event("act", message, now)]
+        )
+
+    findings = ctx.persistence.list_findings(state.run_id)
 
     actions = [
         {
@@ -880,6 +896,18 @@ def _write_str(ws, row: int, col: int, value, fmt=None) -> None:
     ws.write_string(row, col, _safe_str(value), fmt)
 
 
+def _build_ticket_previews(findings: list[dict]) -> list[dict]:
+    """One issue-tracker ticket preview per finding (CLAUDE.md §8: submission
+    to any tracker -- Jira, ServiceNow, whichever the audit team is on -- is
+    not built), via the tracker-neutral IssueTrackerAdapter Protocol so a
+    real tracker is a second implementation of that Protocol later, never a
+    change here. Returns plain dicts (never the TicketPreview dataclass
+    itself) because RunState.exports must stay JSON-serialisable (CLAUDE.md
+    §3 NN6)."""
+    tracker = PreviewOnlyIssueTracker()
+    return [dataclasses.asdict(t) for t in tracker.preview(findings)]
+
+
 def _require_severity_provenance(f: dict) -> tuple[bool, str]:
     analyst_set = f.get("analyst_set_severity")
     basis = f.get("severity_basis")
@@ -890,7 +918,10 @@ def _require_severity_provenance(f: dict) -> tuple[bool, str]:
     return analyst_set, basis
 
 
-def _write_xlsx_workpaper(state: RunState, findings: list[dict], metrics: dict[str, dict], flagged_rows: list[dict], now: str) -> bytes:
+def _write_xlsx_workpaper(
+    state: RunState, findings: list[dict], metrics: dict[str, dict], flagged_rows: list[dict], now: str,
+    ticket_previews: list[dict] | None = None,
+) -> bytes:
     buf = io.BytesIO()
     wb = xlsxwriter.Workbook(buf, {"in_memory": True})
     bold = wb.add_format({"bold": True})
@@ -1029,6 +1060,22 @@ def _write_xlsx_workpaper(state: RunState, findings: list[dict], metrics: dict[s
         ws5.write_number(r, 1, n)
     _write_str(ws5, len(counts) + 2, 0, footer)
 
+    # "Prepare Jira ticket previews" (CLAUDE.md §5 UI item 4 -- the checkbox
+    # label stays as the UI has always shown it; the tracker behind it is
+    # generic, see IssueTrackerAdapter): only present when the run asked for
+    # it -- an unchecked run's workbook has no such sheet at all, never an
+    # empty one.
+    if ticket_previews:
+        ws6 = wb.add_worksheet("Ticket Preview")
+        ws6.write_row(0, 0, ["issue_id", "title", "severity", "description", "status"], bold)
+        for r, t in enumerate(ticket_previews, start=1):
+            _write_str(ws6, r, 0, t["issue_id"])
+            _write_str(ws6, r, 1, t["title"])
+            _write_str(ws6, r, 2, t["severity"])
+            _write_str(ws6, r, 3, t.get("description"))
+            _write_str(ws6, r, 4, t["status"])
+        _write_str(ws6, len(ticket_previews) + 2, 0, footer)
+
     wb.close()
     return buf.getvalue()
 
@@ -1044,7 +1091,18 @@ def export(ctx: NodeContext, state: RunState) -> RunState:
     flagged_rows = ctx.persistence.list_flagged_rows(state.run_id)
     now = ctx.clock()
 
-    content = _write_xlsx_workpaper(state, findings, metrics, flagged_rows, now)
+    # "Prepare Jira ticket previews" (CLAUDE.md §5 UI item 4, NN13) -- the
+    # checkbox label is unchanged, but the option key stays
+    # jira_preview_requested for backward compatibility with runs already
+    # started under it; the tracker behind it is generic (IssueTrackerAdapter).
+    # Unchecked means none at all -- not an empty preview -- checked means
+    # one labelled preview per finding, stored alongside this run's other
+    # exports and included in the XLSX below. Never a submission: CLAUDE.md §8.
+    ticket_previews: list[dict] = []
+    if state.options.get("jira_preview_requested", False):
+        ticket_previews = _build_ticket_previews(findings)
+
+    content = _write_xlsx_workpaper(state, findings, metrics, flagged_rows, now, ticket_previews)
     sha256 = hashlib.sha256(content).hexdigest()
     rel_path = f"exports/{state.run_id}/workpaper.xlsx"
     written_path = ctx.export_storage.write(rel_path, content)
@@ -1052,7 +1110,28 @@ def export(ctx: NodeContext, state: RunState) -> RunState:
         state.run_id, "xlsx", path=written_path, sha256=sha256, created_by=state.run_owner, now=now,
     )
 
+    exports = {**(state.exports or {}), "xlsx": {"path": written_path, "sha256": sha256, "kind": "xlsx"}}
+
+    if ticket_previews:
+        preview_content = json.dumps(
+            {"run_id": state.run_id, "status": TICKET_PREVIEW_STATUS, "ticket_previews": ticket_previews},
+            indent=2,
+        ).encode("utf-8")
+        preview_sha256 = hashlib.sha256(preview_content).hexdigest()
+        preview_rel_path = f"exports/{state.run_id}/ticket_preview.json"
+        preview_written_path = ctx.export_storage.write(preview_rel_path, preview_content)
+        ctx.persistence.record_export(
+            state.run_id, "ticket_preview", path=preview_written_path, sha256=preview_sha256,
+            created_by=state.run_owner, now=now,
+        )
+        exports["ticket_preview"] = {
+            "path": preview_written_path, "sha256": preview_sha256, "kind": "ticket_preview",
+            "status": TICKET_PREVIEW_STATUS, "ticket_previews": ticket_previews,
+        }
+
     message = f"XLSX workpaper written to {written_path} ({len(content)} bytes)"
+    if ticket_previews:
+        message += f"; {len(ticket_previews)} ticket preview(s) prepared ({TICKET_PREVIEW_STATUS})"
     return dataclasses.replace(
         state,
         # Merge, never overwrite -- `execute` already wrote this run's frame
@@ -1060,7 +1139,7 @@ def export(ctx: NodeContext, state: RunState) -> RunState:
         # perf fix); replacing the whole dict here would silently drop that
         # entry (both are still recorded independently in the `exports`
         # table, but state.exports is what get_run_frames reads first).
-        exports={**(state.exports or {}), "xlsx": {"path": written_path, "sha256": sha256, "kind": "xlsx"}},
+        exports=exports,
         events=state.events + [_event("export", message, now)],
     )
 

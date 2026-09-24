@@ -70,7 +70,7 @@ class Harness:
     persistence: object
 
 
-def _make_harness(local_persistence, tmp_path, *, run_owner="alice", engagement_id="ENG-DEFAULT", corrupt=None):
+def _make_harness(local_persistence, tmp_path, *, run_owner="alice", engagement_id="ENG-DEFAULT", corrupt=None, options=None):
     persistence = local_persistence
     data_dir = tmp_path / "data"
     data_dir.mkdir()
@@ -88,7 +88,7 @@ def _make_harness(local_persistence, tmp_path, *, run_owner="alice", engagement_
     state = runs_module.create_run(
         persistence, run_kind="fieldwork", engagement_id=engagement_id, skill_id=skill.skill_id,
         skill_version=skill.version, mode="playbook", audit_period=AUDIT_PERIOD, objective="t",
-        run_owner=run_owner, options={"auto_confirm_plan": True}, fingerprint=fp, now=now,
+        run_owner=run_owner, options={"auto_confirm_plan": True, **(options or {})}, fingerprint=fp, now=now,
     )
     data_assets = [
         {"source": name, "table_fqn": name, "version": version}
@@ -335,6 +335,36 @@ def test_act_drafts_one_action_per_finding(local_persistence, tmp_path):
     assert {a["finding_id"] for a in actions} == {f["finding_id"] for f in state.findings}
 
 
+def test_act_produces_no_actions_when_option_off(local_persistence, tmp_path):
+    """CLAUDE.md §5 UI item 4 (NN13): "Generate management actions after
+    review" unchecked must actually mean no actions get drafted, and the
+    trace event must say why -- not just record the option and ignore it."""
+    h = _make_harness(local_persistence, tmp_path, options={"generate_management_actions": False})
+    state = _run_through_prioritise(h)
+    state = act(h.ctx, state)
+
+    actions = h.persistence.list_management_actions(filters={"run_id": state.run_id})
+    assert actions == []
+    assert state.management_actions == []
+    assert any(
+        e["node"] == "act" and e["message"] == "Management actions not generated (option off)"
+        for e in state.events
+    )
+
+
+def test_act_reexecution_still_drafts_no_actions_when_option_off(local_persistence, tmp_path):
+    """Idempotency (CLAUDE.md §2.3 rule 1): re-running act() with the option
+    off must not leave stale actions from some other state around, and must
+    not draft any either."""
+    h = _make_harness(local_persistence, tmp_path, options={"generate_management_actions": False})
+    state = _run_through_prioritise(h)
+    state = act(h.ctx, state)
+    state = act(h.ctx, state)
+
+    actions = h.persistence.list_management_actions(filters={"run_id": state.run_id})
+    assert actions == []
+
+
 # ── export ────────────────────────────────────────────────────────────────────
 
 
@@ -365,6 +395,55 @@ def test_export_writes_xlsx_and_records_it(local_persistence, tmp_path):
     import hashlib
 
     assert hashlib.sha256(path.read_bytes()).hexdigest() == xlsx_recorded[0]["sha256"]
+
+
+def test_export_produces_no_ticket_preview_when_option_off(local_persistence, tmp_path):
+    """CLAUDE.md §5 UI item 4: "Prepare Jira ticket previews" unchecked
+    (the default) means none at all -- not an empty preview -- and no
+    Ticket Preview sheet in the workbook."""
+    import openpyxl
+
+    h = _make_harness(local_persistence, tmp_path)
+    state = _run_through_prioritise(h)
+    state = act(h.ctx, state)
+    state = export(h.ctx, state)
+
+    assert "ticket_preview" not in state.exports
+    assert not any(e["kind"] == "ticket_preview" for e in h.persistence.list_exports(state.run_id))
+    wb = openpyxl.load_workbook(Path(state.exports["xlsx"]["path"]))
+    assert "Ticket Preview" not in wb.sheetnames
+
+
+def test_export_produces_labelled_ticket_previews_when_option_on(local_persistence, tmp_path):
+    """CLAUDE.md §5 UI item 4, §8: checked means one labelled 'Preview —
+    not submitted' ticket per finding, stored with the run's other exports
+    and included in the XLSX -- built through the tracker-neutral
+    IssueTrackerAdapter (a ServiceNow/Jira/whichever-tracker implementation
+    is a separate adapter later, never a change here)."""
+    import openpyxl
+
+    from orchestrator.adapters.issue_tracker_preview import TICKET_PREVIEW_STATUS
+
+    h = _make_harness(local_persistence, tmp_path, options={"jira_preview_requested": True})
+    state = _run_through_prioritise(h)
+    state = act(h.ctx, state)
+    state = export(h.ctx, state)
+
+    assert "ticket_preview" in state.exports
+    previews = state.exports["ticket_preview"]["ticket_previews"]
+    assert len(previews) == len(state.findings)
+    assert {p["issue_id"] for p in previews} == {f["finding_id"] for f in state.findings}
+    assert all(p["status"] == TICKET_PREVIEW_STATUS for p in previews)
+
+    recorded = [e for e in h.persistence.list_exports(state.run_id) if e["kind"] == "ticket_preview"]
+    assert len(recorded) == 1
+    assert recorded[0]["sha256"] == state.exports["ticket_preview"]["sha256"]
+
+    wb = openpyxl.load_workbook(Path(state.exports["xlsx"]["path"]))
+    assert "Ticket Preview" in wb.sheetnames
+    sheet = wb["Ticket Preview"]
+    assert sheet.cell(row=1, column=5).value == "status"
+    assert sheet.cell(row=2, column=5).value == TICKET_PREVIEW_STATUS
 
 
 def test_export_xlsx_never_writes_a_live_formula_cell(local_persistence, tmp_path):

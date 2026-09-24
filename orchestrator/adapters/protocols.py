@@ -345,6 +345,38 @@ class KnowledgeSourceAdapter(Protocol):
         ...
 
 
+@dataclass(frozen=True)
+class TicketPreview:
+    """A single tracker-neutral issue-tracker ticket preview (CLAUDE.md §8:
+    submission to any issue tracker -- Jira, ServiceNow, whichever the
+    audit team is actually on -- is not built). Every field here is named
+    for what it is, not for a particular vendor's API, so swapping the
+    tracker is an adapter change, never a field rename."""
+
+    issue_id: str
+    title: str
+    severity: str
+    description: str | None
+    status: str
+
+
+class IssueTrackerAdapter(Protocol):
+    """Only one implementation exists today
+    (orchestrator.adapters.issue_tracker_preview.PreviewOnlyIssueTracker):
+    preview() only, never submits anything (CLAUDE.md §8, NN13 -- no fake
+    successful integration). A real tracker (ServiceNow is the one named so
+    far) becomes a second implementation of this same Protocol when
+    submission is actually built; nothing calling preview() needs to
+    change."""
+
+    def preview(self, issues: list[dict]) -> list[TicketPreview]:
+        ...
+
+    def submit(self, issues: list[dict]) -> list[dict]:
+        """Declared, not implemented by any adapter yet."""
+        ...
+
+
 class Executor(Protocol):
     def start(self, run_id: str, phase: str) -> None:
         ...
