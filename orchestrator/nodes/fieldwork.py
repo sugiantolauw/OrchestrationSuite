@@ -39,10 +39,16 @@ from orchestrator.adapters.issue_tracker_preview import PreviewOnlyIssueTracker,
 from orchestrator.contract import ContractViolation, validate_contract
 from orchestrator.errors import MissingSeverityProvenance, ReconciliationError
 from orchestrator.engine import execute_skill
+from orchestrator.explorer.canonical import to_canonical
+from orchestrator.explorer.payload import build_planner_payload
 from orchestrator.explorer.profile import load_repo_pii_flags, profile_source
+from orchestrator.explorer.validate import EXPLORER_VALIDATOR_VERSION, validate_wire_proposal
+from orchestrator.explorer.wire_schema import PLAN_PROPOSAL_SCHEMA, WIRE_SCHEMA_SHA256
 from orchestrator import exposure
 from orchestrator.findings import build_findings
 from orchestrator.frames import build_row_snapshots, frame_parquet_bytes, sha256_bytes
+from orchestrator.llm.gateway import CallContext
+from orchestrator.llm.tasks import TASK_PROFILES
 from orchestrator.nodes.context import NodeContext
 from orchestrator.populations import PopulationContext, build_populations
 from orchestrator.pptx_export import generate_pptx, load_catalogue_rows
@@ -229,13 +235,16 @@ def _profile_explorer(ctx: NodeContext, state: RunState) -> RunState:
 def plan(ctx: NodeContext, state: RunState) -> RunState:
     """Playbook: the resolved plan IS the Skill's plan.yaml tests, unchanged
     (CLAUDE.md §4.4 -- building the test plan is generic pipeline code reading
-    plan.yaml, never a per-Skill method). Explorer's authoring loop (§4.5) is
-    not built in P3 (P8)."""
+    plan.yaml, never a per-Skill method). Explorer (state.mode == "explorer")
+    branches to _plan_explorer: one planner call, at most one repair round,
+    never a third (docs/specs/P6_P8_explorer_llm_design.md §4.5/§4.8) -- the
+    node PROPOSES; nothing runs until an auditor confirms (service.
+    confirm_plan), matching CLAUDE.md §3 non-negotiable 2's "the LLM authors
+    rules; it does not decide results at runtime"."""
+    if state.mode == "explorer":
+        return _plan_explorer(ctx, state)
     if state.mode != "playbook":
-        raise ValueError(
-            f"plan node: mode={state.mode!r} is not supported yet -- Explorer plan "
-            f"authoring (CLAUDE.md §4.5) is a P8 deliverable"
-        )
+        raise ValueError(f"plan node: mode={state.mode!r} is not a supported mode")
 
     tests: list[dict] = []
     for t in ctx.skill.plan.get("tests", []):
@@ -260,6 +269,197 @@ def plan(ctx: NodeContext, state: RunState) -> RunState:
     now = ctx.clock()
     message = f"playbook plan: {len(tests)} test(s) from {ctx.skill.skill_id} v{ctx.skill.version}"
     return dataclasses.replace(state, plan=plan_payload, events=state.events + [_event("plan", message, now)])
+
+
+def _canon_json(value) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def _explorer_data_gaps(sources: dict) -> list[str]:
+    """The three Python-derived data-gap sentences (docs/specs/
+    P6_P8_explorer_llm_design.md §4.3) plus a null-column one, computed
+    directly from the already-PII-masked Explorer profile -- never a number
+    other than counts that are themselves profile fields."""
+    gaps: list[str] = []
+    for source in sorted(sources):
+        info = sources[source]
+        row_count = info.get("row_count") or 0
+        columns = info.get("columns", [])
+        for col in columns:
+            if row_count and col.get("null_count") == row_count:
+                gaps.append(f"{source}.{col['name']} is entirely null")
+        if not any(c.get("type") in ("date", "datetime") for c in columns):
+            gaps.append(f"{source} has no date column")
+        if not any(c.get("semantic_type") == "amount" for c in columns):
+            gaps.append(f"{source} has no numeric amount column")
+        has_currency_evidence = any(
+            c.get("semantic_type") == "currency_code" and len(c.get("values") or []) == 1
+            for c in columns
+        )
+        if not has_currency_evidence:
+            gaps.append(f"{source} has no currency evidence")
+    return gaps
+
+
+def _explorer_pii_masked(sources: dict) -> list[str]:
+    return sorted(
+        f"{source}.{c['name']}"
+        for source, info in sources.items()
+        for c in info.get("columns", [])
+        if c.get("pii")
+    )
+
+
+def _explorer_llm_call_entry(result) -> dict:
+    return {
+        "call_id": result.call_id, "source": result.source, "outcome": result.status,
+        "served_model_version": result.served_model_version,
+    }
+
+
+def _explorer_plan_inputs(*, profile_payload: dict, prompts) -> dict:
+    return {
+        "profile_sha256": sha256_bytes(_canon_json(profile_payload).encode("utf-8")),
+        # WHICH reference Skills to pass is a later work package (docs/specs/
+        # P6_P8_explorer_llm_design.md §4.4's own docstring in
+        # orchestrator.explorer.payload); this step always passes none.
+        "reference_skills": {},
+        "wire_schema_sha256": WIRE_SCHEMA_SHA256,
+        "prompt_template_version": prompts.template_set_version(["explorer/planner", "explorer/repair"]),
+        "validator_version": EXPLORER_VALIDATOR_VERSION,
+    }
+
+
+def _plan_explorer(ctx: NodeContext, state: RunState) -> RunState:
+    """§4.8's pseudocode: r1 = planner call; if unavailable, plan.status =
+    'llm_unavailable' and return (no repair, no fallback -- CLAUDE.md §6
+    NN13, TASK_PROFILES["plan_explorer"].fallback is None and it is absent
+    from FALLBACK_ROLE). Otherwise validate; if the proposal or any test is
+    invalid, one repair round on GPT-OSS, re-validated from scratch; its
+    report REPLACES the first, which is kept only as validation_before_repair
+    for the auditor to see what was fixed. Never a third call."""
+    now = ctx.clock()
+    sources = (state.profile_result or {}).get("sources", {})
+    data_gaps_computed = _explorer_data_gaps(sources)
+    profile_payload = {"sources": sources, "data_gaps": data_gaps_computed}
+    options = (state.options or {}).get("explorer", {})
+    audit_timezone = options.get("audit_timezone") or getattr(ctx.settings, "audit_timezone", None)
+
+    payload = build_planner_payload(
+        objective=state.objective, audit_period=state.audit_period, audit_timezone=audit_timezone,
+        business_unit=state.business_unit, materiality=state.materiality,
+        profile_result=profile_payload, reference_skills=[],
+    )
+
+    if ctx.llm is None or ctx.prompts is None:
+        raise ValueError(
+            "plan node: Explorer mode requires ctx.llm and ctx.prompts "
+            "(service.build_node_context builds both for an explorer run)"
+        )
+    llm, prompts = ctx.llm, ctx.prompts
+
+    call_ctx = CallContext(
+        run_id=state.run_id, engagement_id=state.engagement_id, node_name="plan",
+        execution_key=state.current_node_attempt_id, actor=state.run_owner,
+        pii_columns_masked=_explorer_pii_masked(sources), pii_whitelist=[],
+    )
+    inputs = _explorer_plan_inputs(profile_payload=profile_payload, prompts=prompts)
+
+    r1 = llm.call(
+        task="plan_explorer", seq=1, messages=prompts.render("explorer/planner", **payload),
+        desired_params=TASK_PROFILES["plan_explorer"].desired_params, schema=PLAN_PROPOSAL_SCHEMA,
+        ctx=call_ctx,
+    )
+    if r1.status == "unavailable":
+        plan_payload = {
+            "kind": "explorer", "status": "llm_unavailable", "label": None, "proposal": None,
+            "proposal_sha256": None, "validation": None, "validation_before_repair": None,
+            "llm": {"planner": _explorer_llm_call_entry(r1), "repair": None},
+            "data_gaps_computed": data_gaps_computed, "inputs": inputs,
+        }
+        message = "Explorer plan: LLM unavailable — deterministic profile only, no proposal"
+        return dataclasses.replace(state, plan=plan_payload, events=state.events + [_event("plan", message, now)])
+
+    run_sources = sorted(sources)
+    pinned_versions = {b["source"]: b["version"] for b in state.data_assets}
+
+    def _validate(wire: dict) -> dict:
+        return validate_wire_proposal(
+            wire, profile=sources, run_sources=run_sources, data_source=ctx.data_source,
+            pinned_versions=pinned_versions,
+        )
+
+    proposal = r1.parsed if r1.status == "ok" else None
+    stage = "planner"
+    if proposal is not None:
+        report = _validate(proposal)
+    else:
+        report = {
+            "proposal_errors": [{"rule": "V-S1", "message": f"not valid PlanProposal JSON: {r1.error}"}],
+            "tests": {}, "findings": {}, "warnings": [],
+        }
+
+    validation_before_repair = None
+    repair_entry = None
+    needs_repair = bool(report["proposal_errors"]) or any(not t["valid"] for t in report["tests"].values())
+    if needs_repair:
+        validation_before_repair = report
+        previous_output = _canon_json(proposal) if proposal is not None else (r1.text or "")[:20000]
+        violations = (
+            list(report["proposal_errors"])
+            + [
+                {"rule": r["rule"], "message": f"tests.{key}: {r['message']}"}
+                for key, t in report["tests"].items() for r in t["reasons"]
+            ]
+            + [
+                {"rule": r["rule"], "message": f"findings.{key}: {r['message']}"}
+                for key, f in report["findings"].items() for r in f["reasons"]
+            ]
+        )
+        repair_payload = dict(payload)
+        repair_payload["previous_output"] = previous_output
+        repair_payload["violations_json"] = _canon_json(violations)
+        r2 = llm.call(
+            task="plan_repair", seq=2, messages=prompts.render("explorer/repair", **repair_payload),
+            desired_params=TASK_PROFILES["plan_repair"].desired_params, schema=PLAN_PROPOSAL_SCHEMA,
+            ctx=call_ctx,
+        )
+        repair_entry = _explorer_llm_call_entry(r2)
+        if r2.status == "ok":
+            proposal = r2.parsed
+            report = _validate(proposal)
+            stage = "repair"
+        # else: r2 failed (unavailable/invalid_output) -- keep the planner's
+        # own proposal/report from r1; never a third call (§4.8).
+
+    try:
+        canonical = to_canonical(proposal) if proposal is not None else None
+    except Exception:  # noqa: BLE001 -- a still schema-invalid proposal may not canonicalise cleanly
+        canonical = None
+
+    proposal_sha256 = sha256_bytes(_canon_json(proposal).encode("utf-8")) if proposal is not None else None
+    any_valid_test = any(t["valid"] for t in report["tests"].values())
+    plan_status = "proposed" if any_valid_test else "no_valid_tests"
+
+    plan_payload = {
+        "kind": "explorer", "status": plan_status, "label": None, "proposal": canonical,
+        "proposal_sha256": proposal_sha256, "validation": report,
+        "validation_before_repair": validation_before_repair,
+        "llm": {"planner": _explorer_llm_call_entry(r1), "repair": repair_entry},
+        "data_gaps_computed": data_gaps_computed, "inputs": inputs,
+    }
+    # Greyed tests (validation.tests[key].valid == false) still get their
+    # proposal-authored rationale here -- the auditor reads it to understand
+    # WHY a test was proposed even when they can never include it (§4.9).
+    plan_rationale = {t["key"]: t.get("rationale", "") for t in (canonical.get("tests", []) if canonical else [])}
+
+    n_valid = sum(1 for t in report["tests"].values() if t["valid"])
+    n_total = len(report["tests"])
+    message = f"Explorer plan proposed ({stage}): {n_valid}/{n_total} test(s) valid"
+    return dataclasses.replace(
+        state, plan=plan_payload, plan_rationale=plan_rationale,
+        events=state.events + [_event("plan", message, now)],
+    )
 
 
 # ── execute phase ────────────────────────────────────────────────────────────
