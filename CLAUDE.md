@@ -1234,6 +1234,22 @@ validate the schema client-side with one retry — never strip markdown fences t
   config change only, with parameters taken from the GPT-OSS matrix above. The UI and `llm_calls`
   show the actual served model. At the Optus port `MODEL_SONNET` goes back to a Claude endpoint, and
   its parameter matrix must be re-run there.
+- **Explorer decisions (user, 2026-09-24; see `docs/specs/P6_P8_explorer_llm_design.md` D2–D8):**
+  - (D2) Hidden ids on the three Explorer buttons, plus one hidden `dcc.Store` and one
+    `dcc.Interval` on the landing page, are allowed. They are invisible, and the parity test
+    allow-lists them.
+  - (D3) The proposal is reviewed as rows in the existing "Proposed workflow" panel, and "Start
+    audit analysis" confirms it in Explorer mode.
+  - (D4) One include/exclude checklist per proposed test, using an existing control, is the only
+    edit UI for now. Full column and threshold editing comes later.
+  - (D5) Explorer results appear on `/runs`, `/trace`, `/actions` and in the XLSX (`/workspace/tne`
+    stays SKILL-001's).
+  - (D6) The planner may see category value sets with counts, only for non-PII columns with at most
+    30 distinct values, with any value seen in fewer than 5 rows withheld. It never sees rows.
+  - (D7) Keep `get_open_ai_client()` as mandated.
+  - (D8) Enable AI Gateway inference tables on both endpoints with restricted access. This is an
+    accepted, recorded exception to NN11: the platform copy may contain GPT-OSS reasoning text.
+    `llm_calls` still never stores it, and the UI never shows it.
 
 **Enable AI Gateway with inference tables on both endpoints.** Inference tables are a
 platform-written copy of every request/response — the audit trail a reviewer trusts because the
