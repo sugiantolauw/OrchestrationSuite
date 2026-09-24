@@ -52,6 +52,14 @@ _THRESHOLDS = {
         "used_by": ["T5.1"], "effective_date": "2026-09-23",
         "provenance": {"type": "analyst-set", "pending_policy_confirmation": True},
     },
+    # matches skills/tne_exco/thresholds.yaml's real value -- workspace_tne.py
+    # reads this (never a hardcoded "5000" literal, CLAUDE.md §0.4/G8) for
+    # Audit Detail page 2's "High-value claims" KPI.
+    "high_value_limit": {
+        "value": 5000, "unit": "AUD", "description": "High-value claim threshold (T4.4).",
+        "used_by": ["T4.4"], "effective_date": "2026-09-23",
+        "provenance": {"type": "analyst-set", "pending_policy_confirmation": True},
+    },
 }
 
 _RISK_CONTROL = {

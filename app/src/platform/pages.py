@@ -214,7 +214,13 @@ def management_actions_page() -> html.Div:
     total_exposure = None
     if latest_by_group:
         total_exposure = sum(r.get("potential_exposure") or 0 for r in latest_by_group.values())
-    open_count = sum(1 for a in actions if a.get("status") in ("Open", "Under review"))
+    # "Under Review" (title-cased) is what orchestrator.service.
+    # list_management_actions() actually produces from the persisted
+    # "under_review" status (str.replace("_", " ").title()) -- the prototype's
+    # own literal, lowercase-r "Under review" never matches it, so this count
+    # was always 0 on real data (CLAUDE.md NN14; independent review 2026-09-24
+    # item 3).
+    open_count = sum(1 for a in actions if a.get("status") in ("Open", "Under Review"))
     high_count = sum(1 for a in actions if a.get("risk") == "High")
 
     return html.Div([

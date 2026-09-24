@@ -438,6 +438,29 @@ def _fmt_currency(value) -> str:
     return f"${value:,.0f}" if isinstance(value, (int, float)) else "n/a"
 
 
+def _high_value_limit(skill: dict) -> float | None:
+    """CLAUDE.md §0.4/G8: no threshold literal in UI code -- reads
+    'high_value_limit' from the run's own Skill (bundle["skill"], already
+    loaded via adapters.get_skill() in _load_bundle, which carries the full
+    thresholds.yaml dict), never a hardcoded number. None when the Skill
+    has no such threshold on record -- callers must degrade to "n/a"/"—",
+    never silently fall back to a guessed value (NN14)."""
+    entry = (skill.get("thresholds") or {}).get("high_value_limit")
+    if not entry or entry.get("value") is None:
+        return None
+    return entry["value"]
+
+
+def _fmt_threshold_k(value: float) -> str:
+    """'$5K'-style short form for a KPI label, e.g. 'High-value claims
+    (>$5K)' -- matches the reference app's own hardcoded label text exactly
+    when the Skill's threshold is a round thousand (it is, today: $5,000),
+    without hardcoding the number itself."""
+    if value % 1000 == 0:
+        return f"${int(value / 1000)}K"
+    return f"${value / 1000:.1f}K"
+
+
 def _fmt_count(value) -> str:
     """A count-unit metric (CLAUDE.md build brief P3 §2's total_records etc.)
     may come back as a float from a SQL aggregation even though it is
@@ -608,7 +631,14 @@ def _finding_exception_count(finding: dict, test_results: list[dict]) -> int | N
 
 def _executive_tab(run: dict, findings: list[dict], payload: dict | None, actions: list[dict], frames: dict | None = None) -> html.Div:
     n_high = sum(1 for f in findings if f.get("severity") == "High")
-    open_actions = sum(1 for a in actions if str(a.get("status", "")).lower() not in ("closed", "remediated"))
+    # "Not closed" -- the same definition orchestrator.service.list_runs()
+    # uses for its own per-run `open_actions` field (`a.get("status") !=
+    # "closed"`), so /workspace/tne and /runs agree on what "open" means.
+    # This used to also exclude "remediated" -- a third, undocumented
+    # definition with no stated reason that /runs never shared (independent
+    # review 2026-09-24 item 3/4: three conflicting "open actions"
+    # definitions across the app).
+    open_actions = sum(1 for a in actions if str(a.get("status", "")).lower() != "closed")
     test_results = run.get("test_results", [])
     n_exception_tests = sum(1 for t in test_results if t.get("status") == "exception")
 
@@ -1123,13 +1153,23 @@ def _p1_update(bundle: dict, start_date, end_date, members, meta: dict[str, dict
     amount_sum = df[_AMOUNT_COL].sum() if _AMOUNT_COL in df.columns else None
     breach_amount = df.loc[breach_mask, _AMOUNT_COL].sum() if _AMOUNT_COL in df.columns else None
     missing_col = "RF_CS_MissingReceipt"
-    miss_mask = pd.to_numeric(df.get(missing_col, pd.Series(0, index=df.index)), errors="coerce").fillna(0).astype(int) == 1
+    # CLAUDE.md NN14: a missing RF_ flag column is a contract/data gap, never
+    # "zero exceptions" -- `df.get(missing_col, pd.Series(0, ...))` used to
+    # default every row's flag to 0 when the column itself was absent,
+    # silently rendering "0 missing receipts" instead of surfacing that the
+    # figure could not be computed. `miss_mask` is None in that case, and
+    # the KPI below shows "n/a", matching this file's own convention for an
+    # uncomputable count (e.g. "Unique employees" above).
+    miss_mask = (
+        pd.to_numeric(df[missing_col], errors="coerce").fillna(0).astype(int) == 1
+        if missing_col in df.columns else None
+    )
 
     kpis = [
         kpi_card("Total T&E spend", _fmt_currency(amount_sum) if amount_sum is not None else "n/a"),
         kpi_card("Total breach count", f"{int(breach_mask.sum()):,}"),
         kpi_card("Breach amount ($)", _fmt_currency(breach_amount) if breach_amount is not None else "n/a"),
-        kpi_card("Missing receipts", f"{int(miss_mask.sum()):,}"),
+        kpi_card("Missing receipts", f"{int(miss_mask.sum()):,}" if miss_mask is not None else "n/a"),
     ]
 
     f1 = charts.monthly_volume_chart(df, title="Monthly trend")
@@ -1236,12 +1276,14 @@ def _p2_update(bundle: dict, start_date, end_date, members, expense_types, meta:
     flag_labels = _flag_labels_on(df, meta)
 
     avg_claim = df[_AMOUNT_COL].mean() if _AMOUNT_COL in df.columns and len(df) else None
-    hv_count = int((df[_AMOUNT_COL] > 5000).sum()) if _AMOUNT_COL in df.columns else 0
+    hv_limit = _high_value_limit(bundle["skill"])
+    hv_count = int((df[_AMOUNT_COL] > hv_limit).sum()) if _AMOUNT_COL in df.columns and hv_limit is not None else None
+    hv_label = f"High-value claims (>{_fmt_threshold_k(hv_limit)})" if hv_limit is not None else "High-value claims"
     kpis = [
         kpi_card("Total claims", f"{len(df):,}"),
         kpi_card("Unique employees", f"{df['Employee'].nunique():,}" if "Employee" in df.columns else "n/a"),
         kpi_card("Avg claim amount", _fmt_currency(avg_claim) if avg_claim is not None else "n/a"),
-        kpi_card("High-value claims (>$5K)", f"{hv_count:,}"),
+        kpi_card(hv_label, f"{hv_count:,}" if hv_count is not None else "n/a"),
     ]
 
     # Colour by P_EXP role (prepared/approved/both) when this run's snapshot
@@ -1295,17 +1337,28 @@ def _p2_update(bundle: dict, start_date, end_date, members, expense_types, meta:
     miss = pd.DataFrame()
     if "Employee" in df.columns:
         miss_flag = "RF_CS_MissingReceipt"
-        miss_numeric = pd.to_numeric(df[miss_flag], errors="coerce").fillna(0) if miss_flag in df.columns else 0
-        agg = {"Total_Claims": ("Employee", "count")}
-        d = df.assign(_miss=miss_numeric)
-        agg2 = d.groupby("Employee", as_index=False).agg(
+        agg2 = df.groupby("Employee", as_index=False).agg(
             Total_Claims=("Employee", "count"),
-            Claims_Missing_Receipt=("_miss", "sum"),
             **({"Total_At_Risk": (_AMOUNT_COL, "sum")} if _AMOUNT_COL in df.columns else {}),
         )
-        agg2["Missing %"] = agg2.apply(
-            lambda r: round(r["Claims_Missing_Receipt"] / r["Total_Claims"] * 100, 1) if r["Total_Claims"] else 0, axis=1)
-        miss = agg2.sort_values("Missing %", ascending=False)
+        if miss_flag in df.columns:
+            miss_numeric = pd.to_numeric(df[miss_flag], errors="coerce").fillna(0)
+            d = df.assign(_miss=miss_numeric)
+            per_employee_missing = d.groupby("Employee")["_miss"].sum()
+            agg2["Claims_Missing_Receipt"] = agg2["Employee"].map(per_employee_missing)
+            agg2["Missing %"] = agg2.apply(
+                lambda r: round(r["Claims_Missing_Receipt"] / r["Total_Claims"] * 100, 1) if r["Total_Claims"] else 0,
+                axis=1,
+            )
+            miss = agg2.sort_values("Missing %", ascending=False)
+        else:
+            # CLAUDE.md NN14: RF_CS_MissingReceipt is absent from this run's
+            # data entirely -- a contract/data gap, never "zero claims
+            # missing a receipt" (the previous `else 0` fabricated exactly
+            # that). "n/a" per row, never a silent 0.
+            agg2["Claims_Missing_Receipt"] = "n/a"
+            agg2["Missing %"] = "n/a"
+            miss = agg2.sort_values("Total_Claims", ascending=False)
     miss_style = [{"if": {"filter_query": "{Missing %} > 50"}, "backgroundColor": "#fdeaea", "color": "#9b1c1c"}]
 
     return (
