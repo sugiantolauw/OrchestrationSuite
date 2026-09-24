@@ -1,0 +1,405 @@
+# G11 golden set (docs/specs/P6_narration_design.md §3.6, §11, §12 WP N2):
+# 30 cases -- 10 valid, 20 invalid -- each run through
+# orchestrator.narration.validate.validate_prose (origin="model", the
+# runtime narration path) by tests/test_g11_faithfulness.py. Every invalid
+# case names its expected rule id(s) (§3.3-§3.4); every valid case is
+# expected to pass with no violations, and case v01 also asserts the exact
+# rendered text (§3.6: "exact render asserted").
+#
+# Metric/threshold names are drawn from SKILL-001 (skills/tne_exco) for
+# realism, but a case's `table` values are hand-picked for this fixture --
+# they are not live run output (that is what the SEPARATE template-parity
+# test in test_g11_faithfulness.py checks, against SKILL-001's real
+# findings.yaml text and this run's real computed metrics). Each case's
+# `table` supplies exactly the placeholders that item would see (§3.2): a
+# name absent from `table` behaves as "not in this item's table" (N-G3),
+# matching how a real per-item PLACEHOLDERS table is scoped.
+#
+# Two golden-set slots the design spec (§3.6) assigns to candidate rule C-2
+# ("a candidate duplicating a rule finding" / "a candidate on a zero-
+# exception test") are substituted here with two more validate_prose-level
+# rules (N-L1, N-S3): C-2 is enforced by orchestrator/narration/candidates.py
+# (P6_narration_design.md §12 WP N8), which does not exist yet and is out of
+# this work package's scope (this coordinator's task bounds WP N2 to
+# validate.py and tests/, and this harness runs cases through
+# validate_prose). The 10/20 split and the "every invalid case names its
+# rule id" shape are unchanged; see the WP N8 candidates test (T-C1/T-C2)
+# for C-2 coverage once that module is built.
+
+cases:
+  # ---------------------------------------------------------------------
+  # Valid (10)
+  # ---------------------------------------------------------------------
+
+  - id: v01_t4_1_full_coverage_exact_render
+    description: >
+      T4.1 observation using all four of its cited metrics plus the
+      t41_auto_reject_amount threshold; exact render asserted.
+    field: observation
+    text: >-
+      {count:missing_receipt_count} claims ({pct:missing_receipt_pct} of
+      total) are missing receipt documentation, representing
+      {money:missing_receipt_amount} in unsupported spend, of which
+      {count:missing_receipt_no_affidavit_count} have no affidavit on file.
+      Claims of {money:t41_auto_reject_amount} or more without support may
+      warrant automated rejection.
+    table:
+      missing_receipt_count: {unit: count, value: 27}
+      missing_receipt_pct: {unit: "%", value: 0.7}
+      missing_receipt_amount: {unit: AUD, value: 1009.26}
+      missing_receipt_no_affidavit_count: {unit: count, value: 0}
+      t41_auto_reject_amount: {unit: AUD, value: 50}
+    require_coverage: true
+    required_placeholders:
+      - missing_receipt_count
+      - missing_receipt_pct
+      - missing_receipt_amount
+      - missing_receipt_no_affidavit_count
+      - t41_auto_reject_amount
+    expected:
+      valid: true
+      rule_ids: []
+      rendered: >-
+        27 claims (0.7% of total) are missing receipt documentation,
+        representing $1,009.26 in unsupported spend, of which 0 have no
+        affidavit on file. Claims of $50.00 or more without support may
+        warrant automated rejection.
+
+  - id: v02_t6_1d_money_count_and_identifier
+    description: >
+      T6.1d observation with money and count placeholders, and the catalogue
+      identifier T6.1d written as an allowed identifier.
+    field: observation
+    text: >-
+      T6.1d found {count:daily_over_count_dom} domestic and
+      {count:daily_over_count_int} international employee-days over the
+      per-diem threshold, totalling {money:daily_over_amount_dom} and
+      {money:daily_over_amount_int} respectively in excess spend.
+    table:
+      daily_over_count_dom: {unit: count, value: 2}
+      daily_over_amount_dom: {unit: AUD, value: 446.4}
+      daily_over_count_int: {unit: count, value: 2}
+      daily_over_amount_int: {unit: AUD, value: 998.53}
+    allowed_identifiers: ["T6.1d"]
+    expected:
+      valid: true
+      rule_ids: []
+
+  - id: v03_t3_1b_ratio
+    description: T3.1b observation with a count-class booking figure and a ratio-class match rate.
+    field: observation
+    text: >-
+      {count:no_preapproval_bookings} bookings across
+      {count:no_preapproval_employees} employees have no matching travel
+      request on file, a name-match ratio of {ratio:t31b_name_match_ratio}.
+    table:
+      no_preapproval_bookings: {unit: count, value: 8}
+      no_preapproval_employees: {unit: count, value: 2}
+      t31b_name_match_ratio: {unit: ratio, value: 0.333}
+    expected:
+      valid: true
+      rule_ids: []
+
+  - id: v04_recommendation_no_placeholders
+    description: A recommendation that needs no placeholder at all.
+    field: recommendation
+    text: Enforce mandatory receipt attachment before expense report submission.
+    table: {}
+    expected:
+      valid: true
+      rule_ids: []
+
+  - id: v05_management_question_with_threshold
+    description: A management question citing a threshold placeholder.
+    field: question
+    text: Should claims of {money:t41_auto_reject_amount} or more be automatically rejected without a receipt?
+    table:
+      t41_auto_reject_amount: {unit: AUD, value: 50}
+    expected:
+      valid: true
+      rule_ids: []
+
+  - id: v06_theme_summary_citing_member_metrics
+    description: A theme summary citing the cited metrics of its two member findings.
+    field: theme_summary
+    text: >-
+      Both the missing-receipt and high-value-claim tests point to gaps in
+      documentation review, citing {count:missing_receipt_count} claims
+      without receipts and {count:hv_count} high-value claims requiring
+      enhanced scrutiny.
+    table:
+      missing_receipt_count: {unit: count, value: 27}
+      hv_count: {unit: count, value: 38}
+    expected:
+      valid: true
+      rule_ids: []
+
+  - id: v07_valid_candidate_uncited_anchor
+    description: >
+      A candidate observation whose anchor metric (t41_unmatched_register_rows,
+      from T4.1's own anti-join) is not cited by any rule finding, on a test
+      with exceptions -- the C-2 anchor shape, exercised here only at the
+      prose-validation level (full candidate anchoring is WP N8's own gate).
+    field: observation
+    text: >-
+      {count:t41_unmatched_register_rows} preferred-supplier register rows
+      could not be matched to a booking, a pattern the existing
+      missing-receipt finding does not cover.
+    table:
+      t41_unmatched_register_rows: {unit: count, value: 844}
+    require_coverage: true
+    required_placeholders: [t41_unmatched_register_rows]
+    expected:
+      valid: true
+      rule_ids: []
+
+  - id: v08_exec_summary_with_headline_and_period
+    description: An exec summary paragraph using run_finding_count, the exposure headline and both audit-period dates.
+    field: exec_paragraph
+    text: >-
+      This audit identified {count:run_finding_count} findings across the
+      audit period {date:run_audit_period_start} to
+      {date:run_audit_period_end}, with total flagged exposure of
+      {money:run_exposure_headline}.
+    table:
+      run_finding_count: {unit: count, value: 13}
+      run_exposure_headline: {unit: AUD, value: 250000.0}
+      run_audit_period_start: {unit: date, value: "2025-01-01"}
+      run_audit_period_end: {unit: date, value: "2026-04-30"}
+    expected:
+      valid: true
+      rule_ids: []
+
+  - id: v09_all_with_100_pct_same_sentence
+    description: N-Q2's exception -- "all" is allowed when the same sentence carries a 100% placeholder.
+    field: observation
+    text: All claims were reviewed for receipt documentation, at {pct:receipt_review_pct} coverage.
+    table:
+      receipt_review_pct: {unit: "%", value: 100.0}
+    expected:
+      valid: true
+      rule_ids: []
+
+  - id: v10_priority_rationale_with_exposure
+    description: A priority rationale citing exposure_amount, with no ranking word.
+    field: rationale
+    text: This finding carries elevated risk given {money:exposure_amount} in exposure and is prioritised accordingly.
+    table:
+      exposure_amount: {unit: AUD, value: 12000.0}
+    expected:
+      valid: true
+      rule_ids: []
+
+  # ---------------------------------------------------------------------
+  # Invalid (20)
+  # ---------------------------------------------------------------------
+
+  - id: i01_literal_digit
+    description: A literal digit in model prose.
+    field: observation
+    text: 12 claims were missing receipts.
+    table: {}
+    expected:
+      valid: false
+      rule_ids: [N-D1]
+
+  - id: i02_number_word
+    description: A number word in model prose.
+    field: observation
+    text: Twelve claims were missing receipts.
+    table: {}
+    expected:
+      valid: false
+      rule_ids: [N-D2]
+
+  - id: i03_currency_symbol
+    description: A bare currency symbol in model prose.
+    field: observation
+    text: A $ amount was left unsupported by receipts.
+    table: {}
+    expected:
+      valid: false
+      rule_ids: [N-D1]
+
+  - id: i04_per_cent_word
+    description: The words "per cent" in model prose.
+    field: observation
+    text: A per cent of claims were missing receipts.
+    table: {}
+    expected:
+      valid: false
+      rule_ids: [N-D1]
+
+  - id: i05_year
+    description: A model-written year, which could silently name the wrong audit period.
+    field: observation
+    text: The FY2025 review found issues with receipts.
+    table: {}
+    expected:
+      valid: false
+      rule_ids: [N-D1]
+
+  - id: i06_test_id_not_in_this_runs_allowlist
+    description: A test id that exists in the catalogue but is not one of this run's allowed identifiers.
+    field: observation
+    text: See T9.9 for detail on missing receipts.
+    table: {}
+    allowed_identifiers: ["T4.1"]
+    expected:
+      valid: false
+      rule_ids: [N-D1]
+
+  - id: i07_another_findings_metric
+    description: >
+      The v1 G11 failure mode -- a placeholder name this item's table does
+      not carry (it belongs to a different finding).
+    field: observation
+    text: "{count:months_covered} claims were reviewed this cycle."
+    table:
+      missing_receipt_count: {unit: count, value: 27}
+    expected:
+      valid: false
+      rule_ids: [N-G3]
+
+  - id: i08_declared_class_mismatches_metric_unit
+    description: A count-class placeholder naming a metric whose real unit is a percentage.
+    field: observation
+    text: "{count:missing_receipt_pct} of claims were missing receipts."
+    table:
+      missing_receipt_pct: {unit: "%", value: 8.5}
+    expected:
+      valid: false
+      rule_ids: [N-U1]
+
+  - id: i09_money_followed_by_count_noun
+    description: A money placeholder immediately followed by the count noun "claims".
+    field: observation
+    text: "{money:missing_receipt_amount} claims were unsupported."
+    table:
+      missing_receipt_amount: {unit: AUD, value: 6000.0}
+    expected:
+      valid: false
+      rule_ids: [N-U2]
+
+  - id: i10_missing_cited_metric_from_observation
+    description: A required placeholder (missing_receipt_amount) never used in the observation text.
+    field: observation
+    text: "{count:missing_receipt_count} claims were unsupported."
+    table:
+      missing_receipt_count: {unit: count, value: 27}
+      missing_receipt_amount: {unit: AUD, value: 1009.26}
+    require_coverage: true
+    required_placeholders: [missing_receipt_count, missing_receipt_amount]
+    expected:
+      valid: false
+      rule_ids: [N-C1]
+
+  - id: i11_null_valued_placeholder
+    description: A placeholder used anyway even though its metric's value is null.
+    field: observation
+    text: "{count:missing_receipt_count} claims were reviewed."
+    table:
+      missing_receipt_count: {unit: count, value: null}
+    expected:
+      valid: false
+      rule_ids: [N-V1]
+
+  - id: i12_format_spec_grammar_violation
+    description: A `str.format`-style format spec, which the grammar does not allow.
+    field: question
+    text: "{count:missing_receipt_count:,.0f} claims were reviewed?"
+    table:
+      missing_receipt_count: {unit: count, value: 27}
+    expected:
+      valid: false
+      rule_ids: [N-G1]
+
+  - id: i13_double_brace_and_attribute_access
+    description: Double-brace escaping and dotted attribute access, neither of which the grammar allows.
+    field: question
+    text: "{{missing_receipt_count}} and {count:a.b} claims were reviewed?"
+    table:
+      missing_receipt_count: {unit: count, value: 27}
+    expected:
+      valid: false
+      rule_ids: [N-G1]
+
+  - id: i14_vague_magnitude_word
+    description: A vague-magnitude word in a theme summary.
+    field: theme_summary
+    text: Most claims were missing receipts across the reviewed population.
+    table: {}
+    expected:
+      valid: false
+      rule_ids: [N-Q1]
+
+  - id: i15_universal_quantifier_without_boundary_pct
+    description: "\"All\" with no 0% or 100% placeholder in the same sentence."
+    field: theme_summary
+    text: All claims were reviewed, at {pct:receipt_review_pct} exception rate.
+    table:
+      receipt_review_pct: {unit: "%", value: 33.3}
+    expected:
+      valid: false
+      rule_ids: [N-Q2]
+
+  - id: i16_intent_causation_language
+    description: Language implying deliberate action, never a fact this validator lets through.
+    field: observation
+    text: These claims appear to have been deliberately split to remain under the threshold.
+    table: {}
+    expected:
+      valid: false
+      rule_ids: [N-S1]
+
+  - id: i17_policy_assertion
+    description: An unattributed policy assertion (thresholds are analyst-set, CLAUDE.md §0.4).
+    field: observation
+    text: Policy requires a receipt for each claim submitted.
+    table: {}
+    expected:
+      valid: false
+      rule_ids: [N-S2]
+
+  - id: i18_ordinal_in_rationale
+    description: A ranking word in a priority rationale -- Python owns the ordering.
+    field: rationale
+    text: This finding is the highest priority item this cycle.
+    table: {}
+    expected:
+      valid: false
+      rule_ids: [N-D3]
+
+  - id: i19_over_length_cap
+    description: >
+      A recommendation over its 600-character cap. Substituted for the design
+      spec's candidate-duplication case (rule C-2), which belongs to WP N8's
+      not-yet-built candidates.py -- see the file header note.
+    field: recommendation
+    text: >-
+      Review this population for further audit evidence. Review this
+      population for further audit evidence. Review this population for
+      further audit evidence. Review this population for further audit
+      evidence. Review this population for further audit evidence. Review
+      this population for further audit evidence. Review this population
+      for further audit evidence. Review this population for further audit
+      evidence. Review this population for further audit evidence. Review
+      this population for further audit evidence. Review this population
+      for further audit evidence. Review this population for further audit
+      evidence. Review this population for further audit evidence.
+    table: {}
+    expected:
+      valid: false
+      rule_ids: [N-L1]
+
+  - id: i20_code_like_text
+    description: >
+      Code-like text, not audit prose. Substituted for the design spec's
+      zero-exception-candidate case (rule C-2, checked by G10 in WP N8) --
+      see the file header note.
+    field: observation
+    text: Run SELECT * FROM claims WHERE receipt IS NULL to find these rows.
+    table: {}
+    expected:
+      valid: false
+      rule_ids: [N-S3]

@@ -8,11 +8,15 @@ stored"). This module never calls a model and never decides a finding,
 number or severity -- it only accepts or rejects text Python was given.
 
 Human-edited narrative gets one deliberate exception (CLAUDE.md §14 Answers
-Q3, P6_narration_design.md): a typed literal number is allowed, but must
-equal the exact rendering of a metric this item cites (`validate_human_edit`
-/ `origin="human_edit"`); every other rule -- placeholder validity, vague
-language, causation/policy language, code-like text, length caps -- still
-applies unchanged.
+Q3, P6_narration_design.md, amended: "every number an auditor types must
+equal a figure the finding cites, as shown"): a typed literal number is
+allowed, but must equal -- as the same displayed value, formatting variants
+aside -- the rendering of a metric this item cites (`validate_human_edit` /
+`origin="human_edit"`). A leading `$` and thousands separators are optional
+on a non-percent number; a percent number must still carry `%` and must be
+numerically equal to the cited metric's value at its displayed precision.
+Every other rule -- placeholder validity, vague language, causation/policy
+language, code-like text, length caps -- still applies unchanged.
 """
 
 from __future__ import annotations
@@ -249,20 +253,78 @@ def _check_model_digits(text: str, allowed_identifiers: frozenset[str]) -> list[
     return violations
 
 
+def _human_edit_lookup(table: Mapping[str, PlaceholderEntry]) -> tuple[set[str], set[float]]:
+    """Builds the two structures `_human_edit_number_matches` compares a
+    typed token against (the user's "every number an auditor types must
+    equal a figure the finding cites, as shown" decision, CLAUDE.md §14
+    Answers Q3, treating formatting variants of the SAME displayed value as
+    equal rather than requiring a byte-identical string):
+
+    - `plain_values`: every non-percent metric's rendering
+      (`format_metric_value`) with its optional leading `$` and thousands
+      commas stripped, so "1234" and "1,234" are both accepted for a
+      rendered "1,234", and "1234.56"/"1,234.56"/"$1,234.56" are all
+      accepted for a rendered "$1,234.56". These are compared as strings:
+      money always renders to a fixed two decimal places, so there is no
+      precision ambiguity to resolve numerically.
+    - `pct_values`: the numeric value of every percent metric. A percent
+      comparison is numeric, not string, because `format_metric_value`'s
+      percent rendering is Python's own `str(value)` and so varies with
+      whether the underlying value is an int or a float ("15%" vs "15.0%")
+      without the underlying quantity differing at all. Comparing the typed
+      number and the metric's value as numbers -- both at full, unrounded
+      precision -- accepts exactly the formatting variants of one value and
+      nothing else: "15%" matches a rendered "15.0%" (equal), but does not
+      match a rendered "15.3%" (a different value, not a formatting
+      variant) and typing "15.30%" instead of "15.3%" still requires the
+      values themselves to be equal, not merely a truncated prefix.
+    """
+    plain_values: set[str] = set()
+    pct_values: set[float] = set()
+    for entry in table.values():
+        if entry.value is None:
+            continue
+        if entry.unit == "%":
+            try:
+                pct_values.add(float(entry.value))
+            except (TypeError, ValueError):
+                continue
+        else:
+            rendered = format_metric_value(entry.value, entry.unit)
+            plain_values.add(rendered.lstrip("$").replace(",", ""))
+    return plain_values, pct_values
+
+
+def _human_edit_number_matches(token: str, plain_values: set[str], pct_values: set[float]) -> bool:
+    """§14 Answers Q3 (amended): "Percent must still carry '%'" -- a typed
+    token is only ever compared against `pct_values` when it itself ends in
+    `%`, and never falls back to `plain_values` in that case, so a typed
+    number that drops the `%` a percent metric requires is refused even
+    when the digits are right."""
+    if token.endswith("%"):
+        numeric_part = token[:-1].lstrip("$").replace(",", "")
+        try:
+            value = float(numeric_part)
+        except ValueError:
+            return False
+        return value in pct_values
+    normalized = token.lstrip("$").replace(",", "")
+    return normalized in plain_values
+
+
 def _check_human_edit_numbers(text: str, table: Mapping[str, PlaceholderEntry]) -> list[Violation]:
     """§14 Answers Q3: a human edit may type a literal number, but it must
-    equal -- exactly, character for character -- the rendering
+    equal -- as the SAME displayed value, formatting variants aside
+    (`_human_edit_lookup`/`_human_edit_number_matches`) -- the rendering
     `orchestrator.findings.format_metric_value` produces for some metric
     this item cites. A mismatch names the exact substring the auditor typed
     (a structured `Violation`, rule id N-H1), so the edit UI can point at
     what needs fixing rather than just refusing silently."""
-    rendered_values = {
-        format_metric_value(entry.value, entry.unit) for entry in table.values() if entry.value is not None
-    }
+    plain_values, pct_values = _human_edit_lookup(table)
     violations: list[Violation] = []
     for m in _NUMBER_TOKEN_RE.finditer(text):
         token = m.group(0)
-        if token in rendered_values:
+        if _human_edit_number_matches(token, plain_values, pct_values):
             continue
         violations.append(
             Violation(
