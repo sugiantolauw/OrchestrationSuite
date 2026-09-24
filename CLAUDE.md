@@ -1834,6 +1834,17 @@ Findings that change the design:
   "warehouse is not wired as a resource" is about the prototype; our deploy script attaches it. The
   Volume `/dbfs` FUSE path does not apply: we use the Files API.
 
+User decisions on those findings (2026-09-24):
+- **Read source files directly from the Volume.** An explicit per-environment mapping binds each file
+  to a Skill contract source: an exact path, no guessing. The file's SHA-256 is pinned in the run
+  fingerprint, and CSV/XLSX files are contract-validated. Delta loading remains optional.
+- **Per-diem rates must be supplied in the Volume.** They are not bundled with the Skill. A missing
+  file fails the run loudly, and there is no fallback.
+- **T4.3 stays `not_testable` ("awaiting governance approval to send expense descriptions to a
+  model")** until approved. The Python classify capability may be built, switched off by
+  configuration.
+- **Request a dedicated schema for the ledger at Optus.** The schema is configuration either way.
+
 ### Further decisions from the user (2026-09-23)
 
 - **UI is the prototype's, exactly.** Every page matches `reference_app/src/platform/pages.py` and
