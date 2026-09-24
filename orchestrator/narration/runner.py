@@ -80,7 +80,6 @@ __all__ = [
     "RunnerContext",
     "NarrationOutcome",
     "narrative_id",
-    "effective_remediation_text",
     "narrate_profile",
     "narrate_finding",
     "narrate_synthesis",
@@ -134,6 +133,16 @@ class RunnerContext:
     dead_role_pairs: set[tuple[str, str | None]] = dataclass_field(default_factory=set)
     origin_counts: dict[str, int] = dataclass_field(default_factory=dict)
     _seq_counters: dict[str, int] = dataclass_field(default_factory=dict)
+    # P6 WP N10 (§5.5 point 2): `narrative_id`s the caller (the `narrate`
+    # node) found already at origin='human_edit' when this RunnerContext was
+    # built, i.e. BEFORE this execution wrote anything -- `_persist` checks
+    # this, never a live re-query, so a human_edit `_persist` skips for a
+    # field this SAME `narrate()` execution has not yet reached only because
+    # it was already human_edit at the start, never because a sibling field
+    # earlier in this same call happened to write one (which cannot happen:
+    # `_persist` never writes origin='human_edit', only `edit_narrative`
+    # does, from a different module entirely).
+    existing_human_edited: frozenset[str] = dataclass_field(default_factory=frozenset)
 
     def next_seq(self, task: str) -> tuple[int, int]:
         k = self._seq_counters.get(task, 0)
@@ -252,6 +261,17 @@ def _persist(
 ) -> str:
     now = rc.clock()
     nid = narrative_id(rc.run_id, target_kind, target_id, field)
+    if nid in rc.existing_human_edited:
+        # §5.5 point 2: "re-narrates every narrative whose current origin is
+        # not human_edit" -- a regenerate's fresh model/repair/fallback
+        # output for THIS field is discarded rather than persisted, so the
+        # auditor's edit (and its version/history) is untouched. The call
+        # that produced `origin`/`text`/`call_ids` above still happened
+        # (this WP's call-budget invariant is unaffected, only the WRITE is
+        # skipped) -- `nid` is still the correct id to hand back to the
+        # caller (e.g. `narrate_finding`'s own return value, stored on
+        # RunState), since it already resolves to the human-edited row.
+        return nid
     if origin in ("model", "model_repaired"):
         texts = list_text if list_text is not None else [text]
         for t in texts:
@@ -585,25 +605,10 @@ def narrate_captions(rc: RunnerContext, charts: list[dict], metrics: dict[str, d
     return out
 
 
-# ── the one resolution `act` needs today (§4.6/§6.4's full cross-target
-# `effective_prose` resolver is WP N10's job; this is a narrow, local
-# stand-in for the single case this WP's `act` change requires) ────────────
-
-
-def effective_remediation_text(
-    finding: dict, narratives_by_target: dict[tuple, dict], *, skill, period: tuple[str, str] | None,
-) -> str | None:
-    """§2's `act` change: "An action's description is the effective
-    remediation draft, not the raw recommendation". `narratives_by_target`
-    is `{(target_kind, target_id, field): row}` for this run's own
-    `get_narratives()` -- built once by the caller, not re-queried per
-    finding. Falls back to the finding's own persisted recommendation
-    (narration off, or this item's remediation draft never validated) --
-    the same fallback `narrate_remediation` itself falls back to when there
-    is nothing else to show."""
-    finding_id = finding.get("finding_id")
-    row = narratives_by_target.get(("finding", finding_id, "remediation")) if finding_id else None
-    if row is not None and row.get("origin") in ("model", "model_repaired") and row.get("template_text"):
-        table = build_finding_table(finding, skill=skill, period=period)
-        return render(row["template_text"], table)
-    return finding.get("recommendation")
+# `act`'s own resolution (§2: "An action's description is the effective
+# remediation draft, not the raw recommendation") is now WP N10's full
+# cross-target `effective_prose` resolver,
+# `orchestrator.narration.resolve.effective_remediation` -- this module's own
+# narrow WP N7 stand-in (`effective_remediation_text`) has been replaced by
+# it, not kept alongside it (CLAUDE.md §1 #1: number/text safety by
+# construction, one formatter, one resolver).

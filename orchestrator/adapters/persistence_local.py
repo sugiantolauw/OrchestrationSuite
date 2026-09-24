@@ -1354,8 +1354,21 @@ class LocalPersistence:
 
     # ── narration (P6, docs/specs/P6_narration_design.md §6.1 / WP N3b) ────────
 
-    def upsert_narrative(self, row: dict) -> None:
+    def upsert_narrative(self, row: dict, *, expected_version: int | None = None) -> bool:
         values = _narrative_row_values(row)
+        if expected_version is not None:
+            # P6 WP N10 (§6.4): a real CAS -- `edit_narrative`'s only caller
+            # passes this, and only ever against a narrative_id it already
+            # read. A conditional UPDATE, never a MERGE: there is nothing to
+            # INSERT here (protocols.py's own docstring).
+            set_clause = ", ".join(f"{c} = ?" for c in _NARRATIVE_COLUMNS if c != "narrative_id")
+            set_cols = [c for c in _NARRATIVE_COLUMNS if c != "narrative_id"]
+            with self._writer() as conn:
+                cur = conn.execute(
+                    f"UPDATE narratives SET {set_clause} WHERE narrative_id = ? AND version = ?",
+                    tuple(values[c] for c in set_cols) + (row["narrative_id"], expected_version),
+                )
+                return cur.rowcount > 0
         update_clause = ", ".join(f"{c} = excluded.{c}" for c in _NARRATIVE_COLUMNS if c != "narrative_id")
         placeholders = ",".join("?" for _ in _NARRATIVE_COLUMNS)
         with self._writer() as conn:
@@ -1364,6 +1377,7 @@ class LocalPersistence:
                 f"ON CONFLICT(narrative_id) DO UPDATE SET {update_clause}",
                 tuple(values[c] for c in _NARRATIVE_COLUMNS),
             )
+        return True
 
     def get_narratives(self, run_id: str) -> list[dict]:
         conn = self._connect()

@@ -330,13 +330,28 @@ class PersistenceAdapter(Protocol):
 
     # ── narration (P6, docs/specs/P6_narration_design.md §6.1 / WP N3b) ────
 
-    def upsert_narrative(self, row: dict) -> None:
+    def upsert_narrative(self, row: dict, *, expected_version: int | None = None) -> bool:
         """Idempotent by `narrative_id` (node rule 1, CLAUDE.md §2.3): `narratives`
         holds the CURRENT version per narrated field, keyed on `narrative_id =
         sha256(run_id|target_kind|target_id|field)[:32]` -- a re-execution of the
         node that produced this field's text overwrites the same row rather than
         appending. History (who/when/before/after) lives separately in
-        `narrative_edits` (`append_narrative_edit`), never here."""
+        `narrative_edits` (`append_narrative_edit`), never here.
+
+        `expected_version` (P6 WP N10, §6.4's `edit_narrative` CAS): `None`
+        (every narrate-node caller) is the existing unconditional upsert --
+        insert if absent, otherwise overwrite regardless of the stored
+        `version` -- and always returns `True`. A caller that passes it (only
+        `edit_narrative`) asserts the row ALREADY EXISTS at exactly that
+        version; the write applies, and this returns `True`, only if the
+        stored row's `version` still equals `expected_version` at write time
+        -- a conditional `UPDATE ... WHERE narrative_id = ? AND version = ?`,
+        never a MERGE/upsert (there is nothing to insert: an edit's target
+        narrative must already exist, `edit_narrative` already raises
+        `NarrativeNotFound` otherwise). Zero rows affected (a racing edit or
+        a `narrate()` re-execution landed first) returns `False` and writes
+        nothing -- the caller turns that into `NarrativeEditConflict`, never
+        a silent overwrite (CLAUDE.md NN14)."""
         ...
 
     def get_narratives(self, run_id: str) -> list[dict]:

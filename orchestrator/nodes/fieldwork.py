@@ -49,9 +49,10 @@ from orchestrator.findings import build_findings
 from orchestrator.frames import build_row_snapshots, frame_parquet_bytes, sha256_bytes
 from orchestrator.llm.gateway import CallContext
 from orchestrator.llm.tasks import TASK_PROFILES
-from orchestrator.narration.runner import effective_remediation_text
+from orchestrator.narration import resolve as narration_resolve
+from orchestrator.narration.payloads import build_finding_table
 from orchestrator.nodes.context import NodeContext
-from orchestrator.nodes.narration import narrate
+from orchestrator.nodes.narration import finalise, narrate
 from orchestrator.populations import PopulationContext, build_populations
 from orchestrator.pptx_export import generate_pptx, load_catalogue_rows
 from orchestrator.signoff_policy import SELF_APPROVED_LABEL
@@ -979,13 +980,15 @@ def prioritise(ctx: NodeContext, state: RunState) -> RunState:
 def act(ctx: NodeContext, state: RunState) -> RunState:
     """One draft management action per finding (CLAUDE.md build brief P3 §2).
     An action's `description` is the EFFECTIVE remediation draft (P6 WP N7,
-    docs/specs/P6_narration_design.md §2/§4.6): `narrate` (now running just
-    before this node, CLAUDE.md §4.2's amended fieldwork order) already
-    wrote one `narratives` row per finding for field `remediation`; this
-    node reads it back rather than the raw rule-authored `recommendation` --
-    falling back to that same `recommendation` when narration is off, or
-    this finding's own remediation draft never validated
-    (`effective_remediation_text`'s own fallback).
+    docs/specs/P6_narration_design.md §2/§4.6, now resolved through WP N10's
+    `orchestrator.narration.resolve.effective_remediation`): `narrate` (now
+    running just before this node, CLAUDE.md §4.2's amended fieldwork order)
+    already wrote one `narratives` row per finding for field `remediation`;
+    this node reads it back rather than the raw rule-authored
+    `recommendation` -- falling back to that same `recommendation` when
+    narration is off, or this finding's own remediation draft never
+    validated (`effective_remediation`'s own fallback). `description_origin`
+    (migration 011) records which of the three it actually was.
 
     "Generate management actions after review" (CLAUDE.md §5 UI item 4,
     NN13): unchecked at run setup means state.options["generate_management_
@@ -1008,26 +1011,37 @@ def act(ctx: NodeContext, state: RunState) -> RunState:
         (r["target_kind"], r["target_id"], r["field"]): r for r in ctx.persistence.get_narratives(state.run_id)
     }
 
-    actions = [
-        {
-            "action_id": f"MA-{f['finding_id']}",
-            "issue_id": f"ISS-{f['finding_id']}",
-            "finding_id": f["finding_id"],
-            "engagement_id": state.engagement_id,
-            "skill_id": skill_id,
-            "title": f["title"],
-            "description": effective_remediation_text(
-                f, narratives_by_target, skill=ctx.skill, period=state.audit_period
-            ),
-            "owner": None,
-            "risk": f["severity"],
-            "status": "draft",
-            "target_date": None,
-            "potential_exposure": f.get("exposure_amount"),
-            "evidence_link": f.get("test_id"),
-        }
-        for f in findings
-    ]
+    actions = []
+    for f in findings:
+        table = build_finding_table(f, skill=ctx.skill, period=state.audit_period)
+        resolved = narration_resolve.effective_remediation(f, narratives_by_target, table=table)
+        actions.append(
+            {
+                "action_id": f"MA-{f['finding_id']}",
+                "issue_id": f"ISS-{f['finding_id']}",
+                "finding_id": f["finding_id"],
+                "engagement_id": state.engagement_id,
+                "skill_id": skill_id,
+                "title": f["title"],
+                "description": resolved["text"],
+                "owner": None,
+                "risk": f["severity"],
+                "status": "draft",
+                "target_date": None,
+                "potential_exposure": f.get("exposure_amount"),
+                "evidence_link": f.get("test_id"),
+                # P6 §6.1 migration 011: template|model|human, from the SAME
+                # resolver status `effective_remediation` returned -- a
+                # fallback status ('fallback_invalid'/'fallback_unavailable',
+                # or no narrative row at all) means the template recommendation
+                # was used, never a model/human draft.
+                "description_origin": (
+                    "human" if resolved["status"] == "human_edit"
+                    else "model" if resolved["status"] in ("model", "model_repaired")
+                    else "template"
+                ),
+            }
+        )
     ctx.persistence.write_management_actions(state.run_id, actions, now=now)
 
     compact = [
@@ -1367,6 +1381,11 @@ NODES_FOR: dict[str, dict[str, list[tuple[str, object]]]] = {
             ("narrate", narrate),
             ("act", act),
         ],
-        "export": [("export", export)],
+        # P6 WP N10 (docs/specs/P6_narration_design.md §2): `finalise` is the
+        # NEW first export-phase node -- it runs after sign-off (§2.4's gate)
+        # and before `export`, so every accepted AI-proposed finding, the
+        # recomputed headline and the rewritten issues/actions are already in
+        # Delta by the time `export` reads them.
+        "export": [("finalise", finalise), ("export", export)],
     }
 }

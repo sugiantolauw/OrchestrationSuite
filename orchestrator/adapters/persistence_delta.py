@@ -1753,8 +1753,23 @@ class DeltaPersistence:
 
     # ── narration (P6, docs/specs/P6_narration_design.md §6.1 / WP N3b) ────────
 
-    def upsert_narrative(self, row: dict) -> None:
+    def upsert_narrative(self, row: dict, *, expected_version: int | None = None) -> bool:
         values = _narrative_row_values(row)
+        if expected_version is not None:
+            # P6 WP N10 (§6.4): a real CAS -- a plain conditional UPDATE, the
+            # same shape as `_cas_update_run_state`/`decide_candidate_cas`,
+            # never a MERGE (protocols.py's own docstring: nothing to insert).
+            set_clause = ", ".join(f"{c} = :{c}" for c in _NARRATIVE_COLUMNS if c != "narrative_id")
+            params = dict(values)
+            params["expected_version"] = expected_version
+            with self._cursor_ctx() as conn:
+                cur = self._execute(
+                    conn,
+                    f"UPDATE {self._table('narratives')} SET {set_clause} "
+                    "WHERE narrative_id = :narrative_id AND version = :expected_version",
+                    params,
+                )
+                return _num_affected_rows(cur) > 0
         update_set = ", ".join(f"{c} = :{c}" for c in _NARRATIVE_COLUMNS if c != "narrative_id")
         insert_cols = ", ".join(_NARRATIVE_COLUMNS)
         insert_vals = ", ".join(f":{c}" for c in _NARRATIVE_COLUMNS)
@@ -1767,6 +1782,7 @@ class DeltaPersistence:
                 f"WHEN NOT MATCHED THEN INSERT ({insert_cols}) VALUES ({insert_vals})",
                 values,
             )
+        return True
 
     def get_narratives(self, run_id: str) -> list[dict]:
         with self._cursor_ctx() as conn:

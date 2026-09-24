@@ -470,6 +470,53 @@ def finding_line_values(
     return line_map
 
 
+def line_map_from_test_line_values(
+    basis: str, producing_test_ids, rows_by_test_id: dict[str, list[dict]],
+) -> dict[str, float]:
+    """P6 WP N10 (docs/specs/P6_narration_design.md §5.3): the `finalise`
+    node's own counterpart to `finding_line_values` above -- resolves ONE
+    finding's (or accepted candidate's) line contributions PURELY from
+    already-PERSISTED `test_line_values` rows (`rows_by_test_id`, from
+    `persistence.list_test_line_values`), never reading source data and
+    never re-deriving `line_key` from raw entry-key columns the way
+    `finding_line_values`/`line_key` above do. This is deliberate, not a
+    shortcut: every `test_line_values` row already carries its OWN
+    `line_key` (computed once, correctly, when `prioritise` built the table)
+    alongside its `spend_amount`/`excess_amount` -- re-deriving `line_key`
+    here from an INCOMPLETE `entry_key_cols_by_source` (finalise has no
+    source read, so it would have none) would silently compute the WRONG
+    line identity for any source that declares a repeats-grain `entry_key`
+    (T3.3b's attendee-grain shape), double-counting or under-counting the
+    headline for a Skill that uses one -- exactly the class of bug CLAUDE.md
+    §0.3 exists to prevent.
+
+    A `basis` outside ('spend', 'excess') -- 'approved_not_spent' or 'none'
+    -- returns an empty map, the same "never contributes to the headline"
+    rule `compute_run_exposure` applies. A row whose relevant amount is
+    absent (an 'excess' row belonging to a producing test whose primitive
+    genuinely computed none) is silently skipped, never raised: unlike
+    `finding_line_values` (called by `prioritise`, which is entitled to
+    treat that as a genuine data anomaly because it JUST derived these rows
+    itself), `finalise` is re-deriving over rows a PRIOR, already-successful
+    `prioritise` pass wrote -- if that pass raised, `test_line_values` would
+    never have been persisted at all, so reaching `finalise` already proves
+    every row here is consistent; an AI-proposed candidate's own C-2/
+    `_headline_eligibility` gate (§5.1) is what decides whether IT gets to
+    call this at all, and never raises either."""
+    if basis not in ("spend", "excess"):
+        return {}
+    line_map: dict[str, float] = {}
+    for tid in producing_test_ids:
+        for row in rows_by_test_id.get(tid, []):
+            amount = row["spend_amount"] if basis == "spend" else row.get("excess_amount")
+            if amount is None:
+                continue
+            current = line_map.get(row["line_key"])
+            if current is None or amount > current:
+                line_map[row["line_key"]] = amount
+    return line_map
+
+
 def headline(line_maps: list[dict[str, float]]) -> float:
     """The run's amount-at-risk figure: every distinct line across every
     'spend'/'excess' finding's own `finding_line_values` map, at the

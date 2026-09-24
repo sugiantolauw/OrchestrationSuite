@@ -63,6 +63,13 @@ _NODE_SPECS: dict[str, dict[str, list[tuple[str, str]]]] = {
             ("act", "orchestrator.nodes.fieldwork:act"),
         ],
         "export": [
+            # P6 WP N10 (docs/specs/P6_narration_design.md §2): `finalise`
+            # copies accepted AI-proposed findings and recomputes the
+            # headline before `export` reads them -- see nodes/fieldwork.py's
+            # own NODES_FOR comment (this list must never drift from it,
+            # tests/test_lifecycle_isolation.py::
+            # test_registry_fieldwork_sequence_matches_fieldwork_nodes_for).
+            ("finalise", "orchestrator.nodes.narration:finalise"),
             ("export", "orchestrator.nodes.fieldwork:export"),
         ],
     }
