@@ -14,6 +14,9 @@ _FORBIDDEN_SUBSTRINGS = [
     "§",
     "NN13", "NN14", "NN15", "NN16",
     "G6", "G7", "G8", "G9", "G10", "G11", "G12", "G13", "G14", "G15", "G16", "G17",
+    "docs/specs",
+    "[PENDING]",
+    "test_specification",
 ]
 _FORBIDDEN_PATTERNS = [re.compile(r"\bP[0-9][AB]?\b")]  # phase names: P1A, P1B, P2 .. P9
 
@@ -119,3 +122,46 @@ def test_workspace_tne_has_no_dev_strings(_fake_backend):
     from src.workspace_tne import tne_workspace_layout
 
     assert_no_dev_strings(tne_workspace_layout(_fake_backend), "/workspace/tne")
+
+
+def test_real_skill_description_has_no_dev_strings(monkeypatch, tmp_path):
+    """The skill card's description comes from skills/tne_exco/manifest.yaml,
+    not the fake backend -- the fake never reproduces a stale/developer
+    description because it hardcodes its own. Render against the REAL
+    orchestrator.service (as test_layouts.py's real-skill test does) so a
+    developer string left in the real manifest is actually caught."""
+    from pathlib import Path
+
+    from orchestrator import service as real_service
+    from src.platform.pages import skill_library_page
+    from src.run_setup import home_layout
+
+    repo_root = Path(__file__).resolve().parents[2]
+    env = {
+        "ORCH_BACKEND": "local",
+        "ORCH_LOCAL_DB": str(tmp_path / "orch.db"),
+        "ORCH_LOCAL_DATA_ROOT": str(tmp_path),
+        "ORCH_LOCAL_EXPORT_ROOT": str(tmp_path / "exports"),
+        "SKILLS_DIR": str(repo_root / "skills"),
+    }
+    from src.platform import adapters as adapters_module
+
+    monkeypatch.setattr(adapters_module, "service", real_service)
+    adapters_module._ctx = None
+    original_build = real_service.build_app_context
+    monkeypatch.setattr(real_service, "build_app_context", lambda *a, **k: original_build(env))
+    # This file's own autouse `_fake_backend` fixture (above) replaces
+    # adapters.get_context itself with a lambda closed over the fake ctx,
+    # so resetting `_ctx` alone is not enough here -- put a real one back.
+    real_ctx = original_build(env)
+    monkeypatch.setattr(adapters_module, "get_context", lambda: real_ctx)
+
+    assert_no_dev_strings(home_layout(), "/ (real skill)")
+    assert_no_dev_strings(skill_library_page(), "/skills (real skill)")
+    # NOTE: skill_methodology_page("SKILL-001") independently leaks a
+    # developer string ("...until P6 classify node") in its test-plan table
+    # -- pre-existing, unrelated to the skill card description this test
+    # targets, and out of this task's scope. Left for a future fix.
+
+    manifest = __import__("yaml").safe_load((repo_root / "skills" / "tne_exco" / "manifest.yaml").read_text())
+    assert "Assess executive travel and entertainment spend against policy" in manifest["description"]

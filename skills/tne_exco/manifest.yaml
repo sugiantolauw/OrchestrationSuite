@@ -1,9 +1,11 @@
 id: SKILL-001
 name: ExCo T&E Executive Diligence
 domain: Travel & Expenses
-version: "2.0.5-draft"
+version: "2.0.6-draft"
 owner: Internal Audit
 status: draft
 description: >
-  ExCo travel-and-expense control testing against docs/specs/SKILL-001_test_specification.md.
-  Draft pending auditor confirmation of every [PENDING] item named in that spec.
+  Assess executive travel and entertainment spend against policy. 14 deterministic
+  tests covering pre-approval, preferred suppliers, split claims, duplicates,
+  missing receipts, attendee validation, approver review quality, and daily
+  spend limits.
