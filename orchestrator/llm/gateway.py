@@ -213,15 +213,36 @@ class LLMGateway:
         cache_matches = self.persistence.find_llm_cache(prompt_sha256, endpoint, params_json)
         if cache_matches:
             cached = cache_matches[0]
+            # A cache hit must be behaviourally identical to the live call it
+            # replays -- a structured-output caller (e.g. the Explorer plan
+            # node, docs/specs/P6_P8_explorer_llm_design.md §4.8's
+            # "Idempotency": a retried node attempt hits llm_cache and
+            # re-derives the SAME proposal) reads `LLMResult.parsed`, never
+            # `response_text` directly, so a cache hit that left `parsed`
+            # unset (as this branch previously did, unconditionally) silently
+            # looked like an empty/invalid response to every such caller even
+            # though `status == "ok"`. Only re-parses when a schema was
+            # actually given, matching `_call_live`'s own "schema is not
+            # None" gate.
+            cached_parsed = None
+            cached_status = "ok"
+            cached_error = None
+            if schema is not None:
+                cached_parsed, parse_err = _parse_and_validate(cached["response_text"], schema)
+                if parse_err is not None:
+                    cached_status = "invalid_output"
+                    cached_error = f"cached response no longer validates: {parse_err}"
             return self._log_and_return(
                 task=task, seq=seq, role=role, endpoint=endpoint, messages=final_messages,
                 params_sent=sent, params_dropped=dropped, ctx=ctx, transport_attempt=1,
-                outcome="succeeded", status="ok", source="cache",
+                outcome=("succeeded" if cached_status == "ok" else "invalid_output"),
+                status=cached_status, source="cache",
                 served_model_version=cached["served_model_version"], response_text=cached["response_text"],
                 finish_reason=cached["finish_reason"], cache_hit=True, cache_key=cached["cache_key"],
                 cached_from_call_id=cached["source_call_id"], prompt_sha256=prompt_sha256, params_json=params_json,
                 schema=schema, prompt_template_id=prompt_template_id,
-                prompt_template_version=prompt_template_version,
+                prompt_template_version=prompt_template_version, parsed=cached_parsed,
+                error_type="InvalidModelOutput" if cached_error else None, error_message=cached_error,
             )
 
         cache_mode = getattr(self.settings, "llm_cache_mode", "live") or "live"

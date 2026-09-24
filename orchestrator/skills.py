@@ -13,6 +13,7 @@ import pandas as pd
 import yaml
 
 from orchestrator.expr import ExpressionError, compile_expr
+from orchestrator.explorer.iso4217 import ISO4217_CODES
 from orchestrator.fingerprint import skill_content_hash
 from orchestrator.primitives import PRIMITIVES
 
@@ -273,17 +274,23 @@ def plan_test_flags(plan_tests: list[dict]) -> list[dict]:
 
 # Metric `kind`s whose value is an additive dollar figure (a running total the
 # primitive built up), as opposed to a ceiling/count/rate. Only these, paired
-# with `unit: AUD`, name a genuine "amount at risk" -- e.g. `daily_over_max_*`
-# is `kind: max` with `unit: AUD` too (T6.1d's worst single day), and summing
-# it into exposure alongside `daily_over_amount_*` would double-count.
+# with a real currency unit, name a genuine "amount at risk" -- e.g.
+# `daily_over_max_*` is `kind: max` with a currency unit too (T6.1d's worst
+# single day), and summing it into exposure alongside `daily_over_amount_*`
+# would double-count.
 _ADDITIVE_AMOUNT_METRIC_KINDS = {"sum", "value", "excess", "sum_where"}
 
 
 def plan_test_amount_metrics(plan_tests: list[dict]) -> dict[str, set[str]]:
     """Flattens plan.yaml's `tests` into {test_id: {amount metric names}} --
     every metric a test's primitive declares with an additive dollar `kind`
-    (CLAUDE.md P2/P3 gate review item 1: a finding's `exposure_amount` must be
-    the sum of its OWN cited amount metric(s), the same number its observation
+    AND a real currency unit -- any ISO-4217 code, not only "AUD" (docs/specs/
+    P6_P8_explorer_llm_design.md §4.12 item 3: an Explorer-materialised
+    Skill's evidenced currency may be any code; a Playbook Skill's plan.yaml
+    still always says "AUD", so this is a pure generalisation, not a
+    behaviour change for SKILL-001). CLAUDE.md P2/P3 gate review item 1: a
+    finding's `exposure_amount` must be the sum of its OWN cited amount
+    metric(s), the same number its observation
     text renders -- never a value re-derived from raw rows by a SEPARATE piece
     of exposure-de-duplication logic that can (and did, for T5.2) disagree
     with what the primitive itself computed. duplicate_detection's
@@ -307,7 +314,7 @@ def plan_test_amount_metrics(plan_tests: list[dict]) -> dict[str, set[str]]:
         names = {
             name
             for name, spec in metrics_spec.items()
-            if spec.get("unit") == "AUD" and spec.get("kind") in _ADDITIVE_AMOUNT_METRIC_KINDS
+            if spec.get("unit") in ISO4217_CODES and spec.get("kind") in _ADDITIVE_AMOUNT_METRIC_KINDS
         }
         if names:
             out[test_id] = names

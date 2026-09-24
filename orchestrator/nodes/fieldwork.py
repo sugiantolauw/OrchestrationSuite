@@ -801,6 +801,22 @@ def classify(ctx: NodeContext, state: RunState) -> RunState:
     return dataclasses.replace(state, exceptions=exceptions, events=state.events + [_event("classify", message, now)])
 
 
+def _finding_skill_ref(ctx: NodeContext, state: RunState) -> tuple[str | None, str | None]:
+    """docs/specs/P6_P8_explorer_llm_design.md §4.12 item 1: `state.skill_id`/
+    `state.skill_version` are None throughout an Explorer run (RunState's own
+    "None for Explorer") -- ctx.skill is the resolved Skill regardless of
+    mode (resolve_run_skill, §4.11), so falling back to its own
+    skill_id/version is what makes an Explorer run's findings link to the
+    EXPLORER-<run_id> ledger snapshot instead of persisting a null skill_id.
+    A Playbook run's state.skill_id is always already set, so this is a pure
+    generalisation, not a behaviour change for SKILL-001."""
+    if state.skill_id:
+        return state.skill_id, state.skill_version
+    if ctx.skill is not None:
+        return ctx.skill.skill_id, ctx.skill.version
+    return None, None
+
+
 def find(ctx: NodeContext, state: RunState) -> RunState:
     """Findings from `execute`'s already-persisted metrics, rule-evaluated
     against skill.findings.yaml (CLAUDE.md §4.6) -- re-derived from
@@ -812,12 +828,13 @@ def find(ctx: NodeContext, state: RunState) -> RunState:
     findings = build_findings(ctx.skill, run_id=state.run_id, metrics=metrics)
 
     now = ctx.clock()
+    skill_id, skill_version = _finding_skill_ref(ctx, state)
     persisted = ctx.persistence.write_findings(
         state.run_id,
         findings,
         engagement_id=state.engagement_id,
-        skill_id=state.skill_id,
-        skill_version=state.skill_version,
+        skill_id=skill_id,
+        skill_version=skill_version,
         now=now,
     )
     ctx.persistence.write_issues_for_findings(
@@ -877,12 +894,13 @@ def prioritise(ctx: NodeContext, state: RunState) -> RunState:
     outcome = exposure.compute_run_exposure(ctx, state, ctx.skill, persisted, existing_metrics, rows_by_flag)
     updated_findings = outcome["updated_findings"]
 
+    skill_id, skill_version = _finding_skill_ref(ctx, state)
     ctx.persistence.write_findings(
         state.run_id,
         updated_findings,
         engagement_id=state.engagement_id,
-        skill_id=state.skill_id,
-        skill_version=state.skill_version,
+        skill_id=skill_id,
+        skill_version=skill_version,
         now=now,
     )
     ctx.persistence.put_test_line_values(state.run_id, outcome["test_line_values"])
@@ -976,6 +994,7 @@ def act(ctx: NodeContext, state: RunState) -> RunState:
         )
 
     findings = ctx.persistence.list_findings(state.run_id)
+    skill_id, _skill_version = _finding_skill_ref(ctx, state)
 
     actions = [
         {
@@ -983,7 +1002,7 @@ def act(ctx: NodeContext, state: RunState) -> RunState:
             "issue_id": f"ISS-{f['finding_id']}",
             "finding_id": f["finding_id"],
             "engagement_id": state.engagement_id,
-            "skill_id": state.skill_id,
+            "skill_id": skill_id,
             "title": f["title"],
             "description": f.get("recommendation"),
             "owner": None,
