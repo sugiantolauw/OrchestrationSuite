@@ -34,6 +34,53 @@ items you consider blocking. Nothing in this document is secret; no credentials 
 
 ---
 
+## Corporate assessment results (2026-09-24)
+
+A first assessment of the corporate workspace against this document has been done (by an
+assistant with workspace access, not a human) and its findings recorded. The full, row-by-row
+result lives in **`docs/CAPABILITY_MATRIX.md`**'s "Corporate target" column; the raw findings and
+the design decisions made in response to them are recorded in `CLAUDE.md` §11 ("Corporate
+workspace assessment" and the user decisions immediately after it). This section is a short
+pointer, not a duplicate — **no corporate workspace name, catalog, schema, volume, endpoint name
+or id appears here or in `CAPABILITY_MATRIX.md`** (non-negotiable 16); those values live only in
+the gitignored corporate `.env`.
+
+**Confirmed available:** Databricks Apps; a serverless SQL warehouse (shared, smallest size tier,
+1-minute auto-stop); a Unity Catalog catalog/schema/Volume; MLflow under a Shared path;
+`system.access.audit`; billing and compute system tables; AI Gateway inference tables; Unity
+Catalog tags; secret scopes (a new one must be requested); a ready Sonnet-class model-serving
+endpoint and GPT-OSS-class endpoints; PII/safety guardrail endpoints.
+
+**Findings that changed the design**, each already built (independent review 2026-09-24 items
+1–7, this checkout):
+- `ai_query()` / `ai_classify()` / `ai_gen()` are **denied** on the corporate warehouse — row-level
+  LLM classification (T4.3) calls Model Serving from Python in capped batches instead
+  (`orchestrator/llm/classify.py`), built but off by default pending governance approval.
+- `system.query.history` and `system.serving.endpoint_usage` are **not available** — the idle-cost
+  check uses `system.compute.warehouse_events` instead, and reports "not available" rather than
+  failing when even that table cannot be read (`scripts/check_idle_cost.py`).
+- The T&E source data there is **Excel files in a Volume, not Delta tables** — supported through an
+  explicit per-environment source-binding configuration (`SOURCE_BINDINGS`,
+  `orchestrator/source_bindings.py`), read via the Files API, contract-validated and sha256-pinned
+  in the run fingerprint like any other source. A missing configured source (per-diem rates,
+  named explicitly) fails the run loudly, with no bundled fallback.
+- **Binary Python packages need vendored `manylinux` wheels** — Apps there cannot compile C
+  extensions at deploy time (`scripts/build_vendor_wheelhouse.py`).
+- **Operations must run from a workspace cluster/notebook**, not from a local/session shell — an
+  assistant with workspace access there can edit files but not execute code
+  (`ops/notebooks/*.py`, and `main(argv)` entry points on `deploy_app.py` / `setup_workspace.py` /
+  `check_idle_cost.py`; `deploy_app.py --source-code-path` supports deploying from a Git-folder
+  checkout instead of uploading a bundle).
+- No external egress (ServiceNow, Glean, other third-party APIs) is available there until
+  explicitly requested — affects only features not yet built.
+
+**Still to verify there** (see `docs/CAPABILITY_MATRIX.md`'s closing section for the full list):
+model access from this project's own App identity, the App's compute size, identity headers
+forwarded to the App, upload/timeout limits, Delta constraint features beyond table creation,
+`VERSION AS OF` behaviour, and data residency for model inference.
+
+---
+
 ## 1. What we are trying to achieve
 
 ### 1.1 The product in one paragraph
