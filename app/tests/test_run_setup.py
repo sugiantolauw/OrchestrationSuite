@@ -36,7 +36,8 @@ def test_home_layout_has_the_prototypes_landing_page_ids():
 
 
 def test_auto_bind_uses_suggest_bindings_when_no_matching_upload():
-    bindings, missing = run_setup._auto_bind("SKILL-001")
+    with _probe_app.test_request_context("/", headers={"X-Forwarded-Email": "auditor@example.com"}):
+        bindings, missing = run_setup._auto_bind("SKILL-001")
     assert bindings.get("expense_report") == "test_catalog.tne_source.expense_report"
     # fake_service.suggest_bindings leaves attendee_validity unbound (None) --
     # a genuinely missing source is named, never silently dropped.
@@ -48,12 +49,50 @@ def test_auto_bind_prefers_an_exact_filename_match_upload_on_local_backend(monke
     monkeypatch.setattr(
         adapters, "list_uploaded_files",
         lambda engagement_id=None: [
-            {"filename": "expense_report.csv", "status": "Ready", "volume_path": "/local/uploads/expense_report.csv"},
+            {"filename": "expense_report.csv", "status": "Ready", "volume_path": "/local/uploads/expense_report.csv",
+             "uploaded_by": "auditor@example.com"},
         ],
     )
-    bindings, missing = run_setup._auto_bind("SKILL-001")
+    with _probe_app.test_request_context("/", headers={"X-Forwarded-Email": "auditor@example.com"}):
+        bindings, missing = run_setup._auto_bind("SKILL-001")
     assert bindings["expense_report"] == "/local/uploads/expense_report.csv"
     assert missing == ["attendee_validity"]
+
+
+def test_auto_bind_ignores_another_users_upload(monkeypatch):
+    """Independent review 2026-09-24 item 7: an upload made by a DIFFERENT
+    user, even with an exact filename match, must never be silently bound
+    into someone else's run."""
+    monkeypatch.setattr(adapters, "is_local_backend", lambda: True)
+    monkeypatch.setattr(
+        adapters, "list_uploaded_files",
+        lambda engagement_id=None: [
+            {"filename": "expense_report.csv", "status": "Ready", "volume_path": "/local/uploads/expense_report.csv",
+             "uploaded_by": "someone-else@example.com"},
+        ],
+    )
+    with _probe_app.test_request_context("/", headers={"X-Forwarded-Email": "auditor@example.com"}):
+        bindings, missing = run_setup._auto_bind("SKILL-001")
+    # Falls through to the governed-table suggestion instead of the mismatched upload.
+    assert bindings.get("expense_report") == "test_catalog.tne_source.expense_report"
+
+
+def test_auto_bind_works_on_a_non_local_backend(monkeypatch):
+    """Independent review 2026-09-24 item 7: upload matching used to be
+    gated on is_local_backend() alone -- an artificial restriction, since
+    VolumeUploadAwareDataSource reads an uploaded file the same way
+    regardless of which backend serves contract sources."""
+    monkeypatch.setattr(adapters, "is_local_backend", lambda: False)
+    monkeypatch.setattr(
+        adapters, "list_uploaded_files",
+        lambda engagement_id=None: [
+            {"filename": "expense_report.csv", "status": "Ready", "volume_path": "/Volumes/cat/schema/vol/expense_report.csv",
+             "uploaded_by": "auditor@example.com"},
+        ],
+    )
+    with _probe_app.test_request_context("/", headers={"X-Forwarded-Email": "auditor@example.com"}):
+        bindings, missing = run_setup._auto_bind("SKILL-001")
+    assert bindings["expense_report"] == "/Volumes/cat/schema/vol/expense_report.csv"
 
 
 def test_start_audit_run_creates_an_awaiting_signoff_run():

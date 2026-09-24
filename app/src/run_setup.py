@@ -314,6 +314,9 @@ def home_layout() -> html.Div:
 
 # ─── Binding (not a prototype concept -- see the change report) ────────────
 
+_DEFAULT_ENGAGEMENT_ID = "ENG-DEFAULT"  # same seeded default every other caller here uses (CLAUDE.md §4.8)
+
+
 def _auto_bind(skill_id: str) -> tuple[dict[str, str], list[str]]:
     """The prototype's landing page has no binding step at all: a run always
     used whichever fixed demo data was already loaded. A real run needs a
@@ -321,8 +324,14 @@ def _auto_bind(skill_id: str) -> tuple[dict[str, str], list[str]]:
     only, never fuzzy (CLAUDE.md NN14/§0.5):
 
       1. an uploaded, Ready file whose filename (without extension) equals
-         the contract source name exactly -- local backend only (see the
-         change report for why the UC backend is not wired here yet);
+         the contract source name exactly -- scoped to the current user's
+         own uploads in the current engagement (independent review
+         2026-09-24 item 7: an unscoped match could silently bind a run to
+         a DIFFERENT auditor's upload, in a different engagement, that
+         happens to share a filename), and to governed tables the same way
+         regardless of data-source backend (the earlier local-only gate
+         here was an artificial restriction -- VolumeUploadAwareDataSource
+         already reads an uploaded file the same way on every backend);
       2. otherwise the governed-table/local-default suggestion
          (service.suggest_bindings), itself an exact short-name match.
 
@@ -333,12 +342,12 @@ def _auto_bind(skill_id: str) -> tuple[dict[str, str], list[str]]:
     source_names = [s.get("source") for s in (skill.get("sources") or [])]
     suggested = adapters.suggest_bindings(skill_id) or {}
 
+    current_owner = _request_owner()
     uploads_by_stem: dict[str, dict] = {}
-    if adapters.is_local_backend():
-        for row in adapters.list_uploaded_files():
-            if row.get("status") == "Ready":
-                stem = Path(row["filename"]).stem
-                uploads_by_stem.setdefault(stem, row)
+    for row in adapters.list_uploaded_files(engagement_id=_DEFAULT_ENGAGEMENT_ID):
+        if row.get("status") == "Ready" and row.get("uploaded_by") == current_owner:
+            stem = Path(row["filename"]).stem
+            uploads_by_stem.setdefault(stem, row)
 
     bindings: dict[str, str] = {}
     missing: list[str] = []
@@ -533,21 +542,20 @@ def register_callbacks(app) -> None:
 
         options = options or []
         skill_id = selected_skill_id or _DEFAULT_SKILL_ID
-        bindings, missing = _auto_bind(skill_id)
-        if missing:
-            return no_update, html.Div([
-                html.Div([
-                    html.Span("Mode", style={"fontSize": 11, "fontWeight": 700, "textTransform": "uppercase",
-                                              "color": "#6b7283", "letterSpacing": "0.03em"}),
-                    html.Div(
-                        "Could not start the run: no governed table or uploaded file matches "
-                        f"contract source(s) {', '.join(missing)} by exact name.",
-                        style={"fontSize": 13, "fontWeight": 600, "color": "#b85042"},
-                    ),
-                ]),
-            ], className="panel", style={"marginTop": 12})
 
         try:
+            # _auto_bind now reads the current identity too (independent
+            # review 2026-09-24 item 7 -- it scopes uploads to the current
+            # user), so it must be inside this same try/except: a missing
+            # identity header on the deployed backend (adapters.
+            # MissingIdentityHeader) needs the same friendly panel as any
+            # other start-run failure, never a raw Dash error.
+            bindings, missing = _auto_bind(skill_id)
+            if missing:
+                raise ValueError(
+                    "no governed table or uploaded file matches contract source(s) "
+                    f"{', '.join(missing)} by exact name."
+                )
             run_owner = _request_owner()
             run_id = adapters.start_audit_run(
                 skill_id=skill_id,
