@@ -1282,7 +1282,11 @@ def _build_export_narration(ctx: NodeContext, state: RunState, findings: list[di
     )
     themes_label = None if theme_blocks else themes_probe["label"]
 
-    run_table = narration_run_values(state, findings, metrics)
+    from orchestrator.catalogue_counts import catalogue_tests_for_skill
+
+    run_table = narration_run_values(
+        state, findings, metrics, catalogue_tests=catalogue_tests_for_skill(ctx.skill) if ctx.skill else [],
+    )
     exec_resolved = narration_resolve.effective_prose(
         target_kind="run", target_id="run", field="exec_summary",
         narratives_by_target=narratives_by_target, table=run_table, fallback_text=None,
