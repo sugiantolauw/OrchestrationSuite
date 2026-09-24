@@ -123,6 +123,27 @@ class Settings:
     # to select the right wheel for each binary dependency. A config value
     # (CLAUDE.md NN16), never hardcoded in the vendoring script itself.
     apps_python_version: str = "3.11"
+    # docs/specs/P6_P8_explorer_llm_design.md §3.2 (Explorer Mode / LLM layer
+    # config). All of these ARE part of the runtime config hash (below) --
+    # unlike the operational knobs above, each one changes what a run
+    # actually computes or what a prompt actually contains.
+    llm_cache_mode: str = "live"  # "live" | "replay" -- consumed by a later step (gateway replay mode)
+    # Explorer refuses to start with this unset (CLAUDE.md NN14) -- there is
+    # no reasonable default for an audit-period timezone.
+    audit_timezone: str | None = None
+    # Explicit override of which repo Skills the planner sees as reference
+    # examples (§4.4); empty means "the first two valid repo Skills sorted by
+    # id" -- a later step's concern to resolve, this field only carries an
+    # explicit override when one is set.
+    explorer_reference_skill_ids: tuple[str, ...] = ()
+    explorer_category_max_distinct: int = 30
+    explorer_category_min_count: int = 5
+    explorer_max_columns: int = 200
+    explorer_max_prompt_chars: int = 240_000
+    # UC column-tag names that mark a column PII (§4.3.1 rule 2). Empty means
+    # no tag name is treated as a PII marker -- classification then falls
+    # through to the contract-flag and heuristic rules only.
+    pii_tag_names: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         _validate_identifier("catalog", self.catalog)
@@ -150,6 +171,12 @@ def _parse_float(value: str | None, default: float) -> float:
     if value is None or value == "":
         return default
     return float(value)
+
+
+def _parse_csv(value: str | None) -> tuple[str, ...]:
+    if not value:
+        return ()
+    return tuple(v.strip() for v in value.split(",") if v.strip())
 
 
 def load_settings(env: dict | None = None) -> Settings:
@@ -199,6 +226,14 @@ def load_settings(env: dict | None = None) -> Settings:
         # sets this explicitly (scripts/deploy_app.py derives it from
         # DBX_APP_NAME, never hardcoded here -- CLAUDE.md §7/NN16).
         mlflow_experiment_path=env.get("MLFLOW_EXPERIMENT_PATH") or None,
+        llm_cache_mode=env.get("LLM_CACHE_MODE") or "live",
+        audit_timezone=env.get("AUDIT_TIMEZONE") or None,
+        explorer_reference_skill_ids=_parse_csv(env.get("EXPLORER_REFERENCE_SKILL_IDS")),
+        explorer_category_max_distinct=_parse_int(env.get("EXPLORER_CATEGORY_MAX_DISTINCT"), 30),
+        explorer_category_min_count=_parse_int(env.get("EXPLORER_CATEGORY_MIN_COUNT"), 5),
+        explorer_max_columns=_parse_int(env.get("EXPLORER_MAX_COLUMNS"), 200),
+        explorer_max_prompt_chars=_parse_int(env.get("EXPLORER_MAX_PROMPT_CHARS"), 240_000),
+        pii_tag_names=_parse_csv(env.get("PII_TAG_NAMES")),
     )
 
 

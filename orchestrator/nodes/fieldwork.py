@@ -39,6 +39,7 @@ from orchestrator.adapters.issue_tracker_preview import PreviewOnlyIssueTracker,
 from orchestrator.contract import ContractViolation, validate_contract
 from orchestrator.errors import MissingSeverityProvenance, ReconciliationError
 from orchestrator.engine import execute_skill
+from orchestrator.explorer.profile import load_repo_pii_flags, profile_source
 from orchestrator.findings import build_findings
 from orchestrator.frames import build_row_snapshots, frame_parquet_bytes, sha256_bytes
 from orchestrator.nodes.context import NodeContext
@@ -64,7 +65,13 @@ def discover(ctx: NodeContext, state: RunState) -> RunState:
     orchestrator.service.start_audit_run) and that the bound table is still
     reachable at that pinned version. A source with no binding, or one that no
     longer resolves, is a contract violation: the run fails rather than
-    proceeding on a guess (CLAUDE.md NN14/G7)."""
+    proceeding on a guess (CLAUDE.md NN14/G7). Explorer (state.mode ==
+    "explorer") has no contract yet before plan confirmation -- ctx.skill is
+    None (docs/specs/P6_P8_explorer_llm_design.md §4.11's resolve_run_skill)
+    -- so its branch validates every state.data_assets binding directly."""
+    if state.mode == "explorer":
+        return _discover_explorer(ctx, state)
+
     contract_sources = ctx.skill.contract.get("sources", {})
     bindings = {b["source"]: b for b in state.data_assets}
 
@@ -101,6 +108,33 @@ def discover(ctx: NodeContext, state: RunState) -> RunState:
     return dataclasses.replace(state, events=state.events + [_event("discover", message, now)])
 
 
+def _discover_explorer(ctx: NodeContext, state: RunState) -> RunState:
+    """Explorer's `sources` (§4.2 -- 1 to 5 entries, resolved and pinned at
+    `start_explorer_run`) ARE `state.data_assets`; there is no contract to
+    cross-check them against yet, so every binding is validated directly
+    (same TOCTOU-safe re-resolve_version check as the Playbook branch)."""
+    violations: list[str] = []
+    for binding in state.data_assets:
+        source = binding["source"]
+        try:
+            current_version = ctx.data_source.resolve_version(source)
+        except Exception as exc:  # noqa: BLE001 - surfaced as a named contract violation
+            violations.append(f"{source}: bound source unreachable: {exc!r}")
+            continue
+        if str(current_version) != str(binding["version"]):
+            violations.append(
+                f"{source}: bound at version {binding['version']!r} but now resolves to "
+                f"{current_version!r} -- the source changed after it was pinned"
+            )
+    if violations:
+        raise ContractViolation(violations)
+
+    now = ctx.clock()
+    names = sorted(b["source"] for b in state.data_assets)
+    message = f"{len(names)} source(s) bound: {', '.join(names)}"
+    return dataclasses.replace(state, events=state.events + [_event("discover", message, now)])
+
+
 def profile(ctx: NodeContext, state: RunState) -> RunState:
     """Per contract source: row count and null count per contract column. Read
     via ctx.data_source.read_population + computed in pandas (CLAUDE.md build
@@ -108,7 +142,15 @@ def profile(ctx: NodeContext, state: RunState) -> RunState:
     `profile()` entry point, so this reads the whole bound population once per
     source rather than aggregating server-side. Fine at today's ~150K-row
     scale (§2.3 rule 4); a future SQL-pushdown profile() would replace this
-    node's body only, not its output shape."""
+    node's body only, not its output shape.
+
+    Explorer (state.mode == "explorer") branches to _profile_explorer: an
+    aggregates-only, PII-masked profile (docs/specs/P6_P8_explorer_llm_
+    design.md §4.3), never row counts/null counts of contract columns
+    (Explorer has no contract yet)."""
+    if state.mode == "explorer":
+        return _profile_explorer(ctx, state)
+
     contract_sources = ctx.skill.contract.get("sources", {})
     bindings = {b["source"]: b["version"] for b in state.data_assets}
 
@@ -128,6 +170,56 @@ def profile(ctx: NodeContext, state: RunState) -> RunState:
     now = ctx.clock()
     total_rows = sum(p["row_count"] for p in profile_result.values())
     message = f"{len(profile_result)} source(s) profiled, {total_rows} row(s) total"
+    return dataclasses.replace(
+        state, profile_result=profile_result, events=state.events + [_event("profile", message, now)]
+    )
+
+
+def _profile_explorer(ctx: NodeContext, state: RunState) -> RunState:
+    """Aggregates only, never rows (docs/specs/P6_P8_explorer_llm_design.md
+    §4.3): per bound source, `orchestrator.explorer.profile.profile_source`
+    computes raw per-column statistics and applies §4.3.1 PII masking BEFORE
+    anything is stored here -- `state.profile_result` for Explorer never
+    carries a PII column's values (G15). Over `explorer_max_columns` columns
+    (summed across selected sources) is a named ContractViolation, not a
+    silent truncation."""
+    # getattr with the same defaults orchestrator.config.Settings itself
+    # carries -- never a DIFFERENT default, just tolerance for a test
+    # harness's minimal settings stub that predates these fields.
+    settings = ctx.settings
+    max_distinct = getattr(settings, "explorer_category_max_distinct", 30)
+    min_count = getattr(settings, "explorer_category_min_count", 5)
+    max_columns = getattr(settings, "explorer_max_columns", 200)
+    pii_tag_names = getattr(settings, "pii_tag_names", ())
+    audit_timezone = getattr(settings, "audit_timezone", None)
+
+    audit_period = None
+    if audit_timezone and state.audit_period and all(state.audit_period):
+        audit_period = tuple(state.audit_period)
+
+    repo_pii_flags = load_repo_pii_flags()
+
+    sources: dict[str, dict] = {}
+    total_columns = 0
+    for binding in state.data_assets:
+        source = binding["source"]
+        result = profile_source(
+            ctx.data_source, source, version=binding["version"], max_distinct=max_distinct,
+            min_count=min_count, audit_period=audit_period, audit_timezone=audit_timezone,
+            repo_pii_flags=repo_pii_flags, pii_tag_names=pii_tag_names,
+        )
+        total_columns += len(result["columns"])
+        sources[source] = result
+
+    if total_columns > max_columns:
+        raise ContractViolation(
+            [f"too many columns for Explorer: select fewer sources ({total_columns} > {max_columns})"]
+        )
+
+    profile_result = {"kind": "explorer", "sources": sources}
+    n_pii = sum(1 for s in sources.values() for c in s["columns"] if c.get("pii"))
+    now = ctx.clock()
+    message = f"Profiled {len(sources)} source(s), {total_columns} column(s) ({n_pii} PII column(s) masked)"
     return dataclasses.replace(
         state, profile_result=profile_result, events=state.events + [_event("profile", message, now)]
     )

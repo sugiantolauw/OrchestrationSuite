@@ -57,6 +57,7 @@ import pandas as pd
 from orchestrator.adapters.datasource_uc import _resolve_max_cells
 from orchestrator.contract import SourceVersionMismatch, parse_source_bytes
 from orchestrator.errors import ConfiguredSourceUnavailable
+from orchestrator.explorer.profile import pandas_distinct_count, pandas_profile_columns
 
 
 @dataclass
@@ -226,6 +227,45 @@ class VolumeUploadAwareDataSource:
                     min_date = dates.min().date().isoformat()
                     max_date = dates.max().date().isoformat()
         return {"amount": amount, "min_date": min_date, "max_date": max_date}
+
+    def profile_columns(
+        self,
+        source: str,
+        *,
+        version: int | str,
+        max_distinct: int,
+        min_count: int,
+        audit_period: tuple[str, str] | None = None,
+        audit_timezone: str | None = None,
+    ) -> dict:
+        if not self._is_flat_file(source):
+            return self.table_source.profile_columns(
+                source, version=version, max_distinct=max_distinct, min_count=min_count,
+                audit_period=audit_period, audit_timezone=audit_timezone,
+            )
+        v = version or self.resolve_version(source)
+        df = self.read_population(source, version=v)
+        return pandas_profile_columns(
+            df, max_distinct=max_distinct, min_count=min_count,
+            audit_period=audit_period, audit_timezone=audit_timezone,
+        )
+
+    def distinct_count(self, source: str, *, version: int | str, columns: list[str]) -> int:
+        if not self._is_flat_file(source):
+            return self.table_source.distinct_count(source, version=version, columns=columns)
+        v = version or self.resolve_version(source)
+        df = self.read_population(source, version=v, columns=columns)
+        return pandas_distinct_count(df, columns)
+
+    def column_tags(self, source: str, *, version: int | str | None = None) -> dict[str, list[str]] | None:
+        # A flat file (upload or configured Volume file) has no UC column
+        # tags at all -- None here means "not applicable", the same signal
+        # classify_pii treats a denied UC tag query as (§4.3.1 rule 2: falls
+        # through to the heuristic rule, conservative never permissive).
+        if not self._is_flat_file(source):
+            column_tags = getattr(self.table_source, "column_tags", None)
+            return column_tags(source, version=version) if column_tags is not None else None
+        return None
 
     def close(self) -> None:
         close = getattr(self.table_source, "close", None)
