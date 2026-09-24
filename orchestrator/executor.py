@@ -21,7 +21,21 @@ worker_alive() check).
 
 A third: queue environment affinity, which never even attempts a lease for a
 run created under a different deployment's code_revision/runtime_config_hash,
-leaving it queued for the deployment it actually belongs to (§4)."""
+leaving it queued for the deployment it actually belongs to (§4).
+
+Two more, from the P3 gap-audit review (2026-09-24): a run whose direct
+`start(run_id, phase)` admission attempt does not resolve on the spot (e.g. a
+transient lease-acquire hiccup, or the background loop not having started
+yet) is tracked in `_pending_starts` until it does -- this keeps the
+admission loop at its ACTIVE cadence rather than parking on the (default-
+disabled) idle wake, so a run is never stranded `queued` forever purely
+because one signal was missed, with NO extra persistence calls while nothing
+is actually pending (§5b). And lease reaping now (a) never reaps a run this
+very worker still considers active -- a slow `renew_lease` under warehouse
+contention must never cause a worker to interrupt its own live run -- and
+(b) tolerates an extra `lease_reap_grace_s` beyond raw expiry before ANY
+worker reaps a lease at all, so a single renewal slower than the TTL does not
+read as orphaned (§9C)."""
 
 from __future__ import annotations
 
@@ -59,7 +73,14 @@ def _add_seconds(ts: str, seconds: float) -> str:
     return normalise_ts(_dt.fromisoformat(ts.replace("Z", "+00:00")) + timedelta(seconds=seconds))
 
 
-def reap_orphaned_runs_with_leases(persistence, *, now: str, actor: str = "reaper") -> list[str]:
+def _subtract_seconds(ts: str, seconds: float) -> str:
+    return _add_seconds(ts, -seconds)
+
+
+def reap_orphaned_runs_with_leases(
+    persistence, *, now: str, actor: str = "reaper",
+    exclude_run_ids: set[str] | None = None, grace_s: float = 0.0, tracing=None,
+) -> list[str]:
     """App-start reaping (CLAUDE.md §2.3 rule 2), lease-aware: a run left
     `running` with NO live lease -- never leased at all (a pre-P3-shaped
     orphan: created but the executor died before admission claimed a lease),
@@ -67,18 +88,50 @@ def reap_orphaned_runs_with_leases(persistence, *, now: str, actor: str = "reape
     marked `interrupted`. A run whose lease is still live is left alone: some
     worker is actively holding it, so it is not orphaned.
 
+    `grace_s` (P3 gap-audit review, root cause of a live false-interrupt
+    under warehouse contention -- CLAUDE.md §9C): a lease is only treated as
+    expired once it has been past `lease_expires_at` for AT LEAST `grace_s`
+    longer, never at the instant it first crosses raw expiry. A single
+    `renew_lease` call slower than the TTL (the observed cause) then still
+    has this extra margin to land before any worker treats the run as
+    orphaned. Applies only to leases that WERE acquired and look expired
+    (`expired`) -- a run that was never leased at all (`never_leased`) is a
+    structurally different, unambiguous orphan and is reaped immediately
+    regardless of grace.
+
+    `exclude_run_ids` (same review): never reap a run this CALLER already
+    knows is still live -- specifically, a worker's own `_active_runs`. The
+    incident's actual mechanism was a worker's own admission-loop reap tick
+    interrupting its OWN currently-running task because that same worker's
+    heartbeat renewal for it happened to be running slow; a worker must
+    never treat its own live work as orphaned no matter what a lease row
+    momentarily reads. `grace_s` alone would only narrow that race, not
+    close it, since the reap tick and the slow renewal are concurrent within
+    the same process.
+
+    `tracing` (P3 gap-audit review, item 4): terminates the run's MLflow
+    parent run with status "KILLED" once it is durably marked `interrupted`
+    -- an orphaned run's executor pass is gone for good, unlike a HITL pause
+    gate, so this is the one RunState terminal transition that happens
+    outside orchestrator.pipeline.run_phase and must end the parent run the
+    same way run_phase's own terminal transitions do. Defaults to
+    NullTracing() (a no-op) so existing callers that never wired tracing are
+    unaffected.
+
     This reimplements orchestrator.reaper.reap_orphaned_runs's per-run body
     (same CAS-then-close-attempts ordering, same trace event shape) rather
     than importing it, because that function reaps every `running` run
     unconditionally and CLAUDE.md build brief P3 §1 is explicit: extend the
     call site, never reaper.py's semantics."""
+    tracing = tracing or NullTracing()
     running = set(persistence.find_runs(["running"]))
     if not running:
         return []
+    effective_now = _subtract_seconds(now, grace_s) if grace_s else now
     ever_leased = set(persistence.expired_leases(_FAR_FUTURE)) & running
-    expired = set(persistence.expired_leases(now)) & running
+    expired = set(persistence.expired_leases(effective_now)) & running
     never_leased = running - ever_leased
-    eligible = expired | never_leased
+    eligible = (expired | never_leased) - (exclude_run_ids or set())
     if not eligible:
         return []
 
@@ -111,6 +164,10 @@ def reap_orphaned_runs_with_leases(persistence, *, now: str, actor: str = "reape
                 "state_version": saved.state_version,
             }
         )
+        try:
+            tracing.end_run(run_id, status="KILLED")
+        except Exception:  # pragma: no cover - defensive, CLAUDE.md §2.3 rule 4
+            logger.exception("tracing.end_run failed for interrupted run_id=%s", run_id)
         reaped.append(run_id)
     return reaped
 
@@ -130,6 +187,7 @@ class ThreadExecutor:
         idle_poll_interval_s: float | None = None,
         lease_ttl_s: float = _DEFAULT_LEASE_TTL_S,
         heartbeat_interval_s: float = _DEFAULT_HEARTBEAT_INTERVAL_S,
+        lease_reap_grace_s: float | None = None,
         tracing=None,
     ):
         self._persistence = persistence
@@ -162,11 +220,31 @@ class ThreadExecutor:
         )
         self._lease_ttl_s = lease_ttl_s
         self._heartbeat_interval_s = heartbeat_interval_s
+        # P3 gap-audit review: default to a full extra TTL of buffer (total
+        # tolerance ~2x lease_ttl_s) before ANY worker reaps a lease that was
+        # genuinely acquired -- see reap_orphaned_runs_with_leases's
+        # docstring. Explicit 0.0 (not just falsy-None) disables it, kept
+        # distinct from "unset" for callers that want the old exact-TTL
+        # behaviour.
+        self._lease_reap_grace_s = lease_reap_grace_s if lease_reap_grace_s is not None else lease_ttl_s
         # Set by start(run_id, ...) after every direct admission attempt, and
         # by stop() for a clean shutdown -- the only two things that wake a
         # loop currently blocked with the idle sweep disabled. Checking (and
         # clearing) it is free; it never itself triggers a persistence call.
         self._wake_event = threading.Event()
+
+        # P3 gap-audit review ("lost start signal"): run_ids a direct
+        # start(run_id, phase) call has attempted but which did not resolve
+        # on the spot (still backing off, at capacity, or the background
+        # loop was not even running yet) -- guarded by self._lock alongside
+        # _active_runs. Non-empty makes the admission loop treat itself as
+        # BUSY (see _next_poll_interval), so it keeps polling at the ACTIVE
+        # cadence -- real, cheap, already-necessary SQL, not idle polling --
+        # until each entry resolves one way or another, rather than parking
+        # on the (default-disabled) idle wake and never trying again. Empty
+        # means exactly what it always meant: zero persistence calls while
+        # idle (CLAUDE.md P3 cost fix).
+        self._pending_starts: set[str] = set()
 
         max_workers = max(1, int(getattr(settings, "max_concurrent_runs", 2)))
         self._pool = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="run-exec")
@@ -227,8 +305,20 @@ class ThreadExecutor:
         it starts the admission + heartbeat threads. Called with a run_id (a
         `start_audit_run` caller wanting immediacy rather than waiting for the
         next poll tick), it attempts to admit that one run right away -- a
-        no-op if the loop is not running yet or the run is not admissible."""
+        no-op if the run is not admissible yet.
+
+        P3 gap-audit review ("lost start signal"): a run_id call now also (a)
+        records the run in `_pending_starts` before attempting it, so it stays
+        tracked until resolved even if this synchronous attempt does not
+        succeed and no other signal ever reaches a parked loop, and (b)
+        ensures the background loop is actually running -- previously, if the
+        no-arg App-start call had never been made (or the loop had died), a
+        run_id call's own self._wake_event.set() woke nobody, ever, and the
+        run sat `queued` until a full App restart."""
         if run_id is not None:
+            with self._lock:
+                self._pending_starts.add(run_id)
+            self._ensure_background_loop_running()
             self._try_admit(run_id)
             # Nudge the admission loop in case it is currently blocked on the
             # idle wake (idle_poll_interval_s disabled, CLAUDE.md P3 cost
@@ -238,6 +328,9 @@ class ThreadExecutor:
             # and this is a real state-changing event, not periodic polling.
             self._wake_event.set()
             return
+        self._ensure_background_loop_running()
+
+    def _ensure_background_loop_running(self) -> None:
         if self._admission_thread is not None and self._admission_thread.is_alive():
             return
         self._stop_event.clear()
@@ -249,6 +342,10 @@ class ThreadExecutor:
         )
         self._admission_thread.start()
         self._heartbeat_thread.start()
+
+    def _resolve_pending_start(self, run_id: str) -> None:
+        with self._lock:
+            self._pending_starts.discard(run_id)
 
     def stop(self, *, wait: bool = True) -> None:
         self._stop_event.set()
@@ -301,9 +398,14 @@ class ThreadExecutor:
         picked up immediately regardless -- they call executor.start(run_id,
         phase), which admits directly -- so this only controls how long an
         orphan or a queued run this worker was not directly woken for can sit
-        before the next sweep (if any) notices it."""
+        before the next sweep (if any) notices it. `_pending_starts` (P3
+        gap-audit "lost start signal" fix) counts as busy too: a run whose
+        direct admission attempt has not yet resolved must keep this loop
+        polling at the ACTIVE cadence until it does, rather than letting it
+        park on a wake signal that -- for whatever reason -- might never
+        arrive."""
         with self._lock:
-            busy = bool(self._active_runs) or bool(self._admission_failures)
+            busy = bool(self._active_runs) or bool(self._admission_failures) or bool(self._pending_starts)
         if busy:
             return self._poll_interval_s
         if self._idle_poll_interval_s <= 0:
@@ -322,8 +424,22 @@ class ThreadExecutor:
         # ever moves a run to `interrupted`) -- cheap when there is nothing
         # to reap (one query, `find_runs(["running"])`, short-circuits to a
         # no-op), so running it every poll tick is not a meaningful cost.
+        #
+        # P3 gap-audit review (root cause of a live false-interrupt under
+        # warehouse contention, RUN-57B6B4BB2B33): pass this worker's own
+        # active runs as exclude_run_ids -- a worker's OWN reap tick must
+        # never interrupt a run it currently believes it is executing, no
+        # matter how stale that run's lease row happens to look at this
+        # instant, and pass lease_reap_grace_s so a run leased by ANY worker
+        # (including a slow peer) is not reaped the moment its lease first
+        # crosses raw expiry.
+        with self._lock:
+            own_active = set(self._active_runs)
         try:
-            reaped = reap_orphaned_runs_with_leases(self._persistence, now=self._clock())
+            reaped = reap_orphaned_runs_with_leases(
+                self._persistence, now=self._clock(),
+                exclude_run_ids=own_active, grace_s=self._lease_reap_grace_s, tracing=self._tracing,
+            )
         except Exception:  # pragma: no cover - defensive
             logger.exception("reap_orphaned_runs_with_leases failed")
             return
@@ -331,13 +447,24 @@ class ThreadExecutor:
             logger.info("admission loop reaped orphaned run(s): %s", sorted(reaped))
 
     def _admit_all_queued(self) -> None:
-        for run_id in self._persistence.find_runs(["queued"]):
+        queued_ids = self._persistence.find_runs(["queued"])  # preserves find_runs' own order
+        # P3 gap-audit review: a pending-start entry for a run that is no
+        # longer queued (admitted or resolved by some other path this worker
+        # was not directly told about) must not keep this loop busy forever
+        # -- prune against the same find_runs result this tick already paid
+        # for, no extra query. A set ONLY for the membership test -- iteration
+        # below stays over the ORIGINAL list, since find_runs' order is what
+        # decides which queued run gets the next free concurrency slot first.
+        with self._lock:
+            self._pending_starts &= set(queued_ids)
+        for run_id in queued_ids:
             self._try_admit(run_id)
 
     def _try_admit(self, run_id: str) -> None:
         now = self._clock()
         with self._lock:
             if run_id in self._active_runs:
+                self._pending_starts.discard(run_id)
                 return
             info = self._admission_failures.get(run_id)
             if info is not None and now < info["next_retry_at"]:
@@ -345,10 +472,15 @@ class ThreadExecutor:
         if self._has_own_environment_signature() and not self._fingerprint_environment_matches(run_id):
             # A different deployment's run (P3 gate review item 4) -- never touched:
             # no lease attempt, no backoff bookkeeping, stays `queued` untouched for
-            # the deployment it actually belongs to. Not a failure of THIS run.
+            # the deployment it actually belongs to. Not a failure of THIS run, and
+            # not this worker's to keep retrying (P3 gap-audit review).
+            self._resolve_pending_start(run_id)
             return
         if not self._sema.acquire(blocking=False):
-            return  # at capacity -- stays `queued` in Delta (CLAUDE.md §2.3 rule 3)
+            return  # at capacity -- stays `queued` in Delta (CLAUDE.md §2.3 rule 3);
+            # stays in _pending_starts too, since capacity freeing is exactly what
+            # _on_done's wake already handles, but a stray call that lost that wake
+            # must still find this run again on the next ACTIVE-cadence tick.
 
         acquired = False
         try:
@@ -357,12 +489,13 @@ class ThreadExecutor:
             logger.exception("acquire_lease failed for run_id=%s", run_id)
         if not acquired:
             self._sema.release()
-            self._record_admission_failure(run_id, now)
+            self._record_admission_failure(run_id, now)  # keeps busy via _admission_failures
             return
 
         self._clear_admission_failure(run_id)
         with self._lock:
             self._active_runs.add(run_id)
+            self._pending_starts.discard(run_id)
         future = self._pool.submit(self._run_one, run_id)
         future.add_done_callback(lambda f, rid=run_id: self._on_done(rid, f))
 
@@ -419,6 +552,10 @@ class ThreadExecutor:
             self._admission_failures.pop(run_id, None)
 
     def _fail_admission_exhausted(self, run_id: str, *, now: str, attempts: int) -> None:
+        # Terminal either way (failed here, or already moved on elsewhere) --
+        # _admission_failures is already gone by the time this is called
+        # (CLAUDE.md P3 gap-audit review), so nothing else will retry it.
+        self._resolve_pending_start(run_id)
         reason = (
             f"admission failed after {attempts} attempts (lease could not be acquired) -- "
             "ending the run rather than retrying indefinitely"
@@ -510,8 +647,15 @@ class ThreadExecutor:
                 return
             with self._lock:
                 run_ids = [rid for rid in self._active_runs if rid not in self._lease_lost]
-            now = self._clock()
             for run_id in run_ids:
+                # P3 gap-audit review (root cause of RUN-57B6B4BB2B33): `now`
+                # is read fresh immediately before EACH call, not once for
+                # the whole batch -- under warehouse contention a single slow
+                # renew_lease call must not leave a stale, pre-latency `now`
+                # anchoring the NEXT run's computed expires_at, which would
+                # silently shrink that run's real renewal margin by however
+                # long the first call took.
+                now = self._clock()
                 renewed = False
                 try:
                     renewed = self._persistence.renew_lease(
