@@ -1770,6 +1770,28 @@ user's request:
 
 Never restart the App on a build that lacks the idle-polling fix.
 
+### Decisions from the user after the independent review (2026-09-24)
+
+- **The headline is the amount at risk.** It keeps the prototype's "Potential exposure" label and
+  wording.
+  - Each distinct flagged transaction line counts once.
+  - A line's value is the largest amount at risk that any finding attributes to it:
+    - `spend` findings attribute the full amount of the line;
+    - `excess` findings attribute only the at-risk part — the extra lines beyond the first in a
+      duplicate group, or the over-limit part of a per-diem day, allocated pro rata to that day's
+      lines;
+    - `approved_not_spent` findings are excluded and reported separately.
+  - Line identity is the row identity for row-grain sources. A declared `entry_key` applies only
+    where the grain genuinely repeats (attendee rows), and a declared `entry_key` that is not unique
+    fails the run.
+- **"—" replaces a fabricated "$0"** wherever no figure exists: a run in progress, or a finding with
+  no money involved. It appears in the same slot, in the same style.
+- **The `/run/<id>` page is approved.** It is the run status page with the confirm, sign-off and
+  resume buttons; every prototype page stays unchanged.
+- **Build the PPTX export now** (§4.7). Do the P4 defect fixes and the P6 target structure
+  immediately. The executive summary and themes slides use deterministic content, labelled as such,
+  until the LLM layer lands; nothing is fabricated.
+
 ### Further decisions from the user (2026-09-23)
 
 - **UI is the prototype's, exactly.** Every page matches `reference_app/src/platform/pages.py` and
