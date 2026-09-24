@@ -710,14 +710,18 @@ def start_audit_run(
     # Independent review 2026-09-24 item 5: a run refuses to start while a
     # required readiness check is failing -- the same cached report /ready
     # exposes, not a fresh probe on every click (cost -- CLAUDE.md §11 idle-
-    # cost incident). RunNotReady's message names only the sanitized check
-    # names, never raw internal exception text; app/src/run_setup.py's
-    # existing generic "Could not start the run: {exc}" handler in the
-    # run-summary-preview panel already shows it.
+    # cost incident). Only checks that are actually required given the
+    # current configuration block the run (e.g. the model endpoints, which
+    # no fieldwork node calls unless `enable_row_level_llm` is on --
+    # independent-review follow-up item 2); RunNotReady's message names
+    # only the sanitized check names, never raw internal exception text;
+    # app/src/run_setup.py's existing generic "Could not start the run:
+    # {exc}" handler in the run-summary-preview panel already shows it.
     if ctx.readiness is not None:
         report = ctx.readiness.get()
-        if not report.ready:
-            raise RunNotReady([c.name for c in report.failing()])
+        blocking = report.blocking_failures()
+        if blocking:
+            raise RunNotReady([c.name for c in blocking])
 
     skill_dir = _skill_dir_for(ctx, skill_id)
     skill = load_skill(skill_dir)

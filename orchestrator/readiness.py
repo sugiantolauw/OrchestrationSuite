@@ -25,9 +25,20 @@ _LOG = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class CheckResult:
+    """`required_for` names which run kinds/features actually need this
+    check to pass -- independent review 2026-09-24 item 5 follow-up. Every
+    check defaults to `{"always"}` (unconditionally required, the prior
+    behaviour). A check that only some feature depends on -- e.g. the model
+    endpoints, which today only `classify`'s optional T4.3 row-level LLM
+    path calls, and only when `Settings.enable_row_level_llm` is on -- is
+    tagged with that feature's name instead, so it is reported (for
+    diagnostics) but does not block a plain fieldwork run that never
+    reaches an LLM."""
+
     name: str
     ok: bool
     detail: str | None = None
+    required_for: frozenset[str] = field(default_factory=lambda: frozenset({"always"}))
 
 
 @dataclass(frozen=True)
@@ -35,9 +46,17 @@ class ReadinessReport:
     checks: tuple[CheckResult, ...]
     checked_at: str
 
+    def blocking_failures(self) -> list[CheckResult]:
+        """Failing checks that are unconditionally required ("always") given
+        the current configuration -- the only ones that gate `.ready` and a
+        run start. A check tagged only with a feature name (e.g.
+        "feature:row_level_llm") that feature does not need right now is
+        reported in `as_dict()` for diagnostics but never appears here."""
+        return [c for c in self.checks if not c.ok and "always" in c.required_for]
+
     @property
     def ready(self) -> bool:
-        return all(c.ok for c in self.checks)
+        return not self.blocking_failures()
 
     def failing(self) -> list[CheckResult]:
         return [c for c in self.checks if not c.ok]
@@ -46,7 +65,15 @@ class ReadinessReport:
         return {
             "ready": self.ready,
             "checked_at": self.checked_at,
-            "checks": [{"name": c.name, "ok": c.ok, "detail": c.detail} for c in self.checks],
+            "checks": [
+                {
+                    "name": c.name,
+                    "ok": c.ok,
+                    "detail": c.detail,
+                    "required": "always" in c.required_for,
+                }
+                for c in self.checks
+            ],
         }
 
 
@@ -94,23 +121,35 @@ def check_source_bindings(source_bindings_config: dict, export_storage) -> list[
 
 
 def check_model_endpoints(settings, model_client) -> list[CheckResult]:
+    """No fieldwork node calls a model endpoint today except `classify`'s
+    optional T4.3 row-level LLM path, and only when `enable_row_level_llm`
+    is on (CLAUDE.md §11 independent-review item 2). So these checks are
+    tagged "always" (blocking) only while that feature is actually enabled;
+    otherwise they are tagged "feature:row_level_llm" -- reported for
+    diagnostics, but never blocking `/ready` or a fieldwork run start."""
+    row_level_llm_enabled = bool(getattr(settings, "enable_row_level_llm", False))
+    required_for = frozenset({"always"}) if row_level_llm_enabled else frozenset({"feature:row_level_llm"})
     results: list[CheckResult] = []
     for role in ("model_sonnet", "model_gpt_oss"):
         endpoint = getattr(settings, role, None)
         name = f"model_endpoint:{role}"
         if not endpoint:
-            results.append(CheckResult(name, True, "not configured"))
+            results.append(CheckResult(name, True, "not configured", required_for=required_for))
             continue
         if model_client is None:
-            results.append(CheckResult(name, True, "no model client configured -- assumed local/test"))
+            results.append(
+                CheckResult(name, True, "no model client configured -- assumed local/test", required_for=required_for)
+            )
             continue
         try:
             info = model_client.describe_endpoint(endpoint)
             ready = bool(info.get("ready"))
-            results.append(CheckResult(name, ready, None if ready else "endpoint not ready"))
+            results.append(
+                CheckResult(name, ready, None if ready else "endpoint not ready", required_for=required_for)
+            )
         except Exception:
             _LOG.exception("readiness: model endpoint check failed for %s (%s)", role, endpoint)
-            results.append(CheckResult(name, False, "endpoint unreachable"))
+            results.append(CheckResult(name, False, "endpoint unreachable", required_for=required_for))
     return results
 
 

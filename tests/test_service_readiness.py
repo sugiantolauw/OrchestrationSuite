@@ -75,7 +75,7 @@ def test_start_audit_run_refuses_when_a_required_check_fails(tmp_path):
             from orchestrator.readiness import CheckResult, ReadinessReport
 
             return ReadinessReport(
-                checks=(CheckResult("model_endpoint:model_gpt_oss", False, "endpoint unreachable"),),
+                checks=(CheckResult("warehouse", False, "warehouse unreachable"),),
                 checked_at="t",
             )
 
@@ -85,7 +85,38 @@ def test_start_audit_run_refuses_when_a_required_check_fails(tmp_path):
             ctx, skill_id="SKILL-MINI", bindings={"claims": "claims.csv", "register": "register.csv"},
             audit_period=("2026-01-01", "2026-02-28"), objective="test", run_owner="alice",
         )
-    assert "model_endpoint:model_gpt_oss" in str(exc_info.value)
+    assert "warehouse" in str(exc_info.value)
+
+
+def test_start_audit_run_proceeds_despite_a_non_blocking_model_endpoint_failure(tmp_path):
+    # Independent review 2026-09-24 item 2: no fieldwork node calls a model
+    # endpoint unless `enable_row_level_llm` is on (only `classify`'s
+    # optional T4.3 path does, and only then), so a model-endpoint check
+    # failure alone -- tagged "feature:row_level_llm", not "always" -- must
+    # not block a fieldwork run that never reaches an LLM.
+    ctx = service.build_app_context(_env(tmp_path))
+
+    class _DegradedReadiness:
+        def get(self, force=False):
+            from orchestrator.readiness import CheckResult, ReadinessReport
+
+            return ReadinessReport(
+                checks=(
+                    CheckResult("warehouse", True),
+                    CheckResult(
+                        "model_endpoint:model_gpt_oss", False, "endpoint unreachable",
+                        required_for=frozenset({"feature:row_level_llm"}),
+                    ),
+                ),
+                checked_at="t",
+            )
+
+    ctx.readiness = _DegradedReadiness()
+    run_id = service.start_audit_run(
+        ctx, skill_id="SKILL-MINI", bindings={"claims": "claims.csv", "register": "register.csv"},
+        audit_period=("2026-01-01", "2026-02-28"), objective="test", run_owner="alice",
+    )
+    assert run_id
 
 
 def test_start_audit_run_proceeds_when_readiness_is_ok(tmp_path):

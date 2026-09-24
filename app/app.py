@@ -164,10 +164,11 @@ def _start_executor_once() -> None:
     if ctx.readiness is not None:
         try:
             report = ctx.readiness.get()
-            if not report.ready:
+            blocking = report.blocking_failures()
+            if blocking:
                 _LOG.warning(
                     "App start: readiness check failing: %s",
-                    [c.name for c in report.failing()],
+                    [c.name for c in blocking],
                 )
         except Exception:
             _LOG.exception("App start: readiness check raised")

@@ -65,9 +65,10 @@ class _FailingModelClient:
 
 
 class _Settings:
-    def __init__(self, model_sonnet=None, model_gpt_oss="databricks-gpt-oss-120b"):
+    def __init__(self, model_sonnet=None, model_gpt_oss="databricks-gpt-oss-120b", enable_row_level_llm=False):
         self.model_sonnet = model_sonnet
         self.model_gpt_oss = model_gpt_oss
+        self.enable_row_level_llm = enable_row_level_llm
 
 
 # ── individual checks ────────────────────────────────────────────────────
@@ -172,6 +173,27 @@ def test_check_model_endpoints_no_client_is_ok_local_test():
     assert all(r.ok for r in results)
 
 
+def test_check_model_endpoints_not_required_for_a_plain_fieldwork_run():
+    # Independent review 2026-09-24 item 2: today the only fieldwork
+    # consumer of a model endpoint is classify's optional T4.3 row-level
+    # LLM path, gated by enable_row_level_llm (default False). With it off,
+    # the check is tagged "feature:row_level_llm", not "always" -- so it
+    # never blocks /ready or a run start on its own.
+    results = check_model_endpoints(
+        _Settings(model_sonnet="databricks-claude-sonnet-5", enable_row_level_llm=False), _FailingModelClient()
+    )
+    assert all(not r.ok for r in results)
+    assert all("always" not in r.required_for for r in results)
+    assert all("feature:row_level_llm" in r.required_for for r in results)
+
+
+def test_check_model_endpoints_required_when_row_level_llm_enabled():
+    results = check_model_endpoints(
+        _Settings(model_sonnet="databricks-claude-sonnet-5", enable_row_level_llm=True), _FailingModelClient()
+    )
+    assert all("always" in r.required_for for r in results)
+
+
 # ── run_readiness_checks / report ────────────────────────────────────────
 
 
@@ -194,6 +216,33 @@ def test_run_readiness_checks_one_failure_marks_not_ready():
     )
     assert not report.ready
     assert [c.name for c in report.failing()] == ["warehouse"]
+
+
+def test_run_readiness_checks_model_endpoint_failure_alone_does_not_block():
+    # enable_row_level_llm defaults to False, so a model-endpoint failure is
+    # reported (failing()) but does not gate .ready or blocking_failures().
+    report = run_readiness_checks(
+        persistence=_OkPersistence(), export_storage=_OkExportStorage(),
+        settings=_Settings(model_sonnet="databricks-claude-sonnet-5"),
+        source_bindings_config={}, model_client=_FailingModelClient(), clock=lambda: "t",
+    )
+    assert report.ready
+    assert report.blocking_failures() == []
+    assert len(report.failing()) == 2  # both endpoints fail, but neither blocks
+    d = report.as_dict()
+    assert d["ready"] is True
+    endpoint_entries = [c for c in d["checks"] if c["name"].startswith("model_endpoint:")]
+    assert all(c["required"] is False for c in endpoint_entries)
+
+
+def test_run_readiness_checks_model_endpoint_failure_blocks_when_row_level_llm_enabled():
+    report = run_readiness_checks(
+        persistence=_OkPersistence(), export_storage=_OkExportStorage(),
+        settings=_Settings(model_sonnet="databricks-claude-sonnet-5", enable_row_level_llm=True),
+        source_bindings_config={}, model_client=_FailingModelClient(), clock=lambda: "t",
+    )
+    assert not report.ready
+    assert len(report.blocking_failures()) == 2
 
 
 # ── caching ───────────────────────────────────────────────────────────────

@@ -1,13 +1,20 @@
-"""Bootstrap the personal Databricks Free Edition workspace.
+"""Bootstrap the Databricks workspace: catalog, schema, Volume, warehouse
+auto-stop, and every Delta table via the real migration path --
+`DeltaPersistence(settings).migrate()` against `orchestrator/ddl/delta/*.sql`.
 
 Idempotent. Safe to run repeatedly.
 
-Creates:
-  - Catalog:     ${DBX_CATALOG}
-  - Schema:      ${DBX_CATALOG}.${DBX_SCHEMA}
-  - Volume:      ${DBX_VOLUME}
-  - Delta tables: runs, findings, management_actions, trace_events,
-                  uploaded_files, llm_calls, evaluation_runs, golden_examples
+Independent review 2026-09-24 item 1: this script used to carry its own,
+separately-maintained DDL that had drifted out of sync with the P1A-P6
+migrations under `orchestrator/ddl/delta/` -- e.g. its old `runs` table had
+none of `run_kind`/`phase`/`fingerprint_id`/`state_version`, and its old
+`findings`/`node_attempts`/`llm_calls` shapes did not match the real ones
+either. There is now exactly one place table DDL is defined: the migration
+files the deployed App itself applies at start (`orchestrator.service.
+build_app_context` -> `DeltaPersistence.migrate()`). This script creates the
+catalog/schema/Volume those migrations need to run against, sets the
+warehouse's auto-stop (CLAUDE.md §11 cost incident), then calls the same
+`migrate()` the App calls.
 
 Usage:
     python scripts/setup_workspace.py
@@ -16,6 +23,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import os
 import sys
 from pathlib import Path
@@ -27,159 +35,24 @@ from dotenv import load_dotenv
 # folder checkout with no local .env (independent review 2026-09-24 item 7).
 PACKAGE_ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(PACKAGE_ROOT / ".env")
+if str(PACKAGE_ROOT) not in sys.path:
+    sys.path.insert(0, str(PACKAGE_ROOT))
 
 
-def build_ddl_statements(catalog: str, schema: str, volume: str) -> list[str]:
-    """Every DDL statement setup_workspace bootstraps -- a function of
-    (catalog, schema, volume) rather than a module-level constant, so
-    importing this module (e.g. from a notebook, independent review
-    2026-09-24 item 7) never requires these to already be set as
-    environment variables.
+def build_bootstrap_statements(catalog: str, schema: str, volume: str) -> list[str]:
+    """The only statements this script issues directly: catalog, schema and
+    Volume creation, a function of (catalog, schema, volume) rather than a
+    module-level constant, so importing this module (e.g. from a notebook)
+    never requires these to already be set as environment variables. Every
+    table is created by `DeltaPersistence.migrate()` (see module docstring),
+    not here.
     """
-    CATALOG, SCHEMA, VOLUME = catalog, schema, volume
     return [
-        f"CREATE CATALOG IF NOT EXISTS {CATALOG}",
-        f"CREATE SCHEMA IF NOT EXISTS {CATALOG}.{SCHEMA}",
+        f"CREATE CATALOG IF NOT EXISTS {catalog}",
+        f"CREATE SCHEMA IF NOT EXISTS {catalog}.{schema}",
         # Volume path components: /Volumes/<catalog>/<schema>/<name>
         # Extract the volume name (last path segment) for the CREATE VOLUME statement.
-        f"CREATE VOLUME IF NOT EXISTS {CATALOG}.{SCHEMA}.{VOLUME.rstrip('/').split('/')[-1]}",
-
-        # ----- Runs ---------------------------------------------------------------
-        f"""
-        CREATE TABLE IF NOT EXISTS {CATALOG}.{SCHEMA}.runs (
-            run_id STRING NOT NULL,
-            skill_id STRING,
-            skill_name STRING,
-            mode STRING,
-            audit_period_start DATE,
-            audit_period_end DATE,
-            run_owner STRING,
-            data_mode STRING,
-            status STRING,
-            findings_count INT,
-            high_risk_count INT,
-            potential_exposure DOUBLE,
-            open_actions INT,
-            run_config STRING,
-            started_at TIMESTAMP,
-            updated_at TIMESTAMP
-        ) USING DELTA
-        PARTITIONED BY (skill_id)
-        """,
-
-        # ----- Findings -----------------------------------------------------------
-        f"""
-        CREATE TABLE IF NOT EXISTS {CATALOG}.{SCHEMA}.findings (
-            run_id STRING NOT NULL,
-            finding_id STRING NOT NULL,
-            skill_id STRING,
-            title STRING,
-            category STRING,
-            severity STRING,
-            risk_score DOUBLE,
-            exposure_aud DOUBLE,
-            evidence_refs STRING,
-            metrics_json STRING,
-            narrative STRING,
-            priority_rationale STRING,
-            created_at TIMESTAMP
-        ) USING DELTA
-        PARTITIONED BY (skill_id)
-        """,
-
-        # ----- Management actions -------------------------------------------------
-        f"""
-        CREATE TABLE IF NOT EXISTS {CATALOG}.{SCHEMA}.management_actions (
-            action_id STRING NOT NULL,
-            run_id STRING,
-            finding_id STRING,
-            skill_id STRING,
-            title STRING,
-            owner STRING,
-            due_date DATE,
-            status STRING,
-            remediation_draft STRING,
-            created_at TIMESTAMP,
-            updated_at TIMESTAMP
-        ) USING DELTA
-        PARTITIONED BY (skill_id)
-        """,
-
-        # ----- Trace events -------------------------------------------------------
-        f"""
-        CREATE TABLE IF NOT EXISTS {CATALOG}.{SCHEMA}.trace_events (
-            run_id STRING NOT NULL,
-            event_id STRING NOT NULL,
-            node STRING,
-            status STRING,
-            message STRING,
-            duration_ms BIGINT,
-            emitted_at TIMESTAMP
-        ) USING DELTA
-        """,
-
-        # ----- Uploaded files -----------------------------------------------------
-        f"""
-        CREATE TABLE IF NOT EXISTS {CATALOG}.{SCHEMA}.uploaded_files (
-            run_id STRING NOT NULL,
-            filename STRING NOT NULL,
-            volume_path STRING,
-            mime_type STRING,
-            size_bytes BIGINT,
-            validation_status STRING,
-            validation_notes STRING,
-            uploaded_at TIMESTAMP
-        ) USING DELTA
-        """,
-
-        # ----- LLM call audit trail -----------------------------------------------
-        f"""
-        CREATE TABLE IF NOT EXISTS {CATALOG}.{SCHEMA}.llm_calls (
-            call_id STRING NOT NULL,
-            run_id STRING,
-            node STRING,
-            model STRING,
-            temperature DOUBLE,
-            prompt STRING,
-            response STRING,
-            input_tokens INT,
-            output_tokens INT,
-            latency_ms BIGINT,
-            error STRING,
-            cached BOOLEAN,
-            called_at TIMESTAMP
-        ) USING DELTA
-        """,
-
-        # ----- Evaluation results -------------------------------------------------
-        f"""
-        CREATE TABLE IF NOT EXISTS {CATALOG}.{SCHEMA}.evaluation_runs (
-            eval_id STRING NOT NULL,
-            skill_id STRING,
-            node STRING,
-            model STRING,
-            prompt_version STRING,
-            surface STRING,
-            metric STRING,
-            value DOUBLE,
-            mlflow_run_id STRING,
-            evaluated_at TIMESTAMP
-        ) USING DELTA
-        """,
-
-        # ----- Golden examples for Surface 4 --------------------------------------
-        f"""
-        CREATE TABLE IF NOT EXISTS {CATALOG}.{SCHEMA}.golden_examples (
-            example_id STRING NOT NULL,
-            skill_id STRING,
-            node STRING,
-            inputs_json STRING,
-            reference_output STRING,
-            rubric_json STRING,
-            version INT,
-            created_at TIMESTAMP
-        ) USING DELTA
-        """,
+        f"CREATE VOLUME IF NOT EXISTS {catalog}.{schema}.{volume.rstrip('/').split('/')[-1]}",
     ]
 
 
@@ -192,28 +65,34 @@ def build_ddl_statements(catalog: str, schema: str, volume: str) -> list[str]:
 _WAREHOUSE_AUTO_STOP_MINS = 1
 
 
-def _ensure_warehouse_auto_stop(w: "WorkspaceClient", warehouse_id: str) -> None:
+def _ensure_warehouse_ready(w: "WorkspaceClient", warehouse_id: str) -> str:
     """Idempotently sets this warehouse's auto_stop_mins to
     _WAREHOUSE_AUTO_STOP_MINS -- a no-op API call if it is already set (never
     calls .edit() when the current value already matches, so a repeat run of
-    this bootstrap never resets an unrelated in-flight query's warehouse)."""
+    this bootstrap never resets an unrelated in-flight query's warehouse).
+    Returns the warehouse's own http_path, read back from the platform
+    rather than guessed (same pattern as scripts/deploy_app.py's
+    _resolve_warehouse), which DeltaPersistence needs to connect."""
     current = w.warehouses.get(warehouse_id)
     if current.auto_stop_mins == _WAREHOUSE_AUTO_STOP_MINS:
         print(f"  auto_stop_mins already {_WAREHOUSE_AUTO_STOP_MINS} on {current.name} ({warehouse_id})")
-        return
-    print(
-        f"  setting auto_stop_mins {current.auto_stop_mins} -> {_WAREHOUSE_AUTO_STOP_MINS} "
-        f"on {current.name} ({warehouse_id})"
-    )
-    w.warehouses.edit(
-        id=warehouse_id,
-        name=current.name,
-        cluster_size=current.cluster_size,
-        auto_stop_mins=_WAREHOUSE_AUTO_STOP_MINS,
-        min_num_clusters=current.min_num_clusters,
-        max_num_clusters=current.max_num_clusters,
-        enable_serverless_compute=current.enable_serverless_compute,
-    )
+    else:
+        print(
+            f"  setting auto_stop_mins {current.auto_stop_mins} -> {_WAREHOUSE_AUTO_STOP_MINS} "
+            f"on {current.name} ({warehouse_id})"
+        )
+        w.warehouses.edit(
+            id=warehouse_id,
+            name=current.name,
+            cluster_size=current.cluster_size,
+            auto_stop_mins=_WAREHOUSE_AUTO_STOP_MINS,
+            min_num_clusters=current.min_num_clusters,
+            max_num_clusters=current.max_num_clusters,
+            enable_serverless_compute=current.enable_serverless_compute,
+        )
+    if current.odbc_params is None or not current.odbc_params.path:
+        raise SystemExit(f"ERROR: warehouse {warehouse_id!r} has no resolvable http_path.")
+    return current.odbc_params.path
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -261,10 +140,10 @@ def main(argv: list[str] | None = None) -> int:
         warehouse_id = warehouses[0].id
         print(f"Using warehouse: {warehouses[0].name} ({warehouse_id})")
 
-    _ensure_warehouse_auto_stop(w, warehouse_id)
+    warehouse_http_path = _ensure_warehouse_ready(w, warehouse_id)
 
     print(f"Bootstrapping {catalog}.{schema} ...")
-    for stmt in build_ddl_statements(catalog, schema, volume):
+    for stmt in build_bootstrap_statements(catalog, schema, volume):
         clean = " ".join(stmt.split())
         print(f"  -> {clean[:80]}...")
         w.statement_execution.execute_statement(
@@ -272,6 +151,27 @@ def main(argv: list[str] | None = None) -> int:
             statement=stmt,
             wait_timeout="30s",
         )
+
+    from orchestrator.adapters.persistence_delta import DeltaPersistence
+    from orchestrator.config import load_settings
+
+    settings = load_settings()
+    settings = dataclasses.replace(
+        settings,
+        catalog=catalog,
+        schema=schema,
+        volume=volume,
+        warehouse_http_path=warehouse_http_path,
+        host=settings.host or os.environ.get("DATABRICKS_HOST"),
+    )
+
+    print("Applying Delta migrations (orchestrator/ddl/delta) ...")
+    persistence = DeltaPersistence(settings)
+    applied = persistence.migrate()
+    if applied:
+        print(f"  applied: {', '.join(applied)}")
+    else:
+        print("  already up to date -- no pending migrations")
 
     print("\n[OK] Workspace bootstrap complete.")
     print(f"     Catalog:  {catalog}")
