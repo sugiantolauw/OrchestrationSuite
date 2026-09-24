@@ -18,9 +18,13 @@ Rebuilds reference_app/src/pptx_export.py's six defects (CLAUDE.md §4.7):
      prose) -- autofit alone is a PowerPoint-render-time behaviour this
      process cannot verify before shipping the file; the character budget
      is a hard, testable guarantee.
-  3. The executive summary is written prose (deterministic template, not an
-     LLM yet -- CLAUDE.md §11 "narrative generation not yet enabled" -- and
-     the slide says so), not bare counts.
+  3. The executive summary is written prose. Since P6 WP N11
+     (docs/specs/P6_narration_design.md §9) it is this run's own reviewed
+     `exec_summary` narrative when narration produced one, rendered through
+     `orchestrator.narration.resolve.effective_prose` -- falling back to
+     `resolve.deterministic_exec_summary_paragraphs` (the SAME three
+     paragraphs this module used to build inline) with an exact NN13 label
+     when it did not. Not bare counts either way.
   4. The headline figure is `run_exposure_headline` (CLAUDE.md independent
      review 2026-09-24 item 1's "amount at risk"), read from `metrics`,
      never recomputed by summing findings' own (deliberately overlapping)
@@ -51,6 +55,7 @@ from pptx.util import Inches, Pt
 
 from orchestrator.catalogue_counts import catalogue_id_for, combined_status, results_for
 from orchestrator.findings import format_metric_value
+from orchestrator.narration import resolve as narration_resolve
 from orchestrator.signoff_policy import SELF_APPROVED_LABEL
 from orchestrator.state import RunState
 
@@ -324,43 +329,32 @@ def _build_cover(prs, state: RunState, skill_manifest: dict, data_mode: str, now
     _footer(slide, run_id=state.run_id, generated_at=now, color=WHITE)
 
 
-def _build_exec_summary(prs, state: RunState, findings: list[dict], metrics: dict, n_tests: int, now: str):
+def _build_exec_summary(
+    prs, state: RunState, findings: list[dict], metrics: dict, n_tests: int, now: str, narration: dict,
+):
     slide = _new_slide(prs, LY_TITLE_ONLY, "Executive Summary")
-    _textbox(slide, CONTENT_LEFT, 0.85, CONTENT_W, 0.3,
-             "Automated summary — narrative generation not yet enabled",
-             size=10, bold=True, color=GREY)
 
-    n_high = sum(1 for f in findings if f.get("severity") == "High")
-    n_med = sum(1 for f in findings if f.get("severity") == "Medium")
-    n_low = sum(1 for f in findings if f.get("severity") == "Low")
+    # P6 WP N11 (docs/specs/P6_narration_design.md §9): this run's own
+    # reviewed `exec_summary` narrative, already resolved by
+    # `orchestrator.nodes.fieldwork._build_export_narration` -- `None` means
+    # no model text was accepted (narration off, unavailable or invalid),
+    # in which case this falls back to the SAME deterministic three
+    # paragraphs the module used to build inline, now the one shared
+    # implementation (`resolve.deterministic_exec_summary_paragraphs`) so
+    # this copy and `resolve.py`'s own copy can never drift apart.
+    paragraphs = narration.get("exec_summary_paragraphs")
+    label = narration.get("exec_summary_label") or narration_resolve.LABEL_LLM_UNAVAILABLE
+    if not paragraphs:
+        paragraphs = narration_resolve.deterministic_exec_summary_paragraphs(state, findings, metrics, n_tests)
+
+    _textbox(slide, CONTENT_LEFT, 0.85, CONTENT_W, 0.4, label, size=10, bold=True, color=GREY)
+
     headline_metric = metrics.get("run_exposure_headline")
     headline_value = headline_metric["value"] if headline_metric else None
 
-    if findings:
-        p1 = (
-            f"This run assessed {n_tests} deterministic test(s) over the "
-            f"{state.audit_period[0]} to {state.audit_period[1]} audit period and raised "
-            f"{len(findings)} finding(s): {n_high} High, {n_med} Medium, {n_low} Low."
-        )
-    else:
-        p1 = (
-            f"This run assessed the {state.audit_period[0]} to {state.audit_period[1]} audit "
-            f"period and raised no findings — every deterministic test passed or was not testable."
-        )
-    p2 = (
-        f"Potential exposure — the amount at risk across every distinct flagged transaction line, "
-        f"counted once — is {_money0(headline_value)}. This figure never sums individual findings' "
-        f"own cited exposure amounts, which by design overlap."
-    )
-    p3 = (
-        "Every number in this deck comes from this run's own persisted results — none is "
-        "recomputed by the export step. See Methodology & limitations for reconciliation, "
-        "threshold provenance and not-testable tests."
-    )
-
-    tf = _textbox(slide, CONTENT_LEFT, 1.35, CONTENT_W * 0.62, 3.6, p1, size=13, color=BODY_TEXT)
-    _add_para(tf, p2, size=13, color=BODY_TEXT, space_before=12)
-    _add_para(tf, p3, size=13, color=BODY_TEXT, space_before=12)
+    tf = _textbox(slide, CONTENT_LEFT, 1.35, CONTENT_W * 0.62, 3.6, paragraphs[0], size=13, color=BODY_TEXT)
+    for p in paragraphs[1:]:
+        _add_para(tf, p, size=13, color=BODY_TEXT, space_before=12)
 
     callout_left = CONTENT_LEFT + CONTENT_W * 0.66
     callout_w = CONTENT_W * 0.34
@@ -376,27 +370,63 @@ def _build_exec_summary(prs, state: RunState, findings: list[dict], metrics: dic
     _footer(slide, run_id=state.run_id, generated_at=now)
 
 
-def _build_what_we_found(prs, findings: list[dict], catalogue_rows: list[dict], state: RunState, now: str):
+def _build_what_we_found(
+    prs, findings: list[dict], catalogue_rows: list[dict], state: RunState, now: str, narration: dict,
+):
     slide = _new_slide(prs, LY_TITLE_ONLY, "What We Found")
-    _textbox(slide, CONTENT_LEFT, 0.85, CONTENT_W, 0.3,
-             "Findings grouped by test category / control area — a fixed categorisation, not a "
-             "generated theme.",
-             size=10, color=GREY)
 
-    catalogue_ids = {t["test_id"] for t in catalogue_rows if t.get("test_id")}
-    category_by_id = {t["test_id"]: t.get("category", "Uncategorised") for t in catalogue_rows}
+    # P6 WP N11 (§9): this run's own confirmed synthesis themes (already
+    # resolved -- rendered title/summary/root-cause, member findings --
+    # replace the fixed catalogue-category grouping below when there are
+    # any; a `themes_label` is set ONLY on the fallback path (§9's own
+    # table: "today's catalogue grouping, WITH THE LABEL"), never when real
+    # themes are shown.
+    themes = narration.get("themes") or []
+    accepted_ai = narration.get("accepted_ai_findings") or []
+    themes_label = narration.get("themes_label")
 
-    groups: dict[str, list[dict]] = {}
-    for f in findings:
-        cat_id = catalogue_id_for(f.get("test_id") or "", catalogue_ids)
-        category = category_by_id.get(cat_id, "Uncategorised")
-        groups.setdefault(category, []).append(f)
+    if themes:
+        subtitle = "Findings grouped into themes identified from this run's own results."
+    else:
+        subtitle = (
+            "Findings grouped by test category / control area — a fixed categorisation, not a "
+            "generated theme."
+        )
+    if themes_label:
+        subtitle = f"{subtitle}  ·  {themes_label}"
+    _textbox(slide, CONTENT_LEFT, 0.85, CONTENT_W, 0.4, subtitle, size=10, color=GREY)
 
     tf = None
-    if not groups:
-        tf = _textbox(slide, CONTENT_LEFT, 1.3, CONTENT_W, 4.5, "No control exceptions found in this run.",
-                       size=14, color=BODY_TEXT)
-    else:
+
+    def _member_line(m: dict) -> str:
+        return f"  •  [{m.get('severity', '—')}] {m.get('title', '—')}"
+
+    if themes:
+        for theme in themes:
+            header = theme["title"]
+            if tf is None:
+                tf = _textbox(slide, CONTENT_LEFT, 1.3, CONTENT_W, 4.5, header, size=13, bold=True, color=TEAL)
+            else:
+                _add_para(tf, header, size=13, bold=True, color=TEAL, space_before=12)
+            _add_para(tf, theme["summary"], size=11, color=BODY_TEXT, space_before=3)
+            root_cause = theme.get("root_cause")
+            if root_cause:
+                _add_para(
+                    tf, f"Root-cause hypothesis (for discussion): {root_cause}", size=9.5, color=GREY,
+                    space_before=3,
+                )
+            for m in theme["members"]:
+                _add_para(tf, _member_line(m), size=10.5, color=BODY_TEXT, space_before=2)
+    elif findings:
+        catalogue_ids = {t["test_id"] for t in catalogue_rows if t.get("test_id")}
+        category_by_id = {t["test_id"]: t.get("category", "Uncategorised") for t in catalogue_rows}
+        groups: dict[str, list[dict]] = {}
+        for f in findings:
+            if f.get("origin") == "ai_proposed":
+                continue  # shown in the fixed AI-proposed block below, never inside a rule-test category
+            cat_id = catalogue_id_for(f.get("test_id") or "", catalogue_ids)
+            category = category_by_id.get(cat_id, "Uncategorised")
+            groups.setdefault(category, []).append(f)
         for category in sorted(groups):
             items = groups[category]
             n_high = sum(1 for f in items if f.get("severity") == "High")
@@ -406,8 +436,20 @@ def _build_what_we_found(prs, findings: list[dict], catalogue_rows: list[dict], 
             else:
                 _add_para(tf, header, size=13, bold=True, color=TEAL, space_before=12)
             for f in items:
-                _add_para(tf, f"  •  [{f.get('severity', '—')}] {f.get('title', '—')}", size=11.5,
-                          color=BODY_TEXT, space_before=3)
+                _add_para(tf, _member_line(f), size=11.5, color=BODY_TEXT, space_before=3)
+
+    if accepted_ai:
+        header = "Additional matters proposed by AI review and accepted by the auditor"
+        if tf is None:
+            tf = _textbox(slide, CONTENT_LEFT, 1.3, CONTENT_W, 4.5, header, size=13, bold=True, color=TEAL)
+        else:
+            _add_para(tf, header, size=13, bold=True, color=TEAL, space_before=12)
+        for f in accepted_ai:
+            _add_para(tf, _member_line(f), size=11.5, color=BODY_TEXT, space_before=3)
+
+    if tf is None:
+        tf = _textbox(slide, CONTENT_LEFT, 1.3, CONTENT_W, 4.5, "No control exceptions found in this run.",
+                       size=14, color=BODY_TEXT)
     _footer(slide, run_id=state.run_id, generated_at=now)
 
 
@@ -452,6 +494,12 @@ def _build_top_matter(prs, finding: dict, metrics: dict, state: RunState, now: s
         chip_parts.append(f"Exposure: — ({finding.get('exposure_basis', 'non-monetary finding')})")
     if finding.get("analyst_set_severity"):
         chip_parts.append("analyst-set threshold, pending policy confirmation")
+    # P6 WP N11 (§9): "An accepted candidate carries its label line" -- the
+    # ONLY per-finding label a Top Matters slide shows (never the run-level
+    # degraded label, §7 UI-7); `prose_label` is unset for every rule
+    # finding regardless of narration status.
+    if finding.get("prose_label"):
+        chip_parts.append(finding["prose_label"])
     _textbox(slide, CONTENT_LEFT + 1.3, 1.12, 7.5, 0.3, "  ·  ".join(chip_parts), size=10, color=GREY)
 
     _section_label(slide, CONTENT_LEFT, 1.65, "OBSERVATION")
@@ -493,7 +541,12 @@ def _build_top_matter(prs, finding: dict, metrics: dict, state: RunState, now: s
     _footer(slide, run_id=state.run_id, generated_at=now)
 
 
-def _build_risk_and_exposure(prs, findings: list[dict], metrics: dict, state: RunState, now: str):
+_RISK_CHART_CAPTION_MAX_CHARS = 200
+
+
+def _build_risk_and_exposure(
+    prs, findings: list[dict], metrics: dict, state: RunState, now: str, narration: dict,
+):
     slide = _new_slide(prs, LY_TITLE_ONLY, "Risk and Exposure")
     n_high = sum(1 for f in findings if f.get("severity") == "High")
     n_med = sum(1 for f in findings if f.get("severity") == "Medium")
@@ -520,6 +573,16 @@ def _build_risk_and_exposure(prs, findings: list[dict], metrics: dict, state: Ru
         pt.format.fill.fore_color.rgb = color
     chart.category_axis.tick_labels.font.size = Pt(11)
     chart.value_axis.has_major_gridlines = False
+
+    # P6 WP N11 (§9): one narrated caption under the chart, ≤200 characters
+    # (`_ellipsize` is the same measured-truncation guarantee every other
+    # unbounded field in this module uses, defect 2) -- no caption at all on
+    # the fallback path (§9's own table: "Fallback: no caption"), never a
+    # placeholder line.
+    caption = narration.get("risk_chart_caption")
+    if caption:
+        _textbox(slide, CONTENT_LEFT, 6.55, 6.0, 0.5, _ellipsize(caption, _RISK_CHART_CAPTION_MAX_CHARS),
+                 size=9.5, color=GREY)
 
     headline_metric = metrics.get("run_exposure_headline")
     headline_value = headline_metric["value"] if headline_metric else None
@@ -741,12 +804,27 @@ def generate_pptx(
     data_mode: str,
     template_path: str | Path,
     now: str,
+    narration: dict | None = None,
 ) -> bytes:
     """Builds the full PPTX audit pack and returns bytes. `skill` is the
     Skill this run used (orchestrator.skills.Skill) -- its `manifest` and
     `thresholds` feed the cover and methodology slides; `catalogue_rows` is
     that Skill's own catalogue.yaml (`load_catalogue_rows`), static per
-    Skill, never per-run data."""
+    Skill, never per-run data. `findings` is already this run's own EFFECTIVE
+    finding set -- `orchestrator.nodes.fieldwork._build_export_narration`
+    (P6 WP N11, docs/specs/P6_narration_design.md §9) resolves every
+    observation/recommendation/management_questions through
+    `orchestrator.narration.resolve.effective_prose` before calling this
+    function, so every slide below that reads `finding.get('observation')`
+    etc. needs no narration-awareness of its own. `narration` carries
+    everything ELSE this run's own reviewed narration supplies: the exec
+    summary paragraphs and its label, confirmed themes (falling back to the
+    fixed catalogue grouping when there are none), accepted AI-proposed
+    findings, and the one chart caption. `None` (no caller outside
+    `orchestrator.nodes.fieldwork.export` passes it) degrades to "nothing
+    narrated" -- every slide below still renders its own reviewed
+    deterministic fallback, labelled."""
+    narration = narration or {}
     template_path = Path(template_path)
     if not template_path.is_file():
         raise FileNotFoundError(
@@ -771,8 +849,8 @@ def generate_pptx(
     n_catalogue_tests = len(catalogue_rows)
 
     _build_cover(prs, state, skill.manifest, data_mode, now)
-    _build_exec_summary(prs, state, findings, metrics, n_catalogue_tests, now)
-    _build_what_we_found(prs, findings, catalogue_rows, state, now)
+    _build_exec_summary(prs, state, findings, metrics, n_catalogue_tests, now, narration)
+    _build_what_we_found(prs, findings, catalogue_rows, state, now, narration)
 
     if not findings:
         _build_no_findings(prs, state, now)
@@ -781,7 +859,7 @@ def generate_pptx(
         for rank, f in enumerate(top, start=1):
             _build_top_matter(prs, f, metrics, state, now, rank, len(top))
 
-    _build_risk_and_exposure(prs, findings, metrics, state, now)
+    _build_risk_and_exposure(prs, findings, metrics, state, now, narration)
     _build_all_findings_appendix(prs, findings, state, now)
     _build_test_coverage(prs, catalogue_rows, state, now)
     _build_methodology(prs, state, metrics, skill, catalogue_rows, now)

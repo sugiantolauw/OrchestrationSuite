@@ -50,7 +50,8 @@ from orchestrator.frames import build_row_snapshots, frame_parquet_bytes, sha256
 from orchestrator.llm.gateway import CallContext
 from orchestrator.llm.tasks import TASK_PROFILES
 from orchestrator.narration import resolve as narration_resolve
-from orchestrator.narration.payloads import build_finding_table
+from orchestrator.narration.payloads import build_finding_table, build_theme_table
+from orchestrator.narration.run_values import run_values as narration_run_values
 from orchestrator.nodes.context import NodeContext
 from orchestrator.nodes.narration import finalise, narrate
 from orchestrator.populations import PopulationContext, build_populations
@@ -1122,10 +1123,223 @@ def _require_severity_provenance(f: dict) -> tuple[bool, str]:
     return analyst_set, basis
 
 
+# ── P6 WP N11 (docs/specs/P6_narration_design.md §9): the export narration
+# bundle, resolved ONCE and shared by both exporters (PPTX -- generate_pptx
+# -- and XLSX -- _write_xlsx_workpaper), so a paragraph reads identically on
+# both artefacts (G13). Built here, not in orchestrator/pptx_export.py:
+# orchestrator/narration/payloads.py itself imports pptx_export.py (for
+# load_catalogue_rows), so pptx_export.py importing payloads.py back would
+# be a circular import -- this module already imports both, so resolution
+# happens here and only fully-rendered plain text/labels/dicts cross into
+# either exporter (§6.4's own resolver, never a raw `{class:name}` span).
+_NARRATIVE_TEXT_ORIGINS = ("model", "model_repaired", "human_edit")
+
+
+def _narrative_sheet_row(*, target_kind: str, target_id: str, field: str, resolved: dict) -> dict:
+    numbers_from = ", ".join(sorted({s["source_field"] for s in (resolved.get("sources") or [])}))
+    text = resolved.get("text")
+    if isinstance(text, list):
+        text = " || ".join(text)
+    return {
+        "target_kind": target_kind, "target_id": target_id, "field": field,
+        "status": resolved.get("status") or "fallback_unavailable", "label": resolved.get("label") or "",
+        "text": text, "numbers_from": numbers_from,
+    }
+
+
+def _build_export_narration(ctx: NodeContext, state: RunState, findings: list[dict], metrics: dict[str, dict]) -> dict:
+    """Resolves every model-written field this export needs, once: rule
+    findings' own observation/recommendation/management_questions
+    (`effective_prose` over `target_kind='finding'`, unchanged for an
+    accepted AI-proposed finding, whose text `finalise` already rendered and
+    froze at acceptance -- §5.2's own note that a candidate has no separate
+    'finding'-kind narrative row), this generation's confirmed themes (never
+    a superseded or prior-generation row), the exec summary and the one
+    chart caption the deck renders, plus a flat `narrative_rows` list for
+    the XLSX Narrative sheet (§9) -- rejected/superseded/undecided candidate
+    rows are never read back into it (§14 Q10: "rejected candidates ...
+    excluded from all exports")."""
+    skill = ctx.skill
+    period = tuple(state.audit_period) if state.audit_period else None
+    generation = int((state.options or {}).get("narration_generation", 0) or 0)
+    all_narratives = ctx.persistence.get_narratives(state.run_id)
+    narratives_by_target = {(r["target_kind"], r["target_id"], r["field"]): r for r in all_narratives}
+    versions = ((state.signoff or {}).get("narration") or {}).get("narrative_versions")
+    candidates_by_id = {c["candidate_id"]: c for c in ctx.persistence.list_candidates(state.run_id)}
+    findings_by_id = {f["finding_id"]: f for f in findings}
+
+    resolved_findings: list[dict] = []
+    narrative_rows: list[dict] = []
+
+    for f in findings:
+        if f.get("origin") == "ai_proposed":
+            # §5.2: an accepted candidate's observation/recommendation/
+            # management_questions were already rendered and frozen by
+            # `finalise` at acceptance time -- no 'finding'-kind narrative
+            # row exists to re-resolve here. Its own 'candidate'-kind rows
+            # still exist (for the Narrative sheet, below) and are read
+            # back through the SAME candidate metrics table `finalise`
+            # itself used (§5.1's exposure table), never a raw metric name.
+            label = narration_resolve.accepted_candidate_label(f.get("accepted_by") or "—")
+            resolved_findings.append({**f, "prose_label": label, "narration_status": "ai_proposed_accepted"})
+            candidate = candidates_by_id.get(f.get("candidate_id"))
+            if candidate is not None:
+                cand_table = narration_resolve.metrics_placeholder_table(candidate.get("metrics_cited") or [], metrics)
+                for field_name, is_list in (("observation", False), ("recommendation", False), ("management_questions", True)):
+                    row = narratives_by_target.get(("candidate", candidate["candidate_id"], field_name))
+                    if row is None:
+                        continue
+                    resolved = narration_resolve.effective_prose(
+                        target_kind="candidate", target_id=candidate["candidate_id"], field=field_name,
+                        narratives_by_target=narratives_by_target, table=cand_table, fallback_text=None,
+                        is_list=is_list, versions=versions, accepted_label=label,
+                    )
+                    narrative_rows.append(
+                        _narrative_sheet_row(target_kind="finding", target_id=f["finding_id"], field=field_name, resolved=resolved)
+                    )
+            continue
+
+        table = build_finding_table(f, skill=skill, period=period)
+        field_results: dict[str, dict] = {}
+        for field_name, fallback, is_list in (
+            ("observation", f.get("observation"), False),
+            ("recommendation", f.get("recommendation"), False),
+            ("management_questions", f.get("management_questions") or [], True),
+        ):
+            resolved = narration_resolve.effective_prose(
+                target_kind="finding", target_id=f["finding_id"], field=field_name,
+                narratives_by_target=narratives_by_target, table=table, fallback_text=fallback,
+                is_list=is_list, versions=versions,
+            )
+            field_results[field_name] = resolved
+            narrative_rows.append(
+                _narrative_sheet_row(target_kind="finding", target_id=f["finding_id"], field=field_name, resolved=resolved)
+            )
+        resolved_findings.append({
+            **f,
+            "observation": field_results["observation"]["text"],
+            "recommendation": field_results["recommendation"]["text"],
+            "management_questions": field_results["management_questions"]["text"] or [],
+            # §9's own PPTX table: only an accepted candidate (above) and the
+            # analyst-set-threshold chip (already rendered by pptx_export.py
+            # itself) carry a label on a Top Matters slide -- a rule
+            # finding's own fallback/degraded status is a RUN-level label
+            # (exec summary / What we found / XLSX run metadata), never
+            # repeated per finding (§7 UI-7).
+            "prose_label": None,
+            "observation_status": field_results["observation"]["status"],
+            "recommendation_status": field_results["recommendation"]["status"],
+            "management_questions_status": field_results["management_questions"]["status"],
+        })
+
+    themes_rows = [
+        t for t in ctx.persistence.list_themes(state.run_id)
+        if t.get("generation") == generation and not t.get("superseded")
+    ]
+    theme_blocks: list[dict] = []
+    for theme in themes_rows:
+        members = [findings_by_id[fid] for fid in theme.get("finding_ids", []) if fid in findings_by_id]
+        theme_table = build_theme_table(members, skill=skill)
+        title = narration_resolve.effective_prose(
+            target_kind="theme", target_id=theme["theme_id"], field="title",
+            narratives_by_target=narratives_by_target, table=theme_table, fallback_text=None, versions=versions,
+        )
+        summary = narration_resolve.effective_prose(
+            target_kind="theme", target_id=theme["theme_id"], field="summary",
+            narratives_by_target=narratives_by_target, table=theme_table, fallback_text=None, versions=versions,
+        )
+        root_cause = narration_resolve.effective_prose(
+            target_kind="theme", target_id=theme["theme_id"], field="root_cause",
+            narratives_by_target=narratives_by_target, table=theme_table, fallback_text=None, versions=versions,
+        )
+        if title["text"] is None or summary["text"] is None:
+            # A theme row this run's `narrate` wrote (finding_ids etc.) but
+            # whose own title/summary narrative never validated (§3.5's own
+            # per-FIELD fallback, never a whole-theme one) has nothing
+            # reviewed to show -- CLAUDE.md NN14, never a blank block.
+            continue
+        theme_blocks.append({
+            "theme_id": theme["theme_id"], "title": title["text"], "summary": summary["text"],
+            "root_cause": root_cause["text"],
+            "members": [{"severity": m.get("severity"), "title": m.get("title")} for m in members],
+        })
+        for field_name, resolved in (("title", title), ("summary", summary), ("root_cause", root_cause)):
+            if resolved["text"] is None:
+                continue
+            narrative_rows.append(
+                _narrative_sheet_row(target_kind="theme", target_id=theme["theme_id"], field=field_name, resolved=resolved)
+            )
+
+    # The one bookkeeping row `narrate_synthesis` persists on a fallback
+    # (no confirmed themes at all, §3.5: "synthesis -> no themes"): a
+    # `theme`/'run'/'summary' row whose own origin/label carries the reason
+    # (narration off, unavailable or invalid) -- probed the same way any
+    # other field is, never a private re-implementation of the fallback-label
+    # rule (`resolve._FALLBACK_LABELS`).
+    themes_probe = narration_resolve.effective_prose(
+        target_kind="theme", target_id="run", field="summary",
+        narratives_by_target=narratives_by_target, table={}, fallback_text=None, versions=None,
+    )
+    themes_label = None if theme_blocks else themes_probe["label"]
+
+    run_table = narration_run_values(state, findings, metrics)
+    exec_resolved = narration_resolve.effective_prose(
+        target_kind="run", target_id="run", field="exec_summary",
+        narratives_by_target=narratives_by_target, table=run_table, fallback_text=None,
+        is_list=True, versions=versions,
+    )
+    if exec_resolved["status"] in _NARRATIVE_TEXT_ORIGINS:
+        approver = (state.signoff or {}).get("approver") or "—"
+        exec_summary_label = (
+            f"Model-written summary, reviewed at sign-off by {approver}; "
+            f"every number inserted from this run's results"
+        )
+    else:
+        exec_summary_label = exec_resolved["label"]
+    narrative_rows.append(
+        _narrative_sheet_row(target_kind="run", target_id="run", field="exec_summary", resolved=exec_resolved)
+    )
+
+    caption_table = narration_resolve.metrics_placeholder_table(["run_exposure_headline"], metrics)
+    caption_resolved = narration_resolve.effective_prose(
+        target_kind="chart", target_id="risk_and_exposure", field="caption",
+        narratives_by_target=narratives_by_target, table=caption_table, fallback_text=None, versions=versions,
+    )
+    if caption_resolved["text"]:
+        narrative_rows.append(
+            _narrative_sheet_row(target_kind="chart", target_id="risk_and_exposure", field="caption", resolved=caption_resolved)
+        )
+
+    served_model_versions = sorted({n["served_model_version"] for n in all_narratives if n.get("served_model_version")})
+    accepted_ai_findings = [f for f in resolved_findings if f.get("origin") == "ai_proposed"]
+
+    return {
+        "findings": resolved_findings,
+        "themes": theme_blocks,
+        "themes_label": themes_label,
+        "accepted_ai_findings": accepted_ai_findings,
+        "exec_summary_paragraphs": exec_resolved["text"],
+        "exec_summary_label": exec_summary_label,
+        "risk_chart_caption": caption_resolved["text"],
+        "generation": generation,
+        "served_model_versions": served_model_versions,
+        "narrative_rows": narrative_rows,
+    }
+
+
 def _write_xlsx_workpaper(
     state: RunState, findings: list[dict], metrics: dict[str, dict], flagged_rows: list[dict], now: str,
-    ticket_previews: list[dict] | None = None,
+    ticket_previews: list[dict] | None = None, narration: dict | None = None,
 ) -> bytes:
+    # P6 WP N11: `findings` here is already the export narration bundle's
+    # OWN resolved list (its observation/recommendation/management_questions
+    # are effective text, never a raw findings.yaml template when narration
+    # produced something reviewed) -- `narration` (§9) supplies everything
+    # ELSE this sheet set needs: the run-level generation/served-model
+    # metadata and the flat Narrative-sheet rows. `None` (no caller passes
+    # it today outside `export()`) degrades to "no narration to report" --
+    # every new column/sheet below still writes, just with nothing to show.
+    narration = narration or {}
     buf = io.BytesIO()
     wb = xlsxwriter.Workbook(buf, {"in_memory": True})
     bold = wb.add_format({"bold": True})
@@ -1154,6 +1368,16 @@ def _write_xlsx_workpaper(
         cover_fields.append(("signed_off_at", signoff.get("timestamp")))
         if signoff.get("self_approved"):
             cover_fields.append(("signoff_note", SELF_APPROVED_LABEL))
+    # P6 WP N11 (§9 "run metadata gains the narration generation, the served
+    # model versions, and the count of accepted AI-proposed findings"):
+    # additive only, so a run that never touched narration (the field
+    # defaults/omissions above) writes the same three rows with honest
+    # empty values, never a fabricated "0 generation(s)".
+    cover_fields.append(("narration_generation", narration.get("generation")))
+    served_model_versions = narration.get("served_model_versions") or []
+    cover_fields.append(("narration_served_model_versions", ", ".join(served_model_versions) or "—"))
+    accepted_ai_count = sum(1 for f in findings if f.get("origin") == "ai_proposed")
+    cover_fields.append(("ai_proposed_findings_accepted", accepted_ai_count))
     for r, (label, value) in enumerate(cover_fields, start=1):
         _write_str(cover, r, 0, label, bold)
         _write_str(cover, r, 1, value)
@@ -1163,6 +1387,13 @@ def _write_xlsx_workpaper(
     headers = [
         "finding_id", "rule_id", "test_id", "severity", "analyst_set_severity", "severity_basis",
         "title", "observation", "recommendation", "exposure_amount", "exposure_basis", "review_state",
+        # P6 WP N11 (§9): origin/accepted_by/proposed-vs-decided severity,
+        # and each prose field's own resolved status (model/model_repaired/
+        # human_edit/fallback_invalid/fallback_unavailable, or
+        # 'ai_proposed_accepted' for a candidate whose text `finalise`
+        # already froze at acceptance, §5.2).
+        "origin", "accepted_by", "proposed_severity", "decided_severity",
+        "observation_status", "recommendation_status", "management_questions_status",
     ]
     ws.write_row(0, 0, headers, bold)
     for r, f in enumerate(findings, start=1):
@@ -1190,6 +1421,23 @@ def _write_xlsx_workpaper(
             ws.write_number(r, 9, exposure_amount, money)
         _write_str(ws, r, 10, f.get("exposure_basis"))
         _write_str(ws, r, 11, f.get("review_state"))
+        origin = f.get("origin") or "rule"
+        _write_str(ws, r, 12, origin)
+        _write_str(ws, r, 13, f.get("accepted_by"))
+        _write_str(ws, r, 14, f.get("proposed_severity"))
+        _write_str(ws, r, 15, f["severity"] if origin == "ai_proposed" else "")
+        if origin == "ai_proposed":
+            # A finding this frozen at acceptance (§5.2) has no per-field
+            # narration status of its own -- the SAME single
+            # 'ai_proposed_accepted' status for all three, never a
+            # fabricated model/fallback status it never actually had.
+            _write_str(ws, r, 16, "ai_proposed_accepted")
+            _write_str(ws, r, 17, "ai_proposed_accepted")
+            _write_str(ws, r, 18, "ai_proposed_accepted")
+        else:
+            _write_str(ws, r, 16, f.get("observation_status"))
+            _write_str(ws, r, 17, f.get("recommendation_status"))
+            _write_str(ws, r, 18, f.get("management_questions_status"))
     _write_str(ws, len(findings) + 2, 0, footer)
 
     ws2 = wb.add_worksheet("Metrics")
@@ -1286,6 +1534,25 @@ def _write_xlsx_workpaper(
             _write_str(ws6, r, 4, t["status"])
         _write_str(ws6, len(ticket_previews) + 2, 0, footer)
 
+    # P6 WP N11 (§9): "a Narrative sheet listing every paragraph with its
+    # status, label and the RunState fields that supplied its numbers
+    # (NN12)" -- `narration["narrative_rows"]` (built once by
+    # `_build_export_narration`, shared with the PPTX) already excludes a
+    # rejected/superseded/undecided candidate's own rows entirely (§14 Q10),
+    # so this sheet writes exactly what it is handed, in the same order.
+    narrative_rows = narration.get("narrative_rows") or []
+    ws7 = wb.add_worksheet("Narrative")
+    ws7.write_row(0, 0, ["target_kind", "target_id", "field", "status", "label", "text", "numbers_from"], bold)
+    for r, row in enumerate(narrative_rows, start=1):
+        _write_str(ws7, r, 0, row["target_kind"])
+        _write_str(ws7, r, 1, row["target_id"])
+        _write_str(ws7, r, 2, row["field"])
+        _write_str(ws7, r, 3, row["status"])
+        _write_str(ws7, r, 4, row["label"])
+        _write_str(ws7, r, 5, row["text"])
+        _write_str(ws7, r, 6, row["numbers_from"])
+    _write_str(ws7, len(narrative_rows) + 2, 0, footer)
+
     wb.close()
     return buf.getvalue()
 
@@ -1312,7 +1579,17 @@ def export(ctx: NodeContext, state: RunState) -> RunState:
     if state.options.get("jira_preview_requested", False):
         ticket_previews = _build_ticket_previews(findings)
 
-    content = _write_xlsx_workpaper(state, findings, metrics, flagged_rows, now, ticket_previews)
+    # P6 WP N11 (docs/specs/P6_narration_design.md §9): resolved ONCE here,
+    # shared by both exporters below -- `narration["findings"]` carries the
+    # SAME findings, with observation/recommendation/management_questions
+    # replaced by their effective (reviewed model, or reviewed template
+    # fallback) text, so both artefacts show identical prose (G13).
+    narration = _build_export_narration(ctx, state, findings, metrics)
+    resolved_findings = narration["findings"]
+
+    content = _write_xlsx_workpaper(
+        state, resolved_findings, metrics, flagged_rows, now, ticket_previews, narration=narration,
+    )
     sha256 = hashlib.sha256(content).hexdigest()
     rel_path = f"exports/{state.run_id}/workpaper.xlsx"
     written_path = ctx.export_storage.write(rel_path, content)
@@ -1324,13 +1601,13 @@ def export(ctx: NodeContext, state: RunState) -> RunState:
 
     # PPTX audit pack (CLAUDE.md §4.7): same "persisted outputs only, never
     # recomputed" rule as the XLSX above -- generate_pptx reads `state`,
-    # `findings`, `metrics` and this Skill's own static catalogue.yaml,
-    # nothing else.
+    # the resolved `findings`, `metrics`, this Skill's own static
+    # catalogue.yaml and the same `narration` bundle, nothing else.
     catalogue_rows = load_catalogue_rows(ctx.skill.skill_dir)
     data_mode = "Local test data" if ctx.backend == "local" else "Unity Catalog"
     pptx_content = generate_pptx(
-        state, findings, metrics, catalogue_rows, ctx.skill,
-        data_mode=data_mode, template_path=ctx.settings.pptx_template_path, now=now,
+        state, resolved_findings, metrics, catalogue_rows, ctx.skill,
+        data_mode=data_mode, template_path=ctx.settings.pptx_template_path, now=now, narration=narration,
     )
     pptx_sha256 = hashlib.sha256(pptx_content).hexdigest()
     pptx_rel_path = f"exports/{state.run_id}/audit_pack.pptx"
