@@ -435,3 +435,95 @@ def test_n_h1_model_origin_still_bans_digits_outright():
     r = validate_prose("1,234 claims were reviewed.", HUMAN_EDIT_TABLE, field="observation")
     assert "N-D1" in _rule_ids(r)
     assert "N-H1" not in _rule_ids(r)
+
+
+# ---------------------------------------------------------------------------
+# N-H1 formatting-variant tolerance (user decision, 2026-09-24, "every
+# number an auditor types must equal a figure the finding cites, as
+# shown"): thousands separators and a leading "$" on money are optional;
+# percent must still carry "%" and must match at the displayed precision.
+# ---------------------------------------------------------------------------
+PCT_TABLE = {
+    "missing_receipt_pct_int": PlaceholderEntry("missing_receipt_pct_int", "%", 15),
+    "missing_receipt_pct_float": PlaceholderEntry("missing_receipt_pct_float", "%", 15.0),
+    "missing_receipt_pct_frac": PlaceholderEntry("missing_receipt_pct_frac", "%", 87.5),
+}
+
+
+def test_n_h1_positive_no_thousands_separator_matches_a_comma_rendered_count():
+    # "1234" = "1,234": the count metric renders as "1,234"; the auditor
+    # may type the digits without the thousands comma.
+    r = validate_human_edit("1234 claims were reviewed.", HUMAN_EDIT_TABLE, field="observation")
+    assert "N-H1" not in _rule_ids(r)
+
+
+def test_n_h1_positive_dollar_and_comma_variants_of_money_are_interchangeable():
+    # "$1,234.56" = "1,234.56": a leading "$" is optional either way, and
+    # both forms are accepted for the same rendered money value.
+    table = {"amt": PlaceholderEntry("amt", "AUD", 1234.56)}
+    with_dollar = validate_human_edit("Paid $1,234.56 in total.", table, field="observation")
+    without_dollar = validate_human_edit("Paid 1,234.56 in total.", table, field="observation")
+    assert "N-H1" not in _rule_ids(with_dollar)
+    assert "N-H1" not in _rule_ids(without_dollar)
+
+
+def test_n_h1_positive_money_without_comma_or_dollar_matches():
+    table = {"amt": PlaceholderEntry("amt", "AUD", 1234.56)}
+    r = validate_human_edit("Paid 1234.56 in total.", table, field="observation")
+    assert "N-H1" not in _rule_ids(r)
+
+
+def test_n_h1_negative_mismatched_count_without_comma_is_still_refused():
+    r = validate_human_edit("1235 claims were reviewed.", HUMAN_EDIT_TABLE, field="observation")
+    mismatches = [v for v in r.violations if v.rule_id == "N-H1"]
+    assert len(mismatches) == 1
+    assert mismatches[0].text == "1235"
+
+
+def test_n_h1_positive_bare_int_percent_matches_a_float_rendered_percent():
+    # "15%" matches a rendered "15.0%": the underlying value is equal, the
+    # difference is only int-vs-float formatting.
+    r = validate_human_edit(
+        "The rate was 15% against target.", PCT_TABLE, field="observation"
+    )
+    assert "N-H1" not in _rule_ids(r)
+
+
+def test_n_h1_positive_percent_with_extra_trailing_zero_matches():
+    r = validate_human_edit(
+        "The rate was 15.0% against target.", PCT_TABLE, field="observation"
+    )
+    assert "N-H1" not in _rule_ids(r)
+
+
+def test_n_h1_positive_percent_fraction_matches_exactly():
+    r = validate_human_edit(
+        "The rate was 87.5% against target.", PCT_TABLE, field="observation"
+    )
+    assert "N-H1" not in _rule_ids(r)
+
+
+def test_n_h1_negative_percent_without_percent_sign_is_refused():
+    # "Percent must still carry '%'" -- dropping it must not fall back to a
+    # plain-number match even though the digits are otherwise right.
+    r = validate_human_edit("The rate was 15 against target.", PCT_TABLE, field="observation")
+    mismatches = [v for v in r.violations if v.rule_id == "N-H1"]
+    assert len(mismatches) == 1
+    assert mismatches[0].text == "15"
+
+
+def test_n_h1_negative_percent_with_different_value_is_refused():
+    # Precision must equal the displayed precision: "15%" only matches a
+    # rendered "15.0%" because the VALUE is equal -- a genuinely different
+    # value, even one digit off, must still be refused.
+    r = validate_human_edit("The rate was 15.3% against target.", PCT_TABLE, field="observation")
+    mismatches = [v for v in r.violations if v.rule_id == "N-H1"]
+    assert len(mismatches) == 1
+    assert mismatches[0].text == "15.3%"
+
+
+def test_n_h1_negative_percent_truncated_from_a_fraction_is_refused():
+    r = validate_human_edit("The rate was 87% against target.", PCT_TABLE, field="observation")
+    mismatches = [v for v in r.violations if v.rule_id == "N-H1"]
+    assert len(mismatches) == 1
+    assert mismatches[0].text == "87%"
