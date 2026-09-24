@@ -76,6 +76,13 @@ _EXPENSE_FRAME_CANDIDATES = ["expense_report", "expense", "combined"]
 _PRE_APPROVAL_FRAME_CANDIDATES = ["travel_requests_no_expense", "pre_approval", "preapproval"]
 _APPROVAL_FRAME_CANDIDATES = ["approval_aging", "approval"]
 
+# travel_requests_no_expense's own contract date column (skills/tne_exco/
+# contract.yaml) -- used to filter p1's "Travel pre-request compliance"
+# chart (CLAUDE.md build brief P4 defect: that chart used to pass `pre_df`
+# into charts.grouped_count_chart completely unfiltered, so selecting one
+# ExCo member on p1 still showed every other employee's pre-approval count).
+_PRE_APPROVAL_DATE_COL = "Start Date"
+
 # T4.2's own tested population (skills/tne_exco/plan.yaml `t42_pop`) — used
 # here only to decide which claims count as "entertainment claims" for the
 # missing-attendee-% denominator on the Executive-analysis tab; the actual
@@ -332,14 +339,60 @@ def _any_flag_mask(df: pd.DataFrame) -> pd.Series:
 
 
 def _filter_by_dates(df: pd.DataFrame, date_col: str, start_date, end_date) -> pd.DataFrame:
+    """CLAUDE.md build brief P4 defect: this used to compare `date_col`
+    straight against a `pd.Timestamp` (`out[date_col] >= pd.to_datetime(...)`)
+    without parsing it first. A contract "date"/"datetime" source column
+    (skills/tne_exco/contract.yaml) reaches this page pre-typed on the
+    common path (orchestrator.contract.validate_contract's own _coerce_date
+    ran at execute time, before the frame snapshot this page reads was ever
+    written), but a pre-snapshot run's fallback frame
+    (orchestrator.service._get_run_frames_from_sources) still carries the
+    source's raw, unparsed column -- pandas 3.0.6's default dtype for that
+    is "str", and comparing a "str" column against a Timestamp raises
+    TypeError outright, crashing every date-range picker on this workspace's
+    Audit Detail pages. Parsing explicitly here (never mutating `date_col`
+    itself, so a caller that renders it in a table afterwards -- e.g. p1's
+    ex_cols / p3's detail_cols -- still gets back the same value it read in)
+    fixes both paths.
+
+    A parse failure here is therefore never expected -- the contract already
+    guarantees it -- so it fails loudly (NN14) rather than letting
+    pd.to_datetime's default errors="coerce" turn an unparseable value into
+    NaT and silently drop that row out of every date-filtered chart and KPI.
+
+    The end-date bound mirrors orchestrator.populations._apply_filter's own
+    "between" handling of a run's audit_period filter over this exact
+    contract column: a bare end date means "through the end of that day",
+    not "through midnight at its start", otherwise a datetime column with a
+    real time-of-day (_APPROVED_DT_COL, "Approved Date/Time") would silently
+    drop every row on the last day of the selected range. Like that engine
+    code, this does not add timezone handling (skills/tne_exco/contract.yaml
+    declares `timezone: Australia/Sydney`) -- the engine's own comment notes
+    that half of the audit-period boundary is not yet addressed there
+    either, so this stays naive rather than diverging from it."""
     out = df
     if date_col not in out.columns:
         return out
+    if not start_date and not end_date:
+        return out
+
+    parsed = pd.to_datetime(out[date_col], errors="coerce")
+    newly_unparseable = parsed.isna() & out[date_col].notna()
+    if newly_unparseable.any():
+        bad_values = out.loc[newly_unparseable, date_col].head(5).tolist()
+        raise ValueError(
+            f"{date_col}: {int(newly_unparseable.sum())} value(s) could not be parsed as a "
+            f"date, even though this run's frame is contract-validated -- sample value(s): "
+            f"{bad_values}"
+        )
+
+    mask = pd.Series(True, index=out.index)
     if start_date:
-        out = out[out[date_col] >= pd.to_datetime(start_date)]
+        mask &= parsed >= pd.Timestamp(start_date)
     if end_date:
-        out = out[out[date_col] <= pd.to_datetime(end_date)]
-    return out
+        hi = pd.Timestamp(end_date) + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)
+        mask &= parsed <= hi
+    return out[mask]
 
 
 def _date_bounds(df: pd.DataFrame | None, date_col: str, fallback: tuple[str, str]) -> tuple[str, str]:
@@ -1051,6 +1104,22 @@ def _p1_update(bundle: dict, start_date, end_date, members, meta: dict[str, dict
     breach_mask = _any_flag_mask(df)
     flag_labels = _flag_labels_on(df, meta)
 
+    # CLAUDE.md build brief P4 defect: this chart used to pass `pre_df`
+    # straight through, unfiltered by this page's own member/date filters --
+    # filtering "Travel pre-request compliance" to one ExCo member still
+    # showed every OTHER employee's pre-approval count. Applies the same
+    # member filter, and the same date filter using
+    # travel_requests_no_expense's own contract date column ("Start Date" --
+    # travel_requests_no_expense has one, per skills/tne_exco/contract.yaml,
+    # so both filters apply; a source with no declared date column would
+    # only get the member filter).
+    pre_filtered = pre_df
+    if pre_filtered is not None:
+        if _PRE_APPROVAL_DATE_COL in pre_filtered.columns:
+            pre_filtered = _filter_by_dates(pre_filtered, _PRE_APPROVAL_DATE_COL, start_date, end_date)
+        if members and "Employee" in pre_filtered.columns:
+            pre_filtered = pre_filtered[pre_filtered["Employee"].isin(members)]
+
     amount_sum = df[_AMOUNT_COL].sum() if _AMOUNT_COL in df.columns else None
     breach_amount = df.loc[breach_mask, _AMOUNT_COL].sum() if _AMOUNT_COL in df.columns else None
     missing_col = "RF_CS_MissingReceipt"
@@ -1067,7 +1136,7 @@ def _p1_update(bundle: dict, start_date, end_date, members, meta: dict[str, dict
     f2 = charts.exceptions_by_group_chart(df, flag_labels, "Employee", "Breach count by ExCo member")
     f3 = charts.exceptions_by_flag_distribution(df, flag_labels, "Breach type distribution")
     f4 = charts.missing_by_tier_chart(df, _AMOUNT_COL, missing_col, "Missing receipts by claim-size tier")
-    f5 = charts.grouped_count_chart(df, pre_df, "Employee", "Claims", "Pre-approvals", "Travel pre-request compliance")
+    f5 = charts.grouped_count_chart(df, pre_filtered, "Employee", "Claims", "Pre-approvals", "Travel pre-request compliance")
 
     ent = df[df["Expense Type"].isin(_ENTERTAINMENT_EXPENSE_TYPES)] if "Expense Type" in df.columns else df.iloc[0:0]
     att_flag = "RF_ATT_Missing"
