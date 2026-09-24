@@ -22,10 +22,21 @@ Only the finding-count and test-count breakdowns are computed here, because
 no node persists them as a `run_metrics` row of their own -- they are a
 property of the finding LIST and `state.test_results`, recomputed fresh on
 every call so `narrate` and `export` never need to agree in advance on what
-"the finding count" means."""
+"the finding count" means.
+
+Gap-fix (independent review 2026-09-24, gap #5): `run_tests_total` /
+`run_tests_with_exceptions` / `run_tests_not_testable` must be counted at
+CATALOGUE grain (14 for SKILL-001), not over `state.test_results`'s own,
+larger set of plan-grain primitive-instance sub-tests (21) -- see
+`orchestrator.catalogue_counts`. A caller that can supply the run's
+catalogue tests (a catalogue.yaml `tests` list) passes them as
+`catalogue_tests`; a caller that cannot (none yet does) falls back to the
+prior, plan-grain count rather than raising, since a wrong grain is still
+better than a missing figure."""
 
 from __future__ import annotations
 
+from orchestrator.catalogue_counts import catalogue_test_counts
 from orchestrator.narration.placeholders import PlaceholderEntry
 
 __all__ = ["run_values"]
@@ -53,14 +64,20 @@ def _date_entry(name: str, value: str | None, meaning: str) -> PlaceholderEntry:
     return PlaceholderEntry(name=name, unit="date", value=value, source_field="RunState.audit_period", meaning=meaning)
 
 
-def run_values(state, findings: list[dict], metrics: dict[str, dict]) -> dict[str, PlaceholderEntry]:
+def run_values(
+    state, findings: list[dict], metrics: dict[str, dict], *, catalogue_tests: list[dict] | None = None,
+) -> dict[str, PlaceholderEntry]:
     """Builds the `run_*` table. `findings` is whichever finding LIST the
     caller currently has (rule findings, or rule findings plus accepted
     candidates); `metrics` is this run's persisted `run_metrics` dict
     (`persistence.get_run_metrics(run_id)`, {name: {value, unit,
     source_ref, test_id}}). `state` supplies `audit_period` and
     `test_results` -- a plain `RunState`, or any object exposing those two
-    attributes (the fixture harnesses' minimal state stubs already do)."""
+    attributes (the fixture harnesses' minimal state stubs already do).
+    `catalogue_tests`, when supplied, is this run's Skill's catalogue.yaml
+    `tests` list -- the test-count entries are then computed at catalogue
+    grain (`orchestrator.catalogue_counts`) rather than over the plan's own,
+    larger set of sub-tests."""
     severity_counts = {s: 0 for s in _SEVERITIES}
     for f in findings:
         severity = f.get("severity")
@@ -68,9 +85,15 @@ def run_values(state, findings: list[dict], metrics: dict[str, dict]) -> dict[st
             severity_counts[severity] += 1
 
     test_results = list(getattr(state, "test_results", None) or [])
-    tests_total = len(test_results)
-    tests_with_exceptions = sum(1 for t in test_results if t.get("status") == "exception")
-    tests_not_testable = sum(1 for t in test_results if t.get("status") == "not_testable")
+    if catalogue_tests:
+        counts = catalogue_test_counts(catalogue_tests, test_results)
+        tests_total = counts["total"]
+        tests_with_exceptions = counts["with_exceptions"]
+        tests_not_testable = counts["not_testable"]
+    else:
+        tests_total = len(test_results)
+        tests_with_exceptions = sum(1 for t in test_results if t.get("status") == "exception")
+        tests_not_testable = sum(1 for t in test_results if t.get("status") == "not_testable")
 
     audit_period = getattr(state, "audit_period", None)
     period_start, period_end = tuple(audit_period) if audit_period else (None, None)
@@ -106,15 +129,15 @@ def run_values(state, findings: list[dict], metrics: dict[str, dict]) -> dict[st
             "reported separately",
         ),
         "run_tests_total": _count_entry(
-            "run_tests_total", tests_total, "count of this run's plan tests",
+            "run_tests_total", tests_total, "count of this run's tests",
         ),
         "run_tests_with_exceptions": _count_entry(
             "run_tests_with_exceptions", tests_with_exceptions,
-            "count of this run's plan tests with at least one exception",
+            "count of this run's tests with at least one exception",
         ),
         "run_tests_not_testable": _count_entry(
             "run_tests_not_testable", tests_not_testable,
-            "count of this run's plan tests that could not be tested",
+            "count of this run's tests that could not be tested",
         ),
         "run_audit_period_start": _date_entry(
             "run_audit_period_start", period_start, "the audit period's start date",

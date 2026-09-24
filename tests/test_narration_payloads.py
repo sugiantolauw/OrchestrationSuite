@@ -108,6 +108,60 @@ def test_run_values_never_fabricates_the_headline_when_absent():
     assert table["run_finding_count"].value == 0
 
 
+def test_run_values_catalogue_tests_give_14_grain_counts(skill):
+    # Independent review 2026-09-24 gap #5: run_tests_* must count SKILL-001's
+    # 14 catalogue tests (skills/tne_exco/catalogue.yaml), never the plan's
+    # own, larger set of primitive-instance sub-tests -- three of the 14
+    # catalogue tests (T3.2a, T3.3a, T6.1d) resolve to several plan.yaml
+    # sub-tests each, inflating a naive count to 21.
+    from orchestrator.pptx_export import load_catalogue_rows
+
+    catalogue_rows = load_catalogue_rows(skill.skill_dir)
+    assert len(catalogue_rows) == 14
+
+    sub_test_ids = {
+        "T3.2a": ["T3.2a_air_dom", "T3.2a_air_int", "T3.2a_car_dom", "T3.2a_car_int", "T3.2a_accom"],
+        "T3.3a": ["T3.3a_dom", "T3.3a_int", "T3.3a_very_late"],
+        "T6.1d": ["T6.1d_dom", "T6.1d_int"],
+    }
+    exception_subs = {"T3.2a_air_dom", "T3.2a_air_int", "T6.1d_dom", "T6.1d_int"}
+    not_testable_subs = {"T3.3a_dom", "T3.3a_int", "T3.3a_very_late"}
+    single_status = {
+        "T3.1a": "pass", "T3.1b": "pass", "T3.3b": "pass",
+        "T4.1": "exception", "T4.2": "pass", "T4.3": "not_testable",
+        "T4.4": "exception", "T5.1": "exception", "T5.2": "pass",
+        "T6.1a": "pass", "T6.1c": "pass",
+    }
+    assert set(single_status) | set(sub_test_ids) == {t["test_id"] for t in catalogue_rows}
+
+    test_results = []
+    for subs in sub_test_ids.values():
+        for sub_id in subs:
+            status = "exception" if sub_id in exception_subs else (
+                "not_testable" if sub_id in not_testable_subs else "pass")
+            test_results.append({"test_id": sub_id, "status": status,
+                                  "exception_units": 1 if status == "exception" else 0})
+    for test_id, status in single_status.items():
+        test_results.append({"test_id": test_id, "status": status,
+                              "exception_units": 1 if status == "exception" else 0})
+    assert len(test_results) == 21  # plan grain: sub-tests inflate 14 catalogue tests to 21
+
+    state = _State(test_results=test_results)
+
+    catalogue_table = run_values(state, [], {}, catalogue_tests=catalogue_rows)
+    assert catalogue_table["run_tests_total"].value == 14
+    assert catalogue_table["run_tests_with_exceptions"].value == 5  # T3.2a, T6.1d, T4.1, T4.4, T5.1
+    assert catalogue_table["run_tests_not_testable"].value == 2  # T3.3a, T4.3
+
+    # Without catalogue_tests, the prior plan-grain fallback still counts 21
+    # sub-tests -- proves the fix changes behaviour, not just adds an unused
+    # parameter.
+    plan_grain_table = run_values(state, [], {})
+    assert plan_grain_table["run_tests_total"].value == 21
+    assert plan_grain_table["run_tests_with_exceptions"].value == 7
+    assert plan_grain_table["run_tests_not_testable"].value == 4
+
+
 # ── build_finding_table / build_finding_payload (`find`) ───────────────────
 
 

@@ -154,7 +154,19 @@ def _start_executor_once() -> None:
     # because nothing had ever marked it `interrupted`.
     from orchestrator.executor import reap_orphaned_runs_with_leases
 
-    reap_orphaned_runs_with_leases(ctx.persistence, now=ctx.clock())
+    # Same tracing/grace_s/exclude_run_ids semantics as the executor's own
+    # periodic reap (orchestrator.executor.ThreadExecutor._reap_orphans):
+    # `tracing=ctx.tracing` so an orphaned run's MLflow parent run is ended
+    # KILLED here too, not just when the admission loop reaps it later;
+    # `grace_s` matches ctx.executor's own configured lease-reap grace, so an
+    # App-start reap does not use a stricter (0-grace) tolerance than the
+    # very same executor's admission loop will use moments later; and
+    # `exclude_run_ids` is empty because, at App start, this process has no
+    # active runs of its own yet to exclude.
+    reap_orphaned_runs_with_leases(
+        ctx.persistence, now=ctx.clock(), tracing=ctx.tracing,
+        exclude_run_ids=set(), grace_s=getattr(ctx.executor, "_lease_reap_grace_s", 0.0),
+    )
 
     # Independent review 2026-09-24 item 5: warm the readiness cache at App
     # start and log (never raise on) anything that isn't ready -- a platform
