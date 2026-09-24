@@ -232,6 +232,14 @@ def _footer(slide, *, run_id: str, generated_at: str, extra: str | None = None, 
     _textbox(slide, CONTENT_LEFT, SLIDE_H - 0.32, CONTENT_W, 0.28, text, size=7.5, color=color)
 
 
+#  A Top Matters slide's own title concatenates rank/total, a test_id and a
+#  finding's title (findings.yaml, up to ~70 chars in this Skill's own
+#  catalogue) -- the one title this module builds from content whose length
+#  it does not otherwise control. Budgeted generously for the title
+#  placeholder's own width at the template's title font size.
+_TITLE_MAX_CHARS = 90
+
+
 def _new_slide(prs, layout_idx: int, title: str | None = None):
     slide = prs.slides.add_slide(prs.slide_layouts[layout_idx])
     if title is not None and slide.placeholders:
@@ -240,7 +248,13 @@ def _new_slide(prs, layout_idx: int, title: str | None = None):
         except KeyError:
             title_ph = None
         if title_ph is not None:
-            title_ph.text = title
+            # Rule 3 applies to every text frame, including template
+            # placeholders (not just this module's own _textbox calls) --
+            # word_wrap + autofit as the PowerPoint-render-time fallback,
+            # plus a measured truncation as the hard, testable guarantee.
+            title_ph.text = _ellipsize(title, _TITLE_MAX_CHARS)
+            title_ph.text_frame.word_wrap = True
+            title_ph.text_frame.auto_size = MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE
     return slide
 
 
