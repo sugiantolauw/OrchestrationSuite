@@ -105,6 +105,19 @@ class Settings:
     # this many seconds so /ready does not re-probe the Volume/warehouse/
     # model endpoints on every poll (cost -- CLAUDE.md §11 cost incident).
     readiness_cache_ttl_s: float = 120.0
+    # LLM layer (independent review item 3; docs/specs/P6_P8_explorer_llm_
+    # design.md §3.2). Operational knobs -- excluded from the runtime config
+    # hash below, same as the executor/admission ones: they change how a
+    # call is retried, never what a node computes.
+    llm_timeout_s: float = 180.0
+    llm_retry_backoff_s: float = 5.0
+    # Independent review item 4: T4.3 row-level classification via the
+    # model client is BUILT but switched off by default -- while off, T4.3
+    # stays `not_testable` ("awaiting governance approval to send expense
+    # descriptions to a model"), per the corporate-workspace decision
+    # (CLAUDE.md §11). This one IS part of the runtime config hash: it
+    # changes what a run actually computes for T4.3.
+    enable_row_level_llm: bool = False
 
     def __post_init__(self) -> None:
         _validate_identifier("catalog", self.catalog)
@@ -157,6 +170,9 @@ def load_settings(env: dict | None = None) -> Settings:
         pptx_template_path=env.get("PPTX_TEMPLATE_PATH") or DEFAULT_PPTX_TEMPLATE_PATH,
         source_bindings_path=env.get("SOURCE_BINDINGS") or None,
         readiness_cache_ttl_s=_parse_float(env.get("READINESS_CACHE_TTL_S"), 120.0),
+        llm_timeout_s=_parse_float(env.get("LLM_TIMEOUT_S"), 180.0),
+        llm_retry_backoff_s=_parse_float(env.get("LLM_RETRY_BACKOFF_S"), 5.0),
+        enable_row_level_llm=_parse_bool(env.get("ENABLE_ROW_LEVEL_LLM"), False),
         # P2/P3 gate review item 4 (MLflow per-node spans, CLAUDE.md §2.3).
         # Unset -- never hardcoded here -- means mlflow's own default
         # resolution: MLFLOW_TRACKING_URI if the process environment already
@@ -195,6 +211,8 @@ _RUNTIME_HASH_EXCLUDED_FIELDS = frozenset({
     "pptx_template_path",
     "source_bindings_path",
     "readiness_cache_ttl_s",
+    "llm_timeout_s",
+    "llm_retry_backoff_s",
 })
 
 

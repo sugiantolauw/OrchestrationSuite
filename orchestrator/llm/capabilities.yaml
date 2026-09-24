@@ -1,0 +1,34 @@
+# Recorded parameter matrix, by ROLE (the orchestrator.config.Settings
+# attribute name -- model_sonnet / model_gpt_oss), never by literal endpoint
+# name (CLAUDE.md §3 non-negotiable 16). "supported" = sent when a task asks
+# for it (orchestrator.llm.tasks.TASK_PROFILES). Anything absent from a
+# role's `params`, or present with a value other than "supported", is NEVER
+# sent (independent review 2026-09-24 item 3: "never send an untested
+# parameter"). Recorded by tests/live/test_llm_endpoints_live.py (gated by
+# RUN_LIVE_LLM=1) -- see CLAUDE.md §6 for the narrative history of this
+# matrix in the development workspace.
+roles:
+  model_gpt_oss:
+    verified_on: "2026-09-23"
+    served_model_prefix: "gpt-oss-120b"
+    content_shape: parts_with_reasoning   # message.content is a list of {type: reasoning|text}
+    params:
+      max_tokens: supported
+      temperature: supported
+      top_p: supported
+      reasoning_effort: supported          # low | medium | high
+      json_schema_strict: supported
+      json_object: requires_json_word      # not used by any current task
+      seed: rejected
+      stop: rejected
+      max_completion_tokens: rejected
+      thinking: rejected
+    schema_keywords_rejected: [pattern]
+    schema_notes:
+      - "bare {type: object} is emptied under strict; never use it"
+  model_sonnet:
+    verified_on: null                      # 403 "Databricks-set rate limit of 0" on 2026-09-23
+    served_model_prefix: null
+    content_shape: unknown
+    params: {}                             # all untested -> nothing optional is ever sent
+    schema_keywords_rejected: [pattern]     # assumed identical until tested; wire schemas never use it

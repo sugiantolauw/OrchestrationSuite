@@ -65,16 +65,40 @@ class DataSourceAdapter(Protocol):
         ...
 
 
+@dataclass(frozen=True)
+class ModelResponse:
+    """A chat completion, already stripped of raw reasoning content (CLAUDE.md
+    §3 non-negotiable 11 / NN11) -- independent review 2026-09-24 item 3,
+    docs/specs/P6_P8_explorer_llm_design.md §3.5."""
+
+    text: str                        # concatenated type=="text" parts; reasoning parts dropped
+    served_model_version: str        # response.model, e.g. "gpt-oss-120b-080525"
+    finish_reason: str | None
+    prompt_tokens: int | None
+    completion_tokens: int | None
+    total_tokens: int | None
+    request_id: str | None           # x-request-id response header
+    reasoning_parts_stripped: int    # count only -- never the text (NN11)
+    latency_ms: int
+
+
 class ModelClient(Protocol):
+    """A single chat-completion call against one already-resolved endpoint
+    name, with pre-filtered params (the caller -- orchestrator.llm.gateway.
+    LLMGateway -- decides which parameters are safe to send for this role;
+    this Protocol never guesses). Every error condition below is mapped to a
+    typed exception from orchestrator.llm.errors, never an ad hoc dict or a
+    bare requests/openai exception leaking through."""
+
     def chat(
-        self,
-        *,
-        endpoint: str,
-        messages: list[dict],
-        response_format: dict | None = None,
-        temperature: float | None = None,
-        max_tokens: int | None = None,
-    ) -> dict:
+        self, *, endpoint: str, messages: list[dict], params: dict, timeout_s: float,
+    ) -> ModelResponse:
+        ...
+
+    def describe_endpoint(self, endpoint: str) -> dict:
+        """A cheap metadata call (never a completion) -- {"foundation_model":
+        ..., "ready": bool}. Used by readiness checks (independent review
+        item 5)."""
         ...
 
 
@@ -287,6 +311,35 @@ class PersistenceAdapter(Protocol):
         ...
 
     def list_uploaded_files(self, engagement_id: str | None = None) -> list[dict]:
+        ...
+
+    # ── LLM call ledger (independent review 2026-09-24 item 3) ──────────────
+
+    def record_llm_call(self, row: dict) -> None:
+        """MERGEs on call_id -- an idempotent write (CLAUDE.md §3
+        non-negotiable 7: every call is logged synchronously, before the
+        call returns; a retried write of the same call_id must not
+        duplicate)."""
+        ...
+
+    def last_live_version(self, endpoint: str) -> str | None:
+        """The served_model_version of the most recent llm_calls row for
+        `endpoint` with source='live' and outcome='succeeded', or None if
+        there is none yet."""
+        ...
+
+    def get_llm_cache(self, cache_key: str) -> dict | None:
+        ...
+
+    def find_llm_cache(self, prompt_sha256: str, endpoint: str, params_json: str) -> list[dict]:
+        ...
+
+    def put_llm_cache_if_absent(self, row: dict) -> bool:
+        """Inserts only if cache_key is not already present; never updates.
+        Returns True if a row was inserted, False if one already existed."""
+        ...
+
+    def list_llm_calls(self, run_id: str) -> list[dict]:
         ...
 
     def acquire_lease(self, run_id: str, worker_id: str, *, ttl_s: float, now: str) -> bool:

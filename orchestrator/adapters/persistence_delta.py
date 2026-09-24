@@ -297,6 +297,19 @@ def _fetchall_dicts(cursor) -> list[dict]:
 # the same MERGE + prune upsert shape (never DELETE-then-INSERT).
 _MERGE_BATCH_SIZE = 250
 
+_LLM_CALLS_COLUMNS = (
+    "call_id", "run_id", "engagement_id", "node_name", "execution_key",
+    "task", "seq", "transport_attempt", "endpoint_role", "endpoint",
+    "served_model_version", "source", "cache_hit", "cache_key",
+    "cached_from_call_id", "version_changed", "prompt_template_id",
+    "prompt_template_version", "prompt_sha256", "messages_json",
+    "params_sent_json", "params_withheld_json", "response_text",
+    "reasoning_parts_stripped", "finish_reason", "prompt_tokens",
+    "completion_tokens", "total_tokens", "latency_ms", "request_id",
+    "outcome", "error_type", "error_status_code", "error_message",
+    "pii_columns_masked_json", "pii_whitelist_json", "actor", "created_at",
+)
+
 
 def _batched(items: list, size: int):
     for i in range(0, len(items), size):
@@ -1663,6 +1676,80 @@ class DeltaPersistence:
                 cur = self._execute(
                     conn, f"SELECT * FROM {self._table('uploaded_files')} ORDER BY uploaded_at DESC"
                 )
+            return _fetchall_dicts(cur)
+
+    # ── LLM call ledger (independent review 2026-09-24 item 3) ──────────────
+
+    def record_llm_call(self, row: dict) -> None:
+        params = {name: row.get(name) for name in _LLM_CALLS_COLUMNS}
+        params["cache_hit"] = bool(params["cache_hit"])
+        params["version_changed"] = bool(params["version_changed"])
+        values_sql = ", ".join(f":{name}" for name in _LLM_CALLS_COLUMNS)
+        update_sql = ", ".join(
+            f"{name} = :{name}" for name in _LLM_CALLS_COLUMNS if name != "call_id"
+        )
+        with self._cursor_ctx() as conn:
+            self._execute(
+                conn,
+                f"MERGE INTO {self._table('llm_calls')} t "
+                "USING (SELECT :call_id AS call_id) s ON t.call_id = s.call_id "
+                f"WHEN MATCHED THEN UPDATE SET {update_sql} "
+                f"WHEN NOT MATCHED THEN INSERT ({', '.join(_LLM_CALLS_COLUMNS)}) VALUES ({values_sql})",
+                params,
+            )
+
+    def last_live_version(self, endpoint: str) -> str | None:
+        with self._cursor_ctx() as conn:
+            cur = self._execute(
+                conn,
+                f"SELECT served_model_version FROM {self._table('llm_calls')} WHERE endpoint = :endpoint "
+                "AND source = 'live' AND outcome = 'succeeded' ORDER BY created_at DESC LIMIT 1",
+                {"endpoint": endpoint},
+            )
+            row = _fetchone_dict(cur)
+        return row["served_model_version"] if row else None
+
+    def get_llm_cache(self, cache_key: str) -> dict | None:
+        with self._cursor_ctx() as conn:
+            cur = self._execute(
+                conn,
+                f"SELECT * FROM {self._table('llm_cache')} WHERE cache_key = :cache_key",
+                {"cache_key": cache_key},
+            )
+            return _fetchone_dict(cur)
+
+    def find_llm_cache(self, prompt_sha256: str, endpoint: str, params_json: str) -> list[dict]:
+        with self._cursor_ctx() as conn:
+            cur = self._execute(
+                conn,
+                f"SELECT * FROM {self._table('llm_cache')} WHERE prompt_sha256 = :prompt_sha256 "
+                "AND endpoint = :endpoint AND params_json = :params_json ORDER BY created_at DESC",
+                {"prompt_sha256": prompt_sha256, "endpoint": endpoint, "params_json": params_json},
+            )
+            return _fetchall_dicts(cur)
+
+    def put_llm_cache_if_absent(self, row: dict) -> bool:
+        with self._cursor_ctx() as conn:
+            cur = self._execute(
+                conn,
+                f"MERGE INTO {self._table('llm_cache')} t "
+                "USING (SELECT :cache_key AS cache_key) s ON t.cache_key = s.cache_key "
+                "WHEN NOT MATCHED THEN INSERT (cache_key, prompt_sha256, endpoint, "
+                "served_model_version, params_json, response_text, finish_reason, usage_json, "
+                "source_call_id, created_at) VALUES (:cache_key, :prompt_sha256, :endpoint, "
+                ":served_model_version, :params_json, :response_text, :finish_reason, :usage_json, "
+                ":source_call_id, :created_at)",
+                row,
+            )
+            return _num_affected_rows(cur) > 0
+
+    def list_llm_calls(self, run_id: str) -> list[dict]:
+        with self._cursor_ctx() as conn:
+            cur = self._execute(
+                conn,
+                f"SELECT * FROM {self._table('llm_calls')} WHERE run_id = :run_id ORDER BY created_at",
+                {"run_id": run_id},
+            )
             return _fetchall_dicts(cur)
 
     # ── leases (CLAUDE.md §9C P1A concurrency foundation, §2.3 rule 3) ──────

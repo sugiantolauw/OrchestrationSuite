@@ -114,6 +114,35 @@ def _metric_dict_from_row(row: dict) -> dict:
     }
 
 
+_LLM_CALLS_COLUMNS = (
+    "call_id", "run_id", "engagement_id", "node_name", "execution_key",
+    "task", "seq", "transport_attempt", "endpoint_role", "endpoint",
+    "served_model_version", "source", "cache_hit", "cache_key",
+    "cached_from_call_id", "version_changed", "prompt_template_id",
+    "prompt_template_version", "prompt_sha256", "messages_json",
+    "params_sent_json", "params_withheld_json", "response_text",
+    "reasoning_parts_stripped", "finish_reason", "prompt_tokens",
+    "completion_tokens", "total_tokens", "latency_ms", "request_id",
+    "outcome", "error_type", "error_status_code", "error_message",
+    "pii_columns_masked_json", "pii_whitelist_json", "actor", "created_at",
+)
+_LLM_CALLS_BOOL_COLUMNS = ("cache_hit", "version_changed")
+
+
+def _llm_call_column_value(name: str, value):
+    # sqlite has no native boolean -- stored as 0/1, same convention as
+    # findings.analyst_set_severity (CLAUDE.md P2/P3 gate review item 3).
+    if name in _LLM_CALLS_BOOL_COLUMNS:
+        return int(bool(value))
+    return value
+
+
+def _llm_call_row_from_db(row: dict) -> dict:
+    for name in _LLM_CALLS_BOOL_COLUMNS:
+        row[name] = bool(row[name])
+    return row
+
+
 def _add_seconds(ts: str, seconds: float) -> str:
     from datetime import timedelta
 
@@ -1234,6 +1263,79 @@ class LocalPersistence:
         finally:
             self._release(conn)
         return [dict(r) for r in rows]
+
+    # ── LLM call ledger (independent review 2026-09-24 item 3) ──────────────
+
+    def record_llm_call(self, row: dict) -> None:
+        values = tuple(
+            _llm_call_column_value(name, row.get(name)) for name in _LLM_CALLS_COLUMNS
+        )
+        placeholders = ", ".join("?" for _ in _LLM_CALLS_COLUMNS)
+        update_clause = ", ".join(
+            f"{name} = excluded.{name}" for name in _LLM_CALLS_COLUMNS if name != "call_id"
+        )
+        with self._writer() as conn:
+            conn.execute(
+                f"INSERT INTO llm_calls ({', '.join(_LLM_CALLS_COLUMNS)}) VALUES ({placeholders}) "
+                f"ON CONFLICT(call_id) DO UPDATE SET {update_clause}",
+                values,
+            )
+
+    def last_live_version(self, endpoint: str) -> str | None:
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT served_model_version FROM llm_calls WHERE endpoint = ? AND source = 'live' "
+                "AND outcome = 'succeeded' ORDER BY created_at DESC LIMIT 1",
+                (endpoint,),
+            ).fetchone()
+        finally:
+            self._release(conn)
+        return row["served_model_version"] if row else None
+
+    def get_llm_cache(self, cache_key: str) -> dict | None:
+        conn = self._connect()
+        try:
+            row = conn.execute("SELECT * FROM llm_cache WHERE cache_key = ?", (cache_key,)).fetchone()
+        finally:
+            self._release(conn)
+        return dict(row) if row else None
+
+    def find_llm_cache(self, prompt_sha256: str, endpoint: str, params_json: str) -> list[dict]:
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM llm_cache WHERE prompt_sha256 = ? AND endpoint = ? AND params_json = ? "
+                "ORDER BY created_at DESC",
+                (prompt_sha256, endpoint, params_json),
+            ).fetchall()
+        finally:
+            self._release(conn)
+        return [dict(r) for r in rows]
+
+    def put_llm_cache_if_absent(self, row: dict) -> bool:
+        with self._writer() as conn:
+            cur = conn.execute(
+                "INSERT INTO llm_cache (cache_key, prompt_sha256, endpoint, served_model_version, "
+                "params_json, response_text, finish_reason, usage_json, source_call_id, created_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT(cache_key) DO NOTHING",
+                (
+                    row["cache_key"], row["prompt_sha256"], row["endpoint"], row["served_model_version"],
+                    row["params_json"], row["response_text"], row["finish_reason"], row["usage_json"],
+                    row["source_call_id"], row["created_at"],
+                ),
+            )
+            return cur.rowcount > 0
+
+    def list_llm_calls(self, run_id: str) -> list[dict]:
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM llm_calls WHERE run_id = ? ORDER BY created_at", (run_id,)
+            ).fetchall()
+        finally:
+            self._release(conn)
+        return [_llm_call_row_from_db(dict(r)) for r in rows]
 
     # ── leases (CLAUDE.md §9C P1A concurrency foundation, §2.3 rule 3) ──────
 

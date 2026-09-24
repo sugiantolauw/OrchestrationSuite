@@ -443,3 +443,92 @@ def test_batch_read_methods_with_no_ids_return_empty(persistence):
     assert persistence.get_run_metrics_for_runs([]) == {}
     assert persistence.list_management_actions_for_runs([]) == {}
     assert persistence.get_fingerprints([]) == {}
+
+
+# ── LLM call ledger (independent review 2026-09-24 item 3) ─────────────────
+
+
+def _llm_call_row(call_id, *, run_id, endpoint="ep1", served_model_version="v1", source="live",
+                   outcome="succeeded", cache_hit=False, cache_key=None):
+    return {
+        "call_id": call_id, "run_id": run_id, "engagement_id": "ENG-DEFAULT", "node_name": "classify",
+        "execution_key": f"EK-{call_id}", "task": "classify", "seq": 1, "transport_attempt": 1,
+        "endpoint_role": "model_gpt_oss", "endpoint": endpoint, "served_model_version": served_model_version,
+        "source": source, "cache_hit": cache_hit, "cache_key": cache_key, "cached_from_call_id": None,
+        "version_changed": False, "prompt_template_id": "t1", "prompt_template_version": "tv1",
+        "prompt_sha256": "ph1", "messages_json": "[]", "params_sent_json": "{}", "params_withheld_json": "{}",
+        "response_text": "hi", "reasoning_parts_stripped": 0, "finish_reason": "stop", "prompt_tokens": 1,
+        "completion_tokens": 1, "total_tokens": 2, "latency_ms": 10, "request_id": "req1", "outcome": outcome,
+        "error_type": None, "error_status_code": None, "error_message": None,
+        "pii_columns_masked_json": "[]", "pii_whitelist_json": "[]", "actor": "alice",
+        "created_at": canonical_ts(0),
+    }
+
+
+def test_record_llm_call_and_list_llm_calls(persistence, uid):
+    run_id = f"RUN-LLM-{uid}"
+    persistence.record_llm_call(_llm_call_row(f"CALL-A-{uid}", run_id=run_id))
+    persistence.record_llm_call(_llm_call_row(f"CALL-B-{uid}", run_id=run_id))
+    rows = persistence.list_llm_calls(run_id)
+    assert {r["call_id"] for r in rows} == {f"CALL-A-{uid}", f"CALL-B-{uid}"}
+    assert rows[0]["run_id"] == run_id
+
+
+def test_record_llm_call_is_idempotent_by_call_id(persistence, uid):
+    run_id = f"RUN-LLM-IDEMPOTENT-{uid}"
+    call_id = f"CALL-IDEM-{uid}"
+    persistence.record_llm_call(_llm_call_row(call_id, run_id=run_id, outcome="failed_transport"))
+    persistence.record_llm_call(_llm_call_row(call_id, run_id=run_id, outcome="succeeded"))
+    rows = persistence.list_llm_calls(run_id)
+    assert len(rows) == 1
+    assert rows[0]["outcome"] == "succeeded"
+
+
+def test_last_live_version_only_considers_live_succeeded_rows(persistence, uid):
+    endpoint = f"ep-{uid}"
+    run_id = f"RUN-LLM-VER-{uid}"
+    assert persistence.last_live_version(endpoint) is None
+    persistence.record_llm_call(_llm_call_row(
+        f"CALL-FAIL-{uid}", run_id=run_id, endpoint=endpoint, served_model_version="v1",
+        source="live", outcome="failed_transport",
+    ))
+    assert persistence.last_live_version(endpoint) is None  # not succeeded -- doesn't count
+    persistence.record_llm_call(_llm_call_row(
+        f"CALL-OK-{uid}", run_id=run_id, endpoint=endpoint, served_model_version="v2",
+        source="live", outcome="succeeded",
+    ))
+    assert persistence.last_live_version(endpoint) == "v2"
+
+
+def test_llm_cache_put_if_absent_and_lookup(persistence, uid):
+    cache_key = f"CACHE-{uid}"
+    row = {
+        "cache_key": cache_key, "prompt_sha256": f"ph-{uid}", "endpoint": f"ep-{uid}",
+        "served_model_version": "v1", "params_json": "{}", "response_text": "hi",
+        "finish_reason": "stop", "usage_json": "{}", "source_call_id": f"CALL-{uid}",
+        "created_at": canonical_ts(0),
+    }
+    assert persistence.get_llm_cache(cache_key) is None
+    assert persistence.put_llm_cache_if_absent(row) is True
+    assert persistence.put_llm_cache_if_absent(row) is False  # never updates -- already present
+
+    fetched = persistence.get_llm_cache(cache_key)
+    assert fetched["response_text"] == "hi"
+
+    matches = persistence.find_llm_cache(row["prompt_sha256"], row["endpoint"], row["params_json"])
+    assert [m["cache_key"] for m in matches] == [cache_key]
+
+
+def test_find_llm_cache_scoped_to_exact_prompt_endpoint_and_params(persistence, uid):
+    prompt_sha = f"ph-scope-{uid}"
+    endpoint = f"ep-scope-{uid}"
+    row = {
+        "cache_key": f"CACHE-SCOPE-{uid}", "prompt_sha256": prompt_sha, "endpoint": endpoint,
+        "served_model_version": "v1", "params_json": '{"max_tokens": 10}', "response_text": "hi",
+        "finish_reason": "stop", "usage_json": "{}", "source_call_id": f"CALL-SCOPE-{uid}",
+        "created_at": canonical_ts(0),
+    }
+    persistence.put_llm_cache_if_absent(row)
+    assert persistence.find_llm_cache(prompt_sha, endpoint, '{"max_tokens": 20}') == []
+    assert persistence.find_llm_cache(prompt_sha, "a-different-endpoint", row["params_json"]) == []
+    assert len(persistence.find_llm_cache(prompt_sha, endpoint, row["params_json"])) == 1
