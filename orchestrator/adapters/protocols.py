@@ -328,6 +328,95 @@ class PersistenceAdapter(Protocol):
     def list_exports(self, run_id: str) -> list[dict]:
         ...
 
+    # ── narration (P6, docs/specs/P6_narration_design.md §6.1 / WP N3b) ────
+
+    def upsert_narrative(self, row: dict) -> None:
+        """Idempotent by `narrative_id` (node rule 1, CLAUDE.md §2.3): `narratives`
+        holds the CURRENT version per narrated field, keyed on `narrative_id =
+        sha256(run_id|target_kind|target_id|field)[:32]` -- a re-execution of the
+        node that produced this field's text overwrites the same row rather than
+        appending. History (who/when/before/after) lives separately in
+        `narrative_edits` (`append_narrative_edit`), never here."""
+        ...
+
+    def get_narratives(self, run_id: str) -> list[dict]:
+        ...
+
+    def append_narrative_edit(self, row: dict) -> None:
+        """G14 append-only (CLAUDE.md §5 Tier B): inserts keyed on `edit_id =
+        sha256(narrative_id|version)`, never updates or deletes an existing row --
+        a retried write of the same edit_id is a no-op, not a duplicate or an
+        overwrite."""
+        ...
+
+    def list_narrative_edits(self, run_id: str) -> list[dict]:
+        """Not named in §6.1's contract table, added here as the obvious
+        minimal completion of `append_narrative_edit` -- without a way to read
+        it back, the append-only history it writes (G14, CLAUDE.md §5 Tier B)
+        would be unreachable through this Protocol at all."""
+        ...
+
+    def write_candidates(self, run_id: str, candidates: list[dict], *, now: str) -> None:
+        """Idempotent upsert by `candidate_id` (§5.1: `sha256(run_id|generation|
+        rule_id)[:24]`) -- a re-executed `narrate` node for the SAME generation
+        overwrites its own candidate rows, never appends duplicates. Unlike
+        `write_flagged_rows`/`write_run_metrics`, this never prunes: a candidate
+        already decided or superseded (§5.2) is never deleted, and a re-upsert
+        never resets its decision fields (candidate_status, decided_by, decided_at,
+        decision_reason, decided_severity, created_at are sticky, the same
+        pattern `write_findings` uses for review-lifecycle columns)."""
+        ...
+
+    def list_candidates(self, run_id: str) -> list[dict]:
+        ...
+
+    def decide_candidate_cas(
+        self,
+        candidate_id: str,
+        *,
+        decision: str,
+        reason: str | None,
+        decided_severity: str | None,
+        actor: str,
+        now: str,
+    ) -> bool:
+        """A conditional `UPDATE ... WHERE candidate_id = ? AND candidate_status =
+        'candidate'` (§5.2) -- zero rows affected (returns False) means the row was
+        already decided or superseded by a racing regenerate; this method never
+        raises for that case. The caller (service.decide_candidate, WP N9) is what
+        turns False into CandidateAlreadyDecided/CandidateSuperseded."""
+        ...
+
+    def supersede_undecided(self, run_id: str, *, below_generation: int, now: str) -> int:
+        """Regenerate step 1 (§5.2): marks every still-`candidate` row of this run
+        with `generation < below_generation` as `candidate_status='superseded'` and
+        returns the count changed. Rows already `accepted`/`rejected` are untouched
+        -- a decision is frozen, never superseded by a later regenerate."""
+        ...
+
+    def write_themes(self, run_id: str, themes: list[dict], *, now: str) -> None:
+        """Idempotent upsert by `theme_id` (`f"{run_id}:G{generation}:TH{ordinal}"`),
+        same never-prune/never-delete discipline as `write_candidates` -- a prior
+        generation's themes stay in Delta, distinguished by `generation` and
+        `superseded`."""
+        ...
+
+    def list_themes(self, run_id: str) -> list[dict]:
+        ...
+
+    def put_test_line_values(self, run_id: str, rows: list[dict]) -> None:
+        """§5.3: idempotent replace-per-run, the same MERGE + prune shape as
+        `write_flagged_rows`/`write_run_metrics` -- `rows` (each {test_id, source,
+        row_key, line_key, spend_amount, excess_amount}) becomes this run's entire
+        test_line_values set. `prioritise` writes it for every plan test with
+        flagged rows on an amount-bearing source; `finalise`'s deterministic
+        headline recompute (`exposure.headline`) reads it back via
+        `list_test_line_values`."""
+        ...
+
+    def list_test_line_values(self, run_id: str) -> list[dict]:
+        ...
+
     # ── uploaded files (P5) ──────────────────────────────────────────────
 
     def record_uploaded_file(self, row: dict) -> dict:
