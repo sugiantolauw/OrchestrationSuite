@@ -1756,6 +1756,20 @@ Source files are in `synthetic_data/`; row counts match `FILE_REGISTRY` exactly.
 - **Still outstanding (user-held):** the auditor-confirmed exception list for Surface 1, and a named
   reviewer to publish SKILL-001.
 
+### Cost incident and fixes (2026-09-24)
+
+The deployed App's executor polled Delta about 3,000 times an hour, even with nothing to run. That
+kept the serverless SQL warehouse awake from 02:00 to 22:00 UTC on 2026-09-23, using about 230 DBU
+(about $218 at list price). The App and the warehouse were stopped. The fixes, applied at the
+user's request:
+- No warehouse polling while idle. The executor wakes on in-process signals, plus a slow safety
+  sweep; it polls every 30–60 s only while runs are active. UI intervals run only for active runs.
+- A test on idle query volume.
+- Warehouse auto-stop set to 1 minute. The bootstrap in the porting kit sets the same.
+- A post-deploy check that the warehouse actually auto-stops while the App is idle.
+
+Never restart the App on a build that lacks the idle-polling fix.
+
 ### Further decisions from the user (2026-09-23)
 
 - **UI is the prototype's, exactly.** Every page matches `reference_app/src/platform/pages.py` and
