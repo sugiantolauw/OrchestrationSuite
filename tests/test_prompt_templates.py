@@ -4,8 +4,11 @@ offline -- no endpoint, no workspace."""
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from pathlib import Path
+from string import Template
 
 import pytest
 
@@ -215,3 +218,276 @@ def test_export_caption_uses_gpt_oss_with_low_reasoning_effort():
     profile = TASK_PROFILES["export_caption"]
     assert profile.role == "model_gpt_oss"
     assert profile.desired_params.get("reasoning_effort") == "low"
+
+
+# ── narration prompt templates (P6 WP N5, docs/specs/P6_narration_design.md
+# §4.3): orchestrator/prompts/narration/ -- one system_common.md shared by
+# every task, plus one <task>_user.md per task, plus a shared repair_user.md
+# (§3.5's repair round reuses the SAME task and schema, so one repair
+# template serves every task, never a per-task copy).
+#
+# FilePromptRepository (orchestrator.llm.prompts) is NOT reused here: its
+# pairing assumes one <id>_system.md PER template id, which is not this
+# shape -- wiring a production loader around "one shared system prompt,
+# nine per-task user templates" is WP N6/N7's job (the `narrate` node
+# runner, which also supplies `$generation_line`/`$payload_json` at call
+# time). This file only proves the raw template FILES this WP delivers
+# satisfy §4.3/§11 T-PT on their own, with the same plain
+# `string.Template.substitute` mechanism §4.3 names -- no production code
+# added for it. ─────────────────────────────────────────────────────────
+
+NARRATION_PROMPTS_ROOT = Path(__file__).parent.parent / "orchestrator" / "prompts" / "narration"
+
+# task key (orchestrator.config.NODE_MODELS / TASK_PROFILES) -> its own
+# <task>_user.md filename (§4.3's table; `find` is `finding_user.md`, not
+# `find_user.md` -- the template is named after what it writes, not the
+# task key).
+_NARRATION_USER_TEMPLATES = {
+    "profile": "profile_user.md",
+    "find": "finding_user.md",
+    "find_synthesis": "synthesis_user.md",
+    "find_candidates": "candidates_user.md",
+    "prioritise": "priority_user.md",
+    "act": "remediation_user.md",
+    "export_summary": "exec_summary_user.md",
+    "export_caption": "captions_user.md",
+}
+
+
+def _narration_files():
+    return sorted(NARRATION_PROMPTS_ROOT.glob("*.md"))
+
+
+def test_narration_prompt_files_exist_exactly_as_designed():
+    names = {p.name for p in _narration_files()}
+    assert names == {"system_common.md", "repair_user.md"} | set(_NARRATION_USER_TEMPLATES.values())
+
+
+def test_narration_task_profiles_agree_with_the_template_filename_map():
+    # Every TASK_PROFILES narration task has exactly one user template, and
+    # vice versa -- no orphaned template, no task without one.
+    assert set(_NARRATION_USER_TEMPLATES) == _NARRATION_TASKS
+
+
+def test_narration_prompt_templates_contain_no_organisation_or_endpoint_names():
+    # Reuses the same _FORBIDDEN pattern the Explorer templates are checked
+    # against above (§6: "no organisation, workspace or endpoint names").
+    offenders = []
+    for path in _narration_files():
+        text = path.read_text()
+        for match in _FORBIDDEN.finditer(text):
+            offenders.append(f"{path.name}: {match.group(0)!r}")
+    assert not offenders, "forbidden patterns found in narration prompt templates:\n" + "\n".join(offenders)
+
+
+def _render_narration_user(user_filename: str, **params) -> str:
+    template = Template((NARRATION_PROMPTS_ROOT / user_filename).read_text())
+    return template.substitute(**params)
+
+
+def _narration_system_text() -> str:
+    return (NARRATION_PROMPTS_ROOT / "system_common.md").read_text()
+
+
+_NARRATION_BASE_PARAMS = {"generation_line": "", "payload_json": '{"placeholder":true}'}
+
+
+def _params_for(user_filename: str) -> dict:
+    params = dict(_NARRATION_BASE_PARAMS)
+    if user_filename == "candidates_user.md":
+        params["max_candidates"] = "3"
+    return params
+
+
+@pytest.mark.parametrize("user_filename", sorted(set(_NARRATION_USER_TEMPLATES.values())))
+def test_narration_user_template_renders_with_every_placeholder_supplied(user_filename):
+    text = _render_narration_user(user_filename, **_params_for(user_filename))
+    assert "$" not in text  # no stray $placeholder left over (PromptTemplateError's own check)
+
+
+def test_repair_user_template_renders_with_every_placeholder_supplied():
+    text = _render_narration_user("repair_user.md", violations_json="[]", previous_output="{}")
+    assert "$" not in text
+
+
+@pytest.mark.parametrize("user_filename", sorted(set(_NARRATION_USER_TEMPLATES.values())))
+def test_narration_user_template_missing_placeholder_raises(user_filename):
+    params = _params_for(user_filename)
+    del params["payload_json"]
+    with pytest.raises(KeyError):
+        _render_narration_user(user_filename, **params)
+
+
+def test_repair_user_template_missing_placeholder_raises():
+    with pytest.raises(KeyError):
+        _render_narration_user("repair_user.md", violations_json="[]")
+
+
+def test_narration_system_common_is_shared_verbatim_by_every_task():
+    # There is exactly one system_common.md -- not a per-task copy -- so a
+    # rule change there (e.g. a lexicon addition) touches every task's
+    # prompt_sha256 identically, never nine independently-drifting copies.
+    text = _narration_system_text()
+    assert "PLACEHOLDERS" in text and "IDENTIFIERS" in text and "PAYLOAD" in text
+    assert "$" not in text  # no placeholder of its own -- it never varies per call
+
+
+def test_narration_user_templates_end_with_the_payload_section():
+    # §4.3: "Each ends with PAYLOAD:\n$payload_json (canonical JSON)."
+    for user_filename in set(_NARRATION_USER_TEMPLATES.values()):
+        text = (NARRATION_PROMPTS_ROOT / user_filename).read_text()
+        assert text.rstrip("\n").endswith("PAYLOAD:\n$payload_json"), user_filename
+
+
+# ── T-PT (§11, §12 WP N5): the same data gives prompt bytes that are
+# identical, and a golden prompt_sha256 per task. ───────────────────────────
+
+
+def _hash_prompt(system_text: str, user_text: str) -> str:
+    return hashlib.sha256((system_text + "\x00" + user_text).encode("utf-8")).hexdigest()
+
+
+# One representative, hand-built payload per task -- not the real
+# orchestrator.narration.payloads builder output (that shape is asserted by
+# test_narration_payloads.py already); this only needs to be realistic
+# enough to render every template branch and stay fixed, so the hash below
+# is a genuine regression check on the TEMPLATE FILES' bytes, not on
+# whatever payloads.py happens to produce today.
+_GOLDEN_PAYLOADS: dict[str, dict] = {
+    "profile": {
+        "placeholders": [
+            {"placeholder": "{count:rows_expense_report}", "rendered": "1,234",
+             "meaning": "row count of source expense_report"},
+            {"placeholder": "{count:nulls_expense_report_employee_id}", "rendered": "3",
+             "meaning": "null count of column 'Employee ID' in source expense_report"},
+        ]
+    },
+    "find": {
+        "finding_key": "T4_1", "title": "Missing Receipt Documentation", "test_id": "T4.1",
+        "test_name": "Missing Receipt Documentation",
+        "control_objective": "Ensure claims carry supporting receipts before reimbursement.",
+        "severity": "High", "severity_rule": "missing_receipt_pct > 10", "analyst_set_severity": True,
+        "placeholders": [
+            {"placeholder": "{count:missing_receipt_count}", "rendered": "12",
+             "meaning": "count metric of test T4.1 (Missing Receipt Documentation), unit count"},
+            {"placeholder": "{pct:missing_receipt_pct}", "rendered": "8.5%",
+             "meaning": "pct metric of test T4.1 (Missing Receipt Documentation), unit %"},
+        ],
+        "template_observation": "12 claims (8.5% of total) are missing receipt documentation.",
+        "template_recommendation": "Enforce mandatory receipt attachment before expense report submission.",
+        "template_management_questions": ["What is the current policy for handling claims without receipts?"],
+    },
+    "find_synthesis": {
+        "findings": [
+            {"key": "T4_1", "title": "Missing Receipt Documentation", "test_id": "T4.1", "severity": "High",
+             "severity_rule": "missing_receipt_pct > 10", "monetary_basis": "spend",
+             "placeholders": [{"placeholder": "{count:missing_receipt_count}", "rendered": "12",
+                                "meaning": "count metric of test T4.1"}]},
+            {"key": "T5_1", "title": "Split Claims", "test_id": "T5.1", "severity": "Medium",
+             "severity_rule": "split_claims_count > 0", "monetary_basis": "excess",
+             "placeholders": [{"placeholder": "{count:split_claims_count}", "rendered": "3",
+                                "meaning": "count metric of test T5.1"}]},
+        ]
+    },
+    "find_candidates": {
+        "tests": [
+            {"test_id": "T6.1d", "name": "Daily Spend Over Limit", "control_objective": "Limit daily spend.",
+             "status": "exception", "exception_units": 4,
+             "metrics": [{"placeholder": "{money:daily_over_amount}", "rendered": "$450.00", "kind": "excess",
+                           "covering_finding_keys": []}]},
+        ],
+        "rule_findings": [{"key": "T4_1", "title": "Missing Receipt Documentation",
+                            "metrics_cited": ["missing_receipt_count"]}],
+        "decided_candidates": [],
+    },
+    "prioritise": {
+        "items": [
+            {"key": "T4_1", "severity": "High", "title": "Missing Receipt Documentation",
+             "placeholders": [{"placeholder": "{money:exposure_amount}", "rendered": "$6,000.00",
+                                "meaning": "amount at risk"}]},
+        ]
+    },
+    "act": {
+        "items": [
+            {"key": "T4_1", "title": "Missing Receipt Documentation",
+             "effective_recommendation": "Enforce mandatory receipt attachment.",
+             "placeholders": [{"placeholder": "{count:missing_receipt_count}", "rendered": "12",
+                                "meaning": "count metric"}]},
+        ]
+    },
+    "export_summary": {
+        "placeholders": [
+            {"placeholder": "{count:run_finding_count}", "rendered": "6",
+             "meaning": "count of this run's findings"},
+            {"placeholder": "{money:run_exposure_headline}", "rendered": "$12,340.00",
+             "meaning": "the run's amount-at-risk headline"},
+        ],
+        "theme_titles": ["Documentation gaps", "Spend over limit"],
+        "top_findings": [{"title": "Missing Receipt Documentation", "severity": "High"}],
+    },
+    "export_caption": {
+        "charts": [
+            {"chart_id": "chart_high", "what_it_plots": "High-severity findings by test",
+             "placeholders": [{"placeholder": "{count:chart_high}", "rendered": "3",
+                                "meaning": "count of High-severity findings"}]},
+        ]
+    },
+}
+
+# Recorded once by running the golden payloads above through the templates
+# committed alongside this test (see the module docstring above this
+# section) -- a deliberate template edit changes these, and the diff makes
+# that visible rather than silent (§12 T-PT: "golden prompt_sha256 per task").
+_GOLDEN_PROMPT_SHA256: dict[str, str] = {
+    "profile": "69a093a88ada84a5c2244a06701698ea8b154e3dba38012d2203f0bac32ca3da",
+    "find": "74ce514d5e7a2c21438c1e7d58d873aa7f16f55311da53c2cdf8409ecbf3f536",
+    "find_synthesis": "b2e0026bb3acb37d3a983a491ef38c1aead66000db63c56754ab4b9ef3289bef",
+    "find_candidates": "fd0c9c52b79eb138d98bcf25b5892f4d3eae15f1065cacd995a76e5bbb9c84ea",
+    "prioritise": "328d869d1804fb1e4224150318f97a4c4472e3cb9fe0076d8dffe218248b6fce",
+    "act": "e03ad52c8d57fcc357de8ff803f4b631b8da3e047705d3d96137aea9812e4589",
+    "export_summary": "06c7450a34278ad46de168f8f33d0941b266d4bb30c31fc3f5b708543a931034",
+    "export_caption": "b28ef06e79b429aac58720cc9d6358bd3b0d76f50f53f7d2ae50480c88771643",
+}
+
+
+def _canonical(payload: dict) -> str:
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+@pytest.mark.parametrize("task", sorted(_NARRATION_USER_TEMPLATES))
+def test_narration_prompt_same_data_gives_byte_identical_prompts(task):
+    user_filename = _NARRATION_USER_TEMPLATES[task]
+    params = {"generation_line": "", "payload_json": _canonical(_GOLDEN_PAYLOADS[task])}
+    if task == "find_candidates":
+        params["max_candidates"] = "3"
+    text_a = _render_narration_user(user_filename, **params)
+    text_b = _render_narration_user(user_filename, **params)
+    assert text_a == text_b
+
+
+@pytest.mark.parametrize("task", sorted(_NARRATION_USER_TEMPLATES))
+def test_narration_prompt_matches_its_golden_sha256(task):
+    user_filename = _NARRATION_USER_TEMPLATES[task]
+    params = {"generation_line": "", "payload_json": _canonical(_GOLDEN_PAYLOADS[task])}
+    if task == "find_candidates":
+        params["max_candidates"] = "3"
+    user_text = _render_narration_user(user_filename, **params)
+    digest = _hash_prompt(_narration_system_text(), user_text)
+    assert digest == _GOLDEN_PROMPT_SHA256[task], (
+        f"{task}: prompt bytes changed (digest={digest!r}) -- update the golden hash only for a "
+        f"deliberate template edit"
+    )
+
+
+def test_narration_prompt_generation_line_changes_bytes_but_stays_deterministic():
+    # §1 #8 / §4.3: absent (empty) at generation 0 so first-generation
+    # prompts are cache-stable; present at generation > 0, and itself
+    # deterministic for a fixed generation number (regenerate's own cache
+    # key, §6.3).
+    payload_json = _canonical(_GOLDEN_PAYLOADS["find"])
+    gen0 = _render_narration_user("finding_user.md", generation_line="", payload_json=payload_json)
+    line = "Regeneration request: write a fresh version. Generation 1."
+    gen1_a = _render_narration_user("finding_user.md", generation_line=line, payload_json=payload_json)
+    gen1_b = _render_narration_user("finding_user.md", generation_line=line, payload_json=payload_json)
+    assert gen0 != gen1_a
+    assert gen1_a == gen1_b

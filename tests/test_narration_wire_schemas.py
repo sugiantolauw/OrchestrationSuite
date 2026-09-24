@@ -138,13 +138,14 @@ def _walk_string_leaves(schema, path="", out=None):
 
     if schema.get("type") == "array":
         # A scalar-string array (e.g. management_questions, paragraphs) is a
-        # leaf at the ARRAY's own path; an array of objects recurses.
-        items = schema.get("items", {})
-        if items.get("type") == "object":
-            _walk_string_leaves(items, path, out)
-        elif items.get("type") == "string":
-            if path:
-                out[path] = "prose"
+        # leaf at the ARRAY's own path; an array of objects recurses into
+        # its own properties at that same path; an array of ENUM strings
+        # (metrics_cited, finding_keys) must be classified the same way a
+        # bare enum property would be -- recursing uniformly through the
+        # top-of-function enum/const check does that in one place, rather
+        # than re-deciding "object vs string" here and silently mis-classing
+        # an enum-of-strings array as free prose.
+        _walk_string_leaves(schema.get("items", {}), path, out)
         return out
 
     if schema.get("type") == "string":

@@ -347,6 +347,98 @@ def test_narration_call_context_always_has_empty_whitelist(skill):
     assert "Employee" in ctx.pii_columns_masked
 
 
+# ── G15 sentinel, at payload level (§11 "G15 ... at payload level") ────────
+#
+# The full G15 gate (a recording model client, a real run, every logged
+# `llm_calls.messages_json` row) is WP N13 scope -- this module has no run,
+# no data source and no model client to wire one through. What belongs
+# here, and is testable now, is the module docstring's own claim (top of
+# this file's source, orchestrator.narration.payloads): every builder reads
+# only already-aggregated dicts (`run_metrics`/`findings`/`test_results`/
+# `profile_result`), so a PII column's real VALUE has no path into a
+# payload at all -- not because something filters it out, but because
+# nothing here ever receives it. A sentinel planted where a bug COULD
+# plausibly introduce a leak (a PII column's own contract metadata, which
+# `pii_columns_masked` walks) proves the one function that does read
+# `skill.contract` still surfaces only column NAMES.
+
+import copy
+import inspect
+
+_PII_SENTINEL = "SENTINEL-PII-7731@example.test"
+
+
+def test_g15_pii_columns_masked_never_echoes_a_value_planted_in_contract_metadata(skill):
+    contract = copy.deepcopy(skill.contract)
+    # A value that could only reach here via contract METADATA -- never a
+    # raw row -- planted on a column spec key pii_columns_masked() does not
+    # read (it only ever reads the dict KEY and the "pii" flag; see its own
+    # docstring/source above).
+    contract["sources"]["expense_report"]["columns"]["Employee"]["description"] = _PII_SENTINEL
+
+    class _ContractOnly:
+        pass
+
+    stand_in = _ContractOnly()
+    stand_in.contract = contract
+    masked = pii_columns_masked(stand_in)
+
+    assert "Employee" in masked
+    assert all(_PII_SENTINEL not in name for name in masked)
+
+
+def test_g15_payload_builders_take_no_row_level_or_data_source_argument():
+    # Structural half of the same guarantee: no builder in this module can
+    # be CALLED with a DataFrame, a row list or ctx.data_source in the first
+    # place -- their own parameter names never invite one.
+    forbidden_param_names = {"ctx", "data_source", "df", "dataframe", "rows", "row"}
+    builders = [
+        build_finding_payload, build_synthesis_payload, build_candidates_payload,
+        build_priority_payload, build_remediation_payload, build_exec_summary_payload,
+        build_caption_payload, build_profile_payload,
+    ]
+    for fn in builders:
+        params = set(inspect.signature(fn).parameters)
+        offending = params & forbidden_param_names
+        assert not offending, f"{fn.__name__} accepts {offending} -- a row-level input path"
+
+
+def test_g15_sentinel_absent_from_every_payload_built_with_tainted_contract_metadata(skill):
+    # Runs a full round of every payload builder using ordinary, legitimate
+    # aggregate inputs (no sentinel anywhere in run_metrics/findings/
+    # profile_result -- those never carry one for real), alongside a
+    # skill whose CONTRACT metadata carries the sentinel the way the first
+    # test above plants it. If a payload builder ever started reading
+    # skill.contract for anything beyond pii_columns_masked's own column-
+    # name walk, this is what would catch it.
+    contract = copy.deepcopy(skill.contract)
+    contract["sources"]["expense_report"]["columns"]["Employee"]["description"] = _PII_SENTINEL
+
+    class _TaintedSkill:
+        pass
+
+    tainted = _TaintedSkill()
+    tainted.contract = contract
+    tainted.skill_dir = skill.skill_dir
+
+    finding = _finding(metrics_cited={"missing_receipt_count": _metric(12)})
+    state = _State(profile_result={"expense_report": {"row_count": 5, "null_counts": {"Employee ID": 2}}})
+    period = ("2026-01-01", "2026-06-30")
+
+    payloads = [
+        narration_call_context(tainted, run_id="RUN1").__dict__,
+        build_finding_payload(finding, skill=tainted, period=period)[0],
+        build_synthesis_payload([finding], skill=tainted)[0],
+        build_priority_payload([finding], skill=tainted, period=period)[0],
+        build_remediation_payload([finding], skill=tainted, period=period)[0],
+        build_exec_summary_payload(state, [finding], {})[0],
+        build_caption_payload([{"chart_id": "c", "what_it_plots": "x", "metric_names": []}], {})[0],
+        build_profile_payload(state)[0],
+    ]
+    for payload in payloads:
+        assert _PII_SENTINEL not in json.dumps(payload, default=str)
+
+
 # ── finding_key ──────────────────────────────────────────────────────────
 
 
