@@ -533,6 +533,20 @@ class TracingAdapter(Protocol):
     def end_span(self, span_id: str, *, outcome: str, attributes: dict | None = None) -> None:
         ...
 
+    def end_run(self, run_id: str, *, status: str) -> None:
+        """Terminates the ONE parent MLflow run for this pipeline run
+        (CLAUDE.md §2.3) with `status` in {"FINISHED", "FAILED", "KILLED"} --
+        called at every RunState terminal transition (completed -> FINISHED,
+        failed -> FAILED, interrupted -> KILLED) AND at each HITL pause gate
+        (awaiting_confirmation/awaiting_signoff -> FINISHED, since this
+        executor pass genuinely finished; a later resume finds the same
+        parent run via start_run's idempotent lookup and reuses its id,
+        never creating a duplicate, and a later end_run call updates its
+        final status again). A parent run left RUNNING for a paused run's
+        entire wait -- possibly hours, across an App restart -- is the
+        defect this closes (P3 gap-audit review)."""
+        ...
+
 
 class NullTracing:
     """The default TracingAdapter when none is configured: every call is a
@@ -556,6 +570,9 @@ class NullTracing:
         return ""
 
     def end_span(self, span_id: str, *, outcome: str, attributes: dict | None = None) -> None:
+        return None
+
+    def end_run(self, run_id: str, *, status: str) -> None:
         return None
 
 

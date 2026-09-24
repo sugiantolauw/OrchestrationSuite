@@ -154,6 +154,20 @@ def _end_node_span(tracing, span_id: str, *, outcome: str, attributes: dict | No
         pass  # CLAUDE.md §2.3: tracing never changes the audit result
 
 
+def _end_pipeline_trace(tracing, run_id: str, *, status: str) -> None:
+    # P3 gap-audit review: the parent MLflow run (start_pipeline_trace) must
+    # reach a terminal state -- at every RunState terminal transition
+    # (completed/failed/interrupted) AND at each HITL pause gate
+    # (awaiting_confirmation/awaiting_signoff), since neither pause status is
+    # revisited by this executor pass again. Never allowed to affect the
+    # audit result (CLAUDE.md §2.3 rule 4): any failure here is swallowed,
+    # exactly like _end_node_span.
+    try:
+        tracing.end_run(run_id, status=status)
+    except Exception:
+        pass
+
+
 def _check_lifecycle_unchanged(state: RunState, result: RunState) -> None:
     # A node may only write NODE_OWNED fields (CLAUDE.md §4.1, B1) -- the pipeline loop
     # enforces this rather than trusting it, comparing every LIFECYCLE field between
@@ -207,7 +221,9 @@ def run_phase(
                 state, "failed", now=now_fail,
                 reason=f"fingerprint mismatch, run never executed: {sorted(exc.differing_fields)}",
             )
-            return persistence.save_state(failed_state)
+            saved = persistence.save_state(failed_state)
+            _end_pipeline_trace(tracing, run_id, status="FAILED")
+            return saved
         state = _transition_and_save(persistence, state, "running", now=clock())
 
     if state.status != "running":
@@ -294,6 +310,7 @@ def run_phase(
                     persistence, state, attempt, event_type="node_failed",
                     message=f"{node_name} failed: {exc!r}", now=now_fail, duration_s=duration,
                 )
+                _end_pipeline_trace(tracing, run_id, status="FAILED")
                 return state
 
             duration = time.monotonic() - started_at
@@ -323,7 +340,14 @@ def run_phase(
         if state.phase == "plan":
             auto_confirm = state.mode == "playbook" and bool(state.options.get("auto_confirm_plan"))
             if not auto_confirm:
-                return _transition_and_save(persistence, state, "awaiting_confirmation", now=clock())
+                state = _transition_and_save(persistence, state, "awaiting_confirmation", now=clock())
+                # A HITL pause gate (CLAUDE.md §2.4): this executor pass is done, and
+                # confirm_plan's own resumed pass will start a fresh MLflow parent run
+                # lookup that finds and reuses this same one (start_run's idempotent
+                # tag search) -- never left dangling RUNNING for however long a human
+                # takes to confirm (P3 gap-audit review).
+                _end_pipeline_trace(tracing, run_id, status="FINISHED")
+                return state
             # The plan->execute gate (status.py) accepts this via the auto-confirm
             # clause, but plan_confirmed is still set explicitly here so the audit
             # trail on `state` reflects that the plan WAS confirmed, not silently
@@ -332,8 +356,12 @@ def run_phase(
             state = _transition_and_save(persistence, state, "running", now=clock(), phase="execute")
             continue
         if state.phase == "execute":
-            return _transition_and_save(persistence, state, "awaiting_signoff", now=clock())
+            state = _transition_and_save(persistence, state, "awaiting_signoff", now=clock())
+            _end_pipeline_trace(tracing, run_id, status="FINISHED")  # HITL pause gate, as above
+            return state
         if state.phase == "export":
-            return _transition_and_save(persistence, state, "completed", now=clock())
+            state = _transition_and_save(persistence, state, "completed", now=clock())
+            _end_pipeline_trace(tracing, run_id, status="FINISHED")
+            return state
 
         raise ValueError(f"unknown phase {state.phase!r}")
