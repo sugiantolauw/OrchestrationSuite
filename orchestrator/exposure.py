@@ -309,9 +309,21 @@ def build_test_line_values(
     primitive that supports an at-risk allocation (duplicate_detection,
     group_by threshold_exceedance) AND only when the row genuinely belongs
     to THIS test's own re-derived group -- see the module docstring for why
-    a row can legitimately be left out of one sibling test's rows here."""
+    a row can legitimately be left out of one sibling test's rows here.
+
+    Coordinator fix (2026-09-24, NN14): a row can legitimately be absent
+    from ONE grouped sibling test's rows here -- it may belong to another
+    sibling sharing the same flag NAME (T6.1d_dom/_int's shape) -- but a row
+    that matches NEITHER sibling's re-derived group is a genuine data
+    anomaly, and must raise loudly rather than be silently left out of every
+    sibling's rows (which would silently under-count the headline with no
+    signal). `claimed_by_test` tracks which (source, row_key) each grouped
+    test actually claimed; after every test has run, any flag shared by two
+    or more grouped tests is checked for a row none of its owners claimed."""
     contract_validated_sources: set[str] = set()
     rows_out: list[dict] = []
+    claimed_by_test: dict[str, set[tuple]] = {}
+    grouped_test_flags: dict[str, set[str]] = {}
 
     for test_id, test in tests_by_id.items():
         flags = flags_by_test_id.get(test_id, set())
@@ -343,6 +355,9 @@ def build_test_line_values(
                 contract_validated_sources, bindings,
             )
 
+        if dup_first_by_group is not None or excess_map is not None:
+            grouped_test_flags[test_id] = flags
+
         for r in candidate_rows:
             source, row_key = r["source"], r["row_key"]
             if source not in amount_col_by_source:
@@ -373,6 +388,32 @@ def build_test_line_values(
                 "spend_amount": spend_amount,
                 "excess_amount": excess_amount,
             })
+            claimed_by_test.setdefault(test_id, set()).add((source, row_key))
+
+    # Every flag shared by two or more grouped tests (siblings): a row
+    # flagged under it that amount_col_by_source can price, but that none of
+    # those siblings claimed above, resolves to no sibling's re-derived
+    # group at all -- never silently dropped (see the fix note above).
+    flag_owner_tests: dict[str, list[str]] = {}
+    for owner_test_id, owner_flags in grouped_test_flags.items():
+        for flag in owner_flags:
+            flag_owner_tests.setdefault(flag, []).append(owner_test_id)
+
+    for flag, owner_tests in flag_owner_tests.items():
+        if len(owner_tests) < 2:
+            continue
+        for r in rows_by_flag.get(flag, []):
+            source, row_key = r["source"], r["row_key"]
+            if source not in amount_col_by_source:
+                continue
+            claimed = any((source, row_key) in claimed_by_test.get(tid, set()) for tid in owner_tests)
+            if not claimed:
+                raise ContractViolation(
+                    [f"{source} row {row_key!r}: flagged under {flag!r} but matches the "
+                     f"re-derived group of none of its sibling sub-tests {sorted(owner_tests)} "
+                     f"-- this row's amount-at-risk contribution would otherwise be silently "
+                     f"dropped from the headline"]
+                )
 
     return rows_out
 

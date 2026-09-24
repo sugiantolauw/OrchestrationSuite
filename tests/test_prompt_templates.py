@@ -153,8 +153,16 @@ def test_planner_rules_text_is_the_numbered_rules_block():
 # ── TASK_PROFILES (§3.4) ────────────────────────────────────────────────────
 
 
-def test_task_profiles_cover_the_two_explorer_tasks():
-    assert set(TASK_PROFILES) == {"plan_explorer", "plan_repair"}
+_NARRATION_TASKS = {
+    "profile", "find", "find_synthesis", "find_candidates",
+    "prioritise", "act", "export_summary", "export_caption",
+}
+
+
+def test_task_profiles_cover_the_explorer_and_narration_tasks():
+    # P6 WP N5 (docs/specs/P6_narration_design.md §4.1) added the eight
+    # narration tasks alongside the two pre-existing Explorer ones.
+    assert set(TASK_PROFILES) == {"plan_explorer", "plan_repair"} | _NARRATION_TASKS
 
 
 def test_task_profiles_role_agrees_with_node_models():
@@ -181,3 +189,29 @@ def test_plan_repair_has_no_fallback():
 def test_task_profiles_are_structured_output():
     for task, profile in TASK_PROFILES.items():
         assert profile.structured_output is True, task
+
+
+# ── narration TASK_PROFILES (P6 WP N5, §4.1) ────────────────────────────────
+
+
+def test_narration_task_profiles_fallback_agrees_with_fallback_role():
+    # FALLBACK_ROLE (orchestrator.llm.tasks) is the registry LLMGateway.call()
+    # actually reads; TaskProfile.fallback must say the same thing for every
+    # narration task, never a second, driftable copy of the same fact.
+    from orchestrator.llm.tasks import FALLBACK_ROLE
+
+    for task in _NARRATION_TASKS:
+        assert TASK_PROFILES[task].fallback == FALLBACK_ROLE.get(task), task
+
+
+def test_narration_task_profiles_desired_params_have_temperature_zero():
+    # §4.1's table: every narration task is deterministic prose generation
+    # (temperature 0), never sampled.
+    for task in _NARRATION_TASKS:
+        assert TASK_PROFILES[task].desired_params.get("temperature") == 0, task
+
+
+def test_export_caption_uses_gpt_oss_with_low_reasoning_effort():
+    profile = TASK_PROFILES["export_caption"]
+    assert profile.role == "model_gpt_oss"
+    assert profile.desired_params.get("reasoning_effort") == "low"

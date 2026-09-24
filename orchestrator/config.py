@@ -24,6 +24,11 @@ DEFAULT_PPTX_TEMPLATE_PATH = str(_REPO_ROOT / "templates" / "report_template.ppt
 NODE_MODELS: dict[str, str] = {
     "plan_explorer": "model_sonnet",
     "find": "model_sonnet",
+    # find_synthesis/find_candidates (P6 WP N5, docs/specs/P6_narration_design.md
+    # §4.1): the narrate node's remaining two Sonnet-routed tasks -- additive
+    # only, alongside the six narration task keys already present above/below.
+    "find_synthesis": "model_sonnet",
+    "find_candidates": "model_sonnet",
     "export_summary": "model_sonnet",
     "profile": "model_sonnet",
     "prioritise": "model_sonnet",

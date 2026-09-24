@@ -24,9 +24,12 @@ Also covers `orchestrator.exposure`'s own dedup rules directly (not only via
 the full `prioritise` pipeline test_exposure_dedup.py already exercises):
 max per distinct line, spend vs excess basis, a non-unique entry_key
 raising loudly, `build_test_line_values` covering a test NO finding cites
-(the AI-proposed-candidate anchor-metric case, §5.1 C-2), and
+(the AI-proposed-candidate anchor-metric case, §5.1 C-2),
 `put_test_line_values`'s idempotent replace-per-run semantics (CLAUDE.md
-§2.3 rule 1)."""
+§2.3 rule 1), and the coordinator fix (2026-09-24, NN14): a flagged row on
+an amount-bearing test that matches none of its sibling sub-tests'
+re-derived groups (T6.1d_dom/_int's shape) raises `ContractViolation` at
+build time instead of being silently left out of `test_line_values`."""
 
 from __future__ import annotations
 
@@ -347,6 +350,76 @@ def test_build_test_line_values_covers_a_test_no_finding_cites(local_persistence
     )
     uncited_row = next(r for r in outcome["test_line_values"] if r["test_id"] == "TUNCITED")
     assert uncited_row["spend_amount"] == 200.0
+
+
+def test_build_test_line_values_raises_when_a_row_matches_no_sibling_sub_tests_group(local_persistence, tmp_path):
+    # Coordinator fix (2026-09-24, NN14): two sibling sub-tests sharing one
+    # flag NAME (T6.1d_dom/_int's shape -- both would write
+    # RF_CS_DailySpendOverLimit) each re-derive their OWN group_by
+    # threshold_exceedance population. A row legitimately absent from ONE
+    # sibling's own re-derived group (because it belongs to the other) must
+    # stay silent -- r1 (TDOM's own group) and rX (TINT's own group) below
+    # are each claimed by exactly one sibling and must NOT raise. But r3 is
+    # flagged under the shared flag, prices on an amount-bearing source, and
+    # is filtered out of BOTH siblings' own re-derived populations -- it
+    # must raise ContractViolation at build time, never be silently dropped
+    # (which would silently under-count the headline with no signal).
+    def read_population(source, *, version=None):
+        if source == "claims":
+            # pop_dom filters to Employee ID == 1 below, so r3 (Employee ID
+            # 99) is present in the raw source (row_amount sees it) but
+            # never enters TDOM's own re-derived group_by population.
+            return pd.DataFrame({
+                "__row_key": ["r1", "r3"],
+                "Employee ID": [1, 99],
+                "Transaction Date": ["2026-01-05", "2026-01-07"],
+                "Vendor": ["V1", "V3"],
+                "Amount": [600.0, 50.0],
+            })
+        assert source == "register"
+        return pd.DataFrame({
+            "__row_key": ["rX"], "Employee ID": [2], "Transaction Date": ["2026-01-06"],
+            "Vendor": ["V2"], "Amount": [700.0],
+        })
+
+    h = _rig(
+        local_persistence, tmp_path,
+        populations={
+            "pop_dom": {
+                "source": "claims", "amount_column": "Amount",
+                "filters": [{"column": "Employee ID", "op": "eq", "value": 1}],
+            },
+            "pop_int": {"source": "register", "amount_column": "Amount"},
+        },
+        tests=[
+            {"test_id": "TDOM", "flag": "RF_OVERLIMIT", "primitive": "threshold_exceedance",
+             "params": {"flag": "RF_OVERLIMIT", "group_by": ["Employee ID", "Transaction Date"],
+                        "column": "Amount", "limit": {"threshold": "daily_limit"}, "population": "pop_dom",
+                        "metrics": {"dom_over_amount": {"kind": "sum", "column": "Amount", "unit": "AUD"}}}},
+            {"test_id": "TINT", "flag": "RF_OVERLIMIT", "primitive": "threshold_exceedance",
+             "params": {"flag": "RF_OVERLIMIT", "group_by": ["Employee ID", "Transaction Date"],
+                        "column": "Amount", "limit": {"threshold": "daily_limit"}, "population": "pop_int",
+                        "metrics": {"int_over_amount": {"kind": "sum", "column": "Amount", "unit": "AUD"}}}},
+        ],
+        read_population=read_population,
+    )
+    h.ctx.skill.thresholds["daily_limit"] = {"value": 500}
+    h.persistence.write_flagged_rows(h.state.run_id, [
+        _flagged_row("claims", "r1", "RF_OVERLIMIT"),
+        _flagged_row("register", "rX", "RF_OVERLIMIT"),
+        _flagged_row("claims", "r3", "RF_OVERLIMIT"),
+    ])
+    h.persistence.write_run_metrics(h.state.run_id, [
+        {"metric_name": "dom_over_amount", "value": 100.0, "unit": "AUD", "source_ref": {}, "test_id": "TDOM"},
+        {"metric_name": "int_over_amount", "value": 200.0, "unit": "AUD", "source_ref": {}, "test_id": "TINT"},
+    ])
+    finding = _finding("FD", test_id="TDOM", metrics_cited={"dom_over_amount": _metric(100.0)}, monetary_basis="excess")
+
+    rows_by_flag = {"RF_OVERLIMIT": h.persistence.list_flagged_rows(h.state.run_id)}
+    existing_metrics = h.persistence.get_run_metrics(h.state.run_id)
+
+    with pytest.raises(ContractViolation, match="r3"):
+        exposure.compute_run_exposure(h.ctx, h.state, h.ctx.skill, [finding], existing_metrics, rows_by_flag)
 
 
 # ── idempotent write (node rule 1: overwrite, never duplicate) ──────────
