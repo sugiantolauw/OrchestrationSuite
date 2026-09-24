@@ -468,6 +468,16 @@ Change none of these without stopping and proposing to the user first.
    evaluating those rules against data. The runtime LLM writes prose around numbers the node
    already fixed, and synthesises themes across findings. It never invents a finding, a number
    or a severity. `execute` never calls an LLM.
+
+   **Amended by the user, 2026-09-24 (hybrid findings):** rules still produce the baseline
+   findings. At run time the `find` node's model may also *propose* additional findings from
+   the run's computed test results. Each proposal cites only metrics this run computed, and its
+   numbers are filled by Python, never written by the model. A proposed finding is a **candidate**
+   until an auditor accepts it at sign-off. Accepted ones are labelled "AI-proposed, accepted by
+   <name>"; rejected ones are kept with the reason, never deleted. Only accepted findings reach
+   exports, counts and the headline. The model still never changes a rule finding's existence,
+   numbers or severity. Design: `docs/specs/P6_narration_design.md`.
+
 3. **Two HITL gates** (§2.4). Findings sign-off is mandatory in both modes.
 4. **Skills are data.** A Skill is YAML (manifest, contract, plan, thresholds, prompts) plus a
    small `custom.py` escape hatch and a `workspace.py`. Not a pile of bespoke functions.
@@ -1933,6 +1943,17 @@ acceptance testing:
   - ServiceNow submission requires approval, with self-approval labelled until P7;
   - `/runs` and `/actions` stay fieldwork-only;
   - lifecycle runs reuse `/run/<id>`.
+
+### Hybrid findings (user decision, 2026-09-24)
+
+Asked how much the model should decide about findings at run time, the user chose the hybrid:
+- Rules produce the baseline findings: coverage and repeatability are guaranteed.
+- The model writes all finding prose: narratives, recommendations, management questions, themes,
+  root-cause hypotheses and the executive summary.
+- The model may propose extra findings from the computed test results. They are candidates until
+  an auditor accepts or rejects each at sign-off. Numbers are never written by the model.
+- NN2 is amended accordingly (§3). A purely rules-based finding set, with the model only writing
+  prose, was declined as defeating the product's purpose.
 
 ### Further decisions from the user (2026-09-23)
 
