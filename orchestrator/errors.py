@@ -157,6 +157,25 @@ class NonDraftFindingWouldBeDeleted(Exception):
         )
 
 
+class ConfiguredSourceUnavailable(Exception):
+    """Independent review 2026-09-24 item 1: a contract source bound (via
+    SOURCE_BINDINGS, orchestrator.source_bindings) to an exact Volume file
+    that cannot be read -- missing, or a permission/transport failure.
+    Raised instead of falling back to any bundled default: the corporate-
+    workspace decision is explicit that per-diem rates and other Volume-
+    bound sources must come from the Volume, with no fallback (CLAUDE.md
+    NN14)."""
+
+    def __init__(self, source: str, path: str, reason: str):
+        self.source = source
+        self.path = path
+        self.reason = reason
+        super().__init__(
+            f"{source}: configured Volume file {path!r} could not be read ({reason}) -- "
+            f"no bundled fallback; fix the SOURCE_BINDINGS entry or the file itself"
+        )
+
+
 class MissingSeverityProvenance(Exception):
     """CLAUDE.md §0.4/G8, P2/P3 gate review item 3: a finding whose severity
     provenance (analyst_set_severity / severity_basis) was never persisted.

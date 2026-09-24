@@ -89,6 +89,22 @@ class Settings:
     executor_active_poll_interval_s: float = 30.0
     executor_idle_poll_interval_s: float = 0.0
     pptx_template_path: str = DEFAULT_PPTX_TEMPLATE_PATH
+    # Independent review 2026-09-24 item 1: per-environment source-binding
+    # config (orchestrator.source_bindings) -- an exact, pre-declared
+    # mapping of a Skill's contract sources to a Volume file or a governed
+    # UC table, for a workspace whose sources are Excel files in a Volume
+    # rather than Delta tables. A gitignored path, never a repo-committed
+    # one (CLAUDE.md NN16); unset means no configured bindings at all.
+    # Excluded from the runtime config hash below, same reasoning as
+    # pptx_template_path: the run's OWN pinned source_table_versions/
+    # uploaded_file_hashes already record exactly what was read, so two
+    # runs against identical data should share a fingerprint regardless of
+    # which config file pointed at it.
+    source_bindings_path: str | None = None
+    # Readiness caching (independent review item 5): results are cached for
+    # this many seconds so /ready does not re-probe the Volume/warehouse/
+    # model endpoints on every poll (cost -- CLAUDE.md §11 cost incident).
+    readiness_cache_ttl_s: float = 120.0
 
     def __post_init__(self) -> None:
         _validate_identifier("catalog", self.catalog)
@@ -139,6 +155,8 @@ def load_settings(env: dict | None = None) -> Settings:
         executor_active_poll_interval_s=_parse_float(env.get("EXECUTOR_ACTIVE_POLL_INTERVAL_S"), 30.0),
         executor_idle_poll_interval_s=_parse_float(env.get("EXECUTOR_IDLE_POLL_INTERVAL_S"), 0.0),
         pptx_template_path=env.get("PPTX_TEMPLATE_PATH") or DEFAULT_PPTX_TEMPLATE_PATH,
+        source_bindings_path=env.get("SOURCE_BINDINGS") or None,
+        readiness_cache_ttl_s=_parse_float(env.get("READINESS_CACHE_TTL_S"), 120.0),
         # P2/P3 gate review item 4 (MLflow per-node spans, CLAUDE.md §2.3).
         # Unset -- never hardcoded here -- means mlflow's own default
         # resolution: MLFLOW_TRACKING_URI if the process environment already
@@ -175,6 +193,8 @@ _RUNTIME_HASH_EXCLUDED_FIELDS = frozenset({
     # RunState" rule), so two runs configured identically except for this
     # should still share a fingerprint.
     "pptx_template_path",
+    "source_bindings_path",
+    "readiness_cache_ttl_s",
 })
 
 

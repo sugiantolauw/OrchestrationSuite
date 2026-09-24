@@ -44,6 +44,7 @@ owned by the Unity Catalog work) against Unity Catalog, surfaced as
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import logging
@@ -72,6 +73,12 @@ from orchestrator.pipeline import NODE_STAGE_LABELS
 from orchestrator.signoff_policy import SOD_ENFORCED, evaluate_signoff
 from orchestrator.skill_registry import register_skill
 from orchestrator.skills import load_skill, plan_test_flags
+from orchestrator.source_bindings import (
+    bindings_for_skill,
+    load_source_bindings,
+    suggested_values,
+    volume_file_paths,
+)
 from orchestrator.state import RunState, to_json
 from orchestrator.timeutil import utc_now
 
@@ -101,7 +108,7 @@ class AppContext:
     # caller that DOES have a Skill passes it so a source bound to an
     # uploaded file's Volume path can be parsed correctly (CLAUDE.md §5 UI
     # item 5, orchestrator.adapters.datasource_volume_upload).
-    data_source_factory: Callable[[dict[str, str], dict[str, dict] | None], Any]
+    data_source_factory: Callable[[dict[str, str], dict[str, dict] | None, str | None], Any]
     export_storage: Any
     clock: Callable[[], str]
     executor: Any = None
@@ -135,7 +142,7 @@ def _all_skill_source_configs(skills_dir: Path) -> dict[str, dict]:
 def _local_data_source_factory(skills_dir: Path, data_root: Path) -> Callable[[dict[str, str]], Any]:
     configs = _all_skill_source_configs(skills_dir)
 
-    def factory(bindings: dict[str, str], contract_sources: dict[str, dict] | None = None):
+    def factory(bindings: dict[str, str], contract_sources: dict[str, dict] | None = None, skill_id: str | None = None):
         sources: dict[str, dict] = {}
         for name in bindings:
             cfg = dict(configs.get(name) or {})
@@ -146,6 +153,23 @@ def _local_data_source_factory(skills_dir: Path, data_root: Path) -> Callable[[d
         return LocalFileDataSource(root_dir=data_root, sources=sources)
 
     return factory
+
+
+@functools.lru_cache(maxsize=8)
+def _load_source_bindings_cached(path: str) -> dict:
+    return load_source_bindings(path)
+
+
+def configured_bindings_for_skill(ctx: AppContext, skill_id: str | None) -> dict[str, dict]:
+    """Independent review 2026-09-24 item 1: this Skill's SOURCE_BINDINGS
+    entries (orchestrator.source_bindings), `{}` when SOURCE_BINDINGS is
+    unset or the Skill has none configured. Cached per bindings-file path
+    for the process lifetime -- a config-file edit takes effect on restart,
+    same as every other config value this App reads at startup."""
+    if not skill_id or not ctx.settings.source_bindings_path:
+        return {}
+    config = _load_source_bindings_cached(ctx.settings.source_bindings_path)
+    return bindings_for_skill(config, skill_id)
 
 
 def _skill_dir_for(ctx: AppContext, skill_id: str | None) -> Path:
@@ -184,7 +208,7 @@ def build_node_context(ctx: AppContext, state: RunState) -> NodeContext:
     skill_dir = _skill_dir_for(ctx, state.skill_id)
     skill = load_skill(skill_dir)
     bindings = {b["source"]: b["table_fqn"] for b in state.data_assets}
-    data_source = ctx.data_source_factory(bindings, skill.contract.get("sources", {}))
+    data_source = ctx.data_source_factory(bindings, skill.contract.get("sources", {}), state.skill_id)
     return NodeContext(
         settings=ctx.settings,
         persistence=ctx.persistence,
@@ -196,17 +220,32 @@ def build_node_context(ctx: AppContext, state: RunState) -> NodeContext:
     )
 
 
+def _flat_file_hashes(ctx: AppContext, skill_id: str | None, path_versions: dict[str, str]) -> dict[str, str]:
+    """Restricts `{bound value: version}` (e.g. `data_assets`' table_fqn ->
+    version, or `bindings[name] -> resolved version`) to the entries whose
+    bound value is a flat file's Volume path -- an ad-hoc upload, or an
+    independent review 2026-09-24 item 1 SOURCE_BINDINGS `volume_file` entry
+    for this Skill -- the set `run_fingerprints.uploaded_file_hashes` pins
+    (CLAUDE.md §4.1 P1A). Shared by start_audit_run and build_run_fingerprint
+    so a resumed/verified run's recomputed fingerprint always matches what
+    was captured at creation."""
+    uploaded_volume_paths = {r["volume_path"] for r in ctx.persistence.list_uploaded_files()}
+    configured_paths = set(volume_file_paths(configured_bindings_for_skill(ctx, skill_id)))
+    flat_paths = uploaded_volume_paths | configured_paths
+    return {path: version for path, version in path_versions.items() if path in flat_paths}
+
+
 def build_run_fingerprint(ctx: AppContext, state: RunState) -> dict:
     skill_dir = _skill_dir_for(ctx, state.skill_id)
     pinned_versions = {b["source"]: b["version"] for b in state.data_assets}
     # Same reconstruction as start_audit_run: a binding whose value is a
-    # recorded upload's volume_path is pinned as an uploaded_file_hash too,
-    # so a resumed/verified run's recomputed fingerprint matches the one
-    # captured at creation (CLAUDE.md §4.1 "verified at every executor pass").
-    uploaded_volume_paths = {r["volume_path"] for r in ctx.persistence.list_uploaded_files()}
-    uploaded_file_hashes = {
-        b["table_fqn"]: b["version"] for b in state.data_assets if b["table_fqn"] in uploaded_volume_paths
-    }
+    # recorded upload's volume_path -- or a configured Volume file's path --
+    # is pinned as an uploaded_file_hash too, so a resumed/verified run's
+    # recomputed fingerprint matches the one captured at creation
+    # (CLAUDE.md §4.1 "verified at every executor pass").
+    uploaded_file_hashes = _flat_file_hashes(
+        ctx, state.skill_id, {b["table_fqn"]: b["version"] for b in state.data_assets}
+    )
     return _compute_run_fingerprint(ctx, skill_dir, pinned_versions, uploaded_file_hashes)
 
 
@@ -249,7 +288,7 @@ def build_app_context(env: dict | None = None) -> AppContext:
         persistence.migrate()
 
         def _uc_factory(bindings: dict[str, str], contract_sources: dict[str, dict] | None = None,
-                        _settings=settings, _persistence=persistence):
+                        skill_id: str | None = None, _settings=settings, _persistence=persistence):
             try:
                 from orchestrator.adapters.datasource_uc import UCTableDataSource
             except ImportError as exc:  # pragma: no cover - depends on a sibling agent's file
@@ -260,20 +299,24 @@ def build_app_context(env: dict | None = None) -> AppContext:
                     "yet -- the Unity Catalog source-data work has not landed in this checkout"
                 ) from exc
             table_source = UCTableDataSource(_settings, bindings)
-            # A source bound to an uploaded file's Volume path (rather than a
-            # UC table FQN) is read from the Volume via the Files API, not
-            # sent through the SQL path that a Volume path cannot satisfy
-            # (CLAUDE.md §5 UI item 5). Wrapping unconditionally costs
-            # nothing when no binding is actually an upload -- every call
-            # just falls through to `table_source` unchanged.
+            # A source bound to an uploaded file's Volume path, or to a
+            # SOURCE_BINDINGS-configured Volume file (independent review
+            # 2026-09-24 item 1), is read from the Volume via the Files API,
+            # not sent through the SQL path that a Volume path cannot
+            # satisfy (CLAUDE.md §5 UI item 5, §11 corporate-workspace
+            # assessment). Wrapping unconditionally costs nothing when no
+            # binding is actually a flat file -- every call just falls
+            # through to `table_source` unchanged.
             from orchestrator.adapters.datasource_volume_upload import VolumeUploadAwareDataSource
 
+            configured = configured_bindings_for_skill(ctx, skill_id)
             return VolumeUploadAwareDataSource(
                 table_source=table_source,
                 bindings=bindings,
                 contract_sources=contract_sources or {},
                 persistence=_persistence,
                 export_storage=export_storage,
+                configured_volume_paths=volume_file_paths(configured),
             )
 
         export_storage = VolumeExportStorage(volume_root=settings.volume) if settings.volume else None
@@ -583,9 +626,19 @@ def suggest_bindings(ctx: AppContext, skill_id: str) -> dict[str, str | None]:
         return {}
     source_names = [s["source"] for s in skill["sources"]]
 
+    # Independent review 2026-09-24 item 1: a source with an explicit
+    # SOURCE_BINDINGS entry (a Volume file's exact path, or a governed
+    # table's exact FQN) is auto-bound to it directly -- no new UI needed,
+    # and no guessing: this is the one case that beats every other
+    # auto-bind rule below, because it was declared by name, not matched.
+    configured = suggested_values(configured_bindings_for_skill(ctx, skill_id))
+
     if ctx.backend == "local":
         configs = _all_skill_source_configs(ctx.skills_dir)
-        return {name: (configs.get(name) or {}).get("file") for name in source_names}
+        return {
+            name: configured.get(name) or (configs.get(name) or {}).get("file")
+            for name in source_names
+        }
 
     tables = list_governed_tables(ctx)
     by_short_name: dict[str, str] = {}
@@ -600,7 +653,7 @@ def suggest_bindings(ctx: AppContext, skill_id: str) -> dict[str, str | None]:
         # contract source name is suggested; the first one found wins, later
         # duplicates are left alone rather than overriding it.
         by_short_name.setdefault(short, fqn)
-    return {name: by_short_name.get(name) for name in source_names}
+    return {name: configured.get(name) or by_short_name.get(name) for name in source_names}
 
 
 # ── Runs ──────────────────────────────────────────────────────────────────────
@@ -631,7 +684,7 @@ def start_audit_run(
     if missing:
         raise ContractViolation([f"no binding supplied for contract source {s!r}" for s in missing])
 
-    data_source = ctx.data_source_factory(bindings, contract_sources)
+    data_source = ctx.data_source_factory(bindings, contract_sources, skill_id)
 
     # Resolve every source's version FIRST, before any read (CLAUDE.md §4.1
     # TOCTOU ordering) -- these become both this run's pinned data_assets
@@ -639,17 +692,15 @@ def start_audit_run(
     source_versions = {name: data_source.resolve_version(name) for name in contract_sources}
 
     # A source bound to an uploaded file (run_setup._auto_bind's exact-
-    # filename-stem match) is pinned in run_fingerprints.uploaded_file_hashes
-    # ({volume_path: sha256}, CLAUDE.md §4.1 P1A) as well as in
-    # source_table_versions above -- the fingerprint records not just WHAT
-    # version was read but that it came from a business-provided file, not a
-    # governed table.
-    uploaded_volume_paths = {r["volume_path"] for r in ctx.persistence.list_uploaded_files()}
-    uploaded_file_hashes = {
-        bindings[name]: source_versions[name]
-        for name in contract_sources
-        if bindings[name] in uploaded_volume_paths
-    }
+    # filename-stem match), or to a SOURCE_BINDINGS-configured Volume file
+    # (independent review 2026-09-24 item 1), is pinned in
+    # run_fingerprints.uploaded_file_hashes ({volume_path: sha256},
+    # CLAUDE.md §4.1 P1A) as well as in source_table_versions above -- the
+    # fingerprint records not just WHAT version was read but that it came
+    # from a flat file, not a governed table.
+    uploaded_file_hashes = _flat_file_hashes(
+        ctx, skill_id, {bindings[name]: source_versions[name] for name in contract_sources}
+    )
 
     now = ctx.clock()
     fingerprint = _compute_run_fingerprint(ctx, skill_dir, source_versions, uploaded_file_hashes)
@@ -1000,7 +1051,7 @@ def _get_run_frames_from_sources(ctx: AppContext, state: RunState, skill) -> dic
     own docstring)."""
     bindings = {b["source"]: b["table_fqn"] for b in state.data_assets}
     versions = {b["source"]: b["version"] for b in state.data_assets}
-    data_source = ctx.data_source_factory(bindings, skill.contract.get("sources", {}))
+    data_source = ctx.data_source_factory(bindings, skill.contract.get("sources", {}), state.skill_id)
 
     flagged_rows = ctx.persistence.list_flagged_rows(state.run_id)
     by_source: dict[str, list[dict]] = {}
