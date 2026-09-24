@@ -134,9 +134,12 @@ def test_workspace_layout_builds_all_tabs_on_a_completed_run():
     run_id = _completed_run()
     layout = workspace_tne.tne_workspace_layout(run_id)
     text = str(layout)
-    for tab_id in ["tne-tab-executive", "tne-tab-findings", "tne-tab-audit",
-                    "tne-sub-findings", "tne-sub-actions",
-                    "tne-sub-overview", "tne-sub-risk", "tne-sub-approval", "tne-sub-catalogue"]:
+    # Ids match the prototype exactly, no "tne-" prefix (CLAUDE.md item E
+    # layout-parity fix): reference_app/app.py's tne_workspace_layout() sets
+    # these same tab_id values (main-tabs/tab-executive/.../sub-catalogue).
+    for tab_id in ["tab-executive", "tab-findings", "tab-audit",
+                    "sub-findings", "sub-actions",
+                    "sub-overview", "sub-risk", "sub-approval", "sub-catalogue"]:
         assert tab_id in text
 
 
@@ -144,7 +147,7 @@ def test_p1_layout_and_update_build_charts_from_real_frames():
     run_id = _completed_run()
     bundle = workspace_tne._load_bundle(run_id)
     layout = workspace_tne._p1_layout(bundle)
-    assert "tne-p1-monthly" in str(layout)
+    assert "p1-monthly" in str(layout)
     meta = workspace_tne._skill_flag_meta(bundle["run"].get("skill_id"), bundle["skill"].get("tests", []))
     result = workspace_tne._p1_update(bundle, None, None, None, meta)
     assert len(result) == 10
@@ -287,4 +290,4 @@ def test_workspace_layout_degrades_gracefully_on_a_run_with_no_frames(monkeypatc
     monkeypatch.setattr(fake_service, "get_run_frames", _empty_frames)
     workspace_tne._CACHE.clear()
     layout = workspace_tne.tne_workspace_layout(run_id)
-    assert "tne-tab-executive" in str(layout)
+    assert "tab-executive" in str(layout)

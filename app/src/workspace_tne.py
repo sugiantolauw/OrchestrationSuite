@@ -447,6 +447,22 @@ def _exposure_summary(findings: list[dict], payload: dict | None = None) -> str:
     return "Not available — the run's de-duplicated exposure headline has not been computed"
 
 
+def _potential_exposure_value(findings: list[dict], payload: dict | None) -> str:
+    """The "Potential exposure" KPI tile's value (prototype's own
+    `format_kpi("Potential exposure", f"${total_exposure:,.0f}")`, reference_
+    app/app.py's executive_brief_layout()) -- the bare dollar figure, never
+    the "$X — <label>" sentence _exposure_summary builds for the hero
+    subtitle. Same never-fabricate rule as _exposure_summary: an absent
+    headline is reported as not available, never a silent $0."""
+    exposure = (payload or {}).get("exposure") or {}
+    headline = exposure.get("headline")
+    if headline is not None:
+        return f"${headline:,.0f}"
+    if not findings:
+        return "No findings"
+    return "Not available"
+
+
 def _signoff_text(run: dict) -> str:
     signoff = run.get("signoff")
     if not signoff:
@@ -459,8 +475,6 @@ def _signoff_text(run: dict) -> str:
 
 def _executive_tab(run: dict, findings: list[dict], payload: dict | None, actions: list[dict], frames: dict | None = None) -> html.Div:
     n_high = sum(1 for f in findings if f.get("severity") == "High")
-    n_med = sum(1 for f in findings if f.get("severity") == "Medium")
-    n_low = sum(1 for f in findings if f.get("severity") == "Low")
     open_actions = sum(1 for a in actions if str(a.get("status", "")).lower() not in ("closed", "remediated"))
     n_exception_tests = sum(1 for t in run.get("test_results", []) if t.get("status") == "exception")
 
@@ -501,7 +515,8 @@ def _executive_tab(run: dict, findings: list[dict], payload: dict | None, action
         html.Div([
             html.P("Internal Audit executive brief", className="showcase-eyebrow"),
             html.H2(
-                f"{n_high} high-priority matter(s) across {len(findings)} finding(s)."
+                f"{n_high} high-priority matters require management attention across "
+                f"{len(findings)} assessed findings."
                 if findings else "No control exceptions found in this run.",
                 className="showcase-headline",
             ),
@@ -513,25 +528,23 @@ def _executive_tab(run: dict, findings: list[dict], payload: dict | None, action
         ], className="showcase-hero"),
 
         html.Div([
-            kpi_card("Findings", str(len(findings))),
-            kpi_card("High", str(n_high)),
-            kpi_card("Medium", str(n_med)),
-            kpi_card("Low", str(n_low)),
+            kpi_card("Potential exposure", _potential_exposure_value(findings, payload)),
+            kpi_card("High-priority matters", str(n_high)),
             kpi_card("Tests with exceptions", str(n_exception_tests)),
             kpi_card("Open management actions", str(open_actions)),
-        ], className="plat-kpi-row", style={"marginBottom": 16}),
+        ], className="grid-4", style={"marginBottom": 16}),
 
         html.Div([
             html.Div([
                 html.H3("Risk distribution", style={"margin": "0 0 2px", "fontSize": 14.5, "fontWeight": 700}),
                 html.P("Priority is determined from severity and de-duplicated financial exposure.", className="sub"),
-                dcc.Graph(id="tne-exec-severity-donut", figure=charts.findings_by_severity_donut(findings),
+                dcc.Graph(figure=charts.findings_by_severity_donut(findings),
                           config={"displayModeBar": False}),
             ], className="panel"),
             html.Div([
                 html.H3("T&E volume trend", style={"margin": "0 0 2px", "fontSize": 14.5, "fontWeight": 700}),
                 html.P("A change in activity helps frame the scale and timing of exceptions.", className="sub"),
-                dcc.Graph(id="tne-exec-monthly", figure=charts.monthly_volume_chart(expense_df),
+                dcc.Graph(figure=charts.monthly_volume_chart(expense_df),
                           config={"displayModeBar": False}),
             ], className="panel"),
         ], className="grid-2", style={"marginBottom": 16}),
@@ -543,7 +556,7 @@ def _executive_tab(run: dict, findings: list[dict], payload: dict | None, action
                        className="sub"),
                 html.Table([
                     html.Thead(html.Tr([
-                        html.Th("Severity", style=th_style), html.Th("Matter", style=th_style),
+                        html.Th("Risk", style=th_style), html.Th("Matter", style=th_style),
                         html.Th("Exposure", style={**th_style, "textAlign": "right"}),
                     ])),
                     html.Tbody(priority_rows),
@@ -681,27 +694,27 @@ def _findings_analytics(frames: dict, findings: list[dict], meta: dict[str, dict
         approver_donut = charts.approver_status_donut(status, title="Approver review quality")
 
     chart_specs = [
-        ("tne-fe-monthly", "Monthly T&E volume", charts.monthly_volume_chart(expense_df)),
-        ("tne-fe-severity", "Findings by risk level", charts.findings_by_severity_donut(findings)),
-        ("tne-fe-top-type", "Top 10 expense types by spend",
+        ("Monthly T&E volume", charts.monthly_volume_chart(expense_df)),
+        ("Findings by risk level", charts.findings_by_severity_donut(findings)),
+        ("Top 10 expense types by spend",
          charts.top_n_bar(expense_df, "Expense Type", _AMOUNT_COL, "Top 10 expense types by spend")),
-        ("tne-fe-by-member", "Policy exceptions by ExCo member",
+        ("Policy exceptions by ExCo member",
          charts.exceptions_by_group_chart(expense_df, flag_labels, "Employee", "Policy exceptions by ExCo member")),
-        ("tne-fe-approver", "Approver review quality", approver_donut),
-        ("tne-fe-top-spenders", "Top 10 spenders",
+        ("Approver review quality", approver_donut),
+        ("Top 10 spenders",
          charts.top_n_bar(expense_df, "Employee", _AMOUNT_COL, "Top 10 spenders", color=charts.PALETTE[0])),
     ]
     chart_panels = [
         html.Div([
             html.H3(title, style={"margin": "0 0 2px", "fontSize": 14.5, "fontWeight": 700}),
-            dcc.Graph(id=fig_id, figure=fig, config={"displayModeBar": False}),
+            dcc.Graph(figure=fig, config={"displayModeBar": False}),
         ], className="panel")
-        for fig_id, title, fig in chart_specs
+        for title, fig in chart_specs
     ]
 
     outliers = charts.outliers_table(expense_df) if expense_df is not None else pd.DataFrame()
     outlier_panel = html.Div([
-        html.H3("Spend outliers (Z-score > 2.0)", style={"margin": "0 0 2px", "fontSize": 14.5, "fontWeight": 700}),
+        html.H3("Spend Outliers (Z-Score > 2.0)", style={"margin": "0 0 2px", "fontSize": 14.5, "fontWeight": 700}),
         html.P("Claims that are statistically unusual relative to the employee's own spending pattern.",
                className="sub"),
         dash_table.DataTable(
@@ -772,11 +785,19 @@ def _findings_tab(bundle: dict) -> html.Div:
     ], style={"display": "flex", "gap": 8, "alignItems": "center", "marginBottom": 14})
 
     return html.Div([
-        summary_bar,
-        filters_row,
-        export_row,
-        html.Div(_render_filtered_findings(findings, [], [], "severity", tests),
-                  id="tne-filtered-findings", className="stack"),
+        html.Section([
+            html.Div([
+                html.H2("Findings", style={"margin": 0, "fontSize": 17, "fontWeight": 700}),
+                html.Span("Deterministic · evidence-linked · source-file cited",
+                          style={"fontSize": 12.5, "color": "#6b7283"}),
+            ], style={"display": "flex", "alignItems": "baseline", "gap": 10,
+                      "marginBottom": 12, "flexWrap": "wrap"}),
+            summary_bar,
+            filters_row,
+            export_row,
+            html.Div(_render_filtered_findings(findings, [], [], "severity", tests),
+                      id="tne-filtered-findings", className="stack"),
+        ]),
         _findings_analytics(frames, findings, meta),
     ])
 
@@ -901,15 +922,15 @@ def _p1_layout(bundle: dict) -> html.Div:
         ], className="filter-row"),
         html.Div(id="tne-p1-kpis", className="grid-4 mb-3"),
         html.Div([
-            html.Div([dcc.Graph(id="tne-p1-monthly")], className="panel"),
-            html.Div([dcc.Graph(id="tne-p1-breach-by-member")], className="panel"),
+            html.Div([dcc.Graph(id="p1-monthly")], className="panel"),
+            html.Div([dcc.Graph(id="p1-breach-by-member")], className="panel"),
         ], className="grid-2"),
         html.Div([
-            html.Div([dcc.Graph(id="tne-p1-breach-dist")], className="panel"),
-            html.Div([dcc.Graph(id="tne-p1-missing-tier")], className="panel"),
+            html.Div([dcc.Graph(id="p1-breach-dist")], className="panel"),
+            html.Div([dcc.Graph(id="p1-missing-tier")], className="panel"),
         ], className="grid-2 mt-3"),
         html.Div([
-            html.Div([dcc.Graph(id="tne-p1-precomp")], className="panel"),
+            html.Div([dcc.Graph(id="p1-precomp")], className="panel"),
             html.Div([
                 html.Div("Missing attendee table", className="table-title"),
                 dash_table.DataTable(id="tne-p1-attendee-table", page_size=12, style_table={"overflowX": "auto"},
@@ -1006,7 +1027,7 @@ def _p2_layout(bundle: dict) -> html.Div:
         ], className="filter-row"),
         html.Div(id="tne-p2-kpis", className="grid-4 mb-3"),
         html.Div([
-            html.Div([dcc.Graph(id="tne-p2-spend-by-employee")], className="panel"),
+            html.Div([dcc.Graph(id="p2-spend-by-employee")], className="panel"),
             html.Div([
                 html.Div("Top vendors", className="table-title"),
                 dash_table.DataTable(id="tne-p2-vendor-table", page_size=15, sort_action="native",
@@ -1014,7 +1035,7 @@ def _p2_layout(bundle: dict) -> html.Div:
             ], className="panel"),
         ], className="grid-2"),
         html.Div([
-            html.Div([dcc.Graph(id="tne-p2-breach-expense")], className="panel"),
+            html.Div([dcc.Graph(id="p2-breach-expense")], className="panel"),
             html.Div([
                 html.Div("Detailed exception table", className="table-title"),
                 dash_table.DataTable(id="tne-p2-exception-table", page_size=20, sort_action="native",
@@ -1168,12 +1189,12 @@ def _p3_layout(bundle: dict) -> html.Div:
         ], className="filter-row"),
         html.Div(id="tne-p3-kpis", className="grid-4 mb-3"),
         html.Div([
-            html.Div([dcc.Graph(id="tne-p3-donut")], className="panel"),
-            html.Div([dcc.Graph(id="tne-p3-by-approver")], className="panel"),
+            html.Div([dcc.Graph(id="p3-donut")], className="panel"),
+            html.Div([dcc.Graph(id="p3-by-approver")], className="panel"),
         ], className="grid-2"),
         html.Div([
-            html.Div([dcc.Graph(id="tne-p3-combo")], className="panel"),
-            html.Div([dcc.Graph(id="tne-p3-risk-profile")], className="panel"),
+            html.Div([dcc.Graph(id="p3-combo")], className="panel"),
+            html.Div([dcc.Graph(id="p3-risk-profile")], className="panel"),
         ], className="grid-2 mt-3"),
         html.Div([
             html.Div("Approval detail table", className="table-title"),
@@ -1376,10 +1397,10 @@ def _catalogue_tab(tests: list[dict], test_results: list[dict], payload: dict | 
     n_na = sum(1 for r in test_results if r.get("status") == "not_testable")
 
     status_kpis = html.Div([
-        kpi_card("Tests executed", str(len(test_results))),
+        kpi_card("Tests Executed", str(len(test_results))),
         kpi_card("Exceptions", str(n_exception)),
         kpi_card("Pass", str(n_pass)),
-        kpi_card("Not testable", str(n_na)),
+        kpi_card("Not Testable", str(n_na)),
     ], className="grid-4 mb-3")
 
     rows = []
@@ -1466,16 +1487,16 @@ def tne_workspace_layout(run_id: str | None) -> html.Div:
     actions = bundle["actions"]
 
     findings_and_actions = dbc.Tabs([
-        dbc.Tab(_findings_tab(bundle), label="Findings & Evidence", tab_id="tne-sub-findings"),
-        dbc.Tab(_actions_tab(bundle), label="Management Actions", tab_id="tne-sub-actions"),
-    ], id="tne-findings-tabs", active_tab="tne-sub-findings")
+        dbc.Tab(_findings_tab(bundle), label="Findings & Evidence", tab_id="sub-findings"),
+        dbc.Tab(_actions_tab(bundle), label="Management Actions", tab_id="sub-actions"),
+    ], active_tab="sub-findings")
 
     audit_detail = dbc.Tabs([
-        dbc.Tab(_p1_layout(bundle), label="Executive analysis", tab_id="tne-sub-overview"),
-        dbc.Tab(_p2_layout(bundle), label="Detailed risk", tab_id="tne-sub-risk"),
-        dbc.Tab(_p3_layout(bundle), label="Receipt & approver review", tab_id="tne-sub-approval"),
-        dbc.Tab(_catalogue_tab(tests, test_results, payload), label="Test catalogue", tab_id="tne-sub-catalogue"),
-    ], id="tne-audit-tabs", active_tab="tne-sub-overview")
+        dbc.Tab(_p1_layout(bundle), label="Executive analysis", tab_id="sub-overview"),
+        dbc.Tab(_p2_layout(bundle), label="Detailed risk", tab_id="sub-risk"),
+        dbc.Tab(_p3_layout(bundle), label="Receipt & approver review", tab_id="sub-approval"),
+        dbc.Tab(_catalogue_tab(tests, test_results, payload), label="Test catalogue", tab_id="sub-catalogue"),
+    ], active_tab="sub-overview")
 
     return html.Div([
         _build_header(run, payload),
@@ -1483,10 +1504,10 @@ def tne_workspace_layout(run_id: str | None) -> html.Div:
         dcc.Store(id="tne-findings-store", data=findings),
         html.Div([
             dbc.Tabs([
-                dbc.Tab(_executive_tab(run, findings, payload, actions, bundle["frames"]), label="Executive Brief", tab_id="tne-tab-executive"),
-                dbc.Tab(findings_and_actions, label="Findings & Actions", tab_id="tne-tab-findings"),
-                dbc.Tab(audit_detail, label="Audit Detail", tab_id="tne-tab-audit"),
-            ], id="tne-main-tabs", active_tab="tne-tab-executive"),
+                dbc.Tab(_executive_tab(run, findings, payload, actions, bundle["frames"]), label="Executive Brief", tab_id="tab-executive"),
+                dbc.Tab(findings_and_actions, label="Findings & Actions", tab_id="tab-findings"),
+                dbc.Tab(audit_detail, label="Audit Detail", tab_id="tab-audit"),
+            ], id="main-tabs", active_tab="tab-executive"),
             *_offcanvases(),
         ], className="shell dashboard-shell"),
     ])
@@ -1659,11 +1680,11 @@ def register_callbacks(app) -> None:
 
     @app.callback(
         Output("tne-p1-kpis", "children"),
-        Output("tne-p1-monthly", "figure"),
-        Output("tne-p1-breach-by-member", "figure"),
-        Output("tne-p1-breach-dist", "figure"),
-        Output("tne-p1-missing-tier", "figure"),
-        Output("tne-p1-precomp", "figure"),
+        Output("p1-monthly", "figure"),
+        Output("p1-breach-by-member", "figure"),
+        Output("p1-breach-dist", "figure"),
+        Output("p1-missing-tier", "figure"),
+        Output("p1-precomp", "figure"),
         Output("tne-p1-attendee-table", "data"),
         Output("tne-p1-attendee-table", "columns"),
         Output("tne-p1-attendee-table", "style_data_conditional"),
@@ -1696,11 +1717,11 @@ def register_callbacks(app) -> None:
 
     @app.callback(
         Output("tne-p2-kpis", "children"),
-        Output("tne-p2-spend-by-employee", "figure"),
+        Output("p2-spend-by-employee", "figure"),
         Output("tne-p2-vendor-table", "data"),
         Output("tne-p2-vendor-table", "columns"),
         Output("tne-p2-vendor-table", "style_data_conditional"),
-        Output("tne-p2-breach-expense", "figure"),
+        Output("p2-breach-expense", "figure"),
         Output("tne-p2-exception-table", "data"),
         Output("tne-p2-exception-table", "columns"),
         Output("tne-p2-claim-pre-table", "data"),
@@ -1730,10 +1751,10 @@ def register_callbacks(app) -> None:
 
     @app.callback(
         Output("tne-p3-kpis", "children"),
-        Output("tne-p3-donut", "figure"),
-        Output("tne-p3-by-approver", "figure"),
-        Output("tne-p3-combo", "figure"),
-        Output("tne-p3-risk-profile", "figure"),
+        Output("p3-donut", "figure"),
+        Output("p3-by-approver", "figure"),
+        Output("p3-combo", "figure"),
+        Output("p3-risk-profile", "figure"),
         Output("tne-p3-detail", "data"),
         Output("tne-p3-detail", "columns"),
         Output("tne-p3-detail", "style_data_conditional"),
@@ -1827,13 +1848,13 @@ def register_callbacks(app) -> None:
     # ── Audience mode ─────────────────────────────────────────────────────────
 
     @app.callback(
-        Output("tne-main-tabs", "active_tab"),
+        Output("main-tabs", "active_tab"),
         Input("tne-audience-mode", "value"),
         prevent_initial_call=True,
     )
     def _switch_audience_mode(mode):
         if mode == "executive":
-            return "tne-tab-executive"
+            return "tab-executive"
         if mode == "investigator":
-            return "tne-tab-audit"
-        return "tne-tab-findings"
+            return "tab-audit"
+        return "tab-findings"
