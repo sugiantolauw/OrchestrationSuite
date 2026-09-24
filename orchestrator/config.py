@@ -118,6 +118,11 @@ class Settings:
     # (CLAUDE.md §11). This one IS part of the runtime config hash: it
     # changes what a run actually computes for T4.3.
     enable_row_level_llm: bool = False
+    # Independent review item 6: the Python version Databricks Apps run on
+    # -- 3.11 as of this writing -- used by scripts/build_vendor_wheelhouse.py
+    # to select the right wheel for each binary dependency. A config value
+    # (CLAUDE.md NN16), never hardcoded in the vendoring script itself.
+    apps_python_version: str = "3.11"
 
     def __post_init__(self) -> None:
         _validate_identifier("catalog", self.catalog)
@@ -173,6 +178,7 @@ def load_settings(env: dict | None = None) -> Settings:
         llm_timeout_s=_parse_float(env.get("LLM_TIMEOUT_S"), 180.0),
         llm_retry_backoff_s=_parse_float(env.get("LLM_RETRY_BACKOFF_S"), 5.0),
         enable_row_level_llm=_parse_bool(env.get("ENABLE_ROW_LEVEL_LLM"), False),
+        apps_python_version=env.get("DBX_APPS_PYTHON_VERSION") or "3.11",
         # P2/P3 gate review item 4 (MLflow per-node spans, CLAUDE.md §2.3).
         # Unset -- never hardcoded here -- means mlflow's own default
         # resolution: MLFLOW_TRACKING_URI if the process environment already
@@ -213,6 +219,7 @@ _RUNTIME_HASH_EXCLUDED_FIELDS = frozenset({
     "readiness_cache_ttl_s",
     "llm_timeout_s",
     "llm_retry_backoff_s",
+    "apps_python_version",
 })
 
 
