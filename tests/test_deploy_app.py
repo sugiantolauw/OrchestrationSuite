@@ -169,3 +169,58 @@ def test_ensure_mlflow_experiment_permissions_handles_concurrent_creation_race()
     assert experiments.create_experiment_calls == ["/Shared/race-audit-runs"]
     experiment_id, _ = experiments.update_permissions_calls[0]
     assert experiment_id == "exp-winner"
+
+
+# ── main(argv) / --source-code-path (independent review 2026-09-24 item 7) ──
+
+
+def test_build_parser_has_source_code_path_option():
+    args = deploy_app.build_parser().parse_args(["--source-code-path", "/Workspace/Repos/me/app"])
+    assert args.source_code_path == "/Workspace/Repos/me/app"
+    assert args.dry_run is False
+
+
+def test_build_parser_defaults():
+    args = deploy_app.build_parser().parse_args([])
+    assert args.app_name is None
+    assert args.source_code_path is None
+    assert args.dry_run is False
+
+
+def test_main_dry_run_returns_zero_and_never_touches_a_workspace(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("DBX_CATALOG", "cat")
+    monkeypatch.setenv("DBX_SCHEMA", "sch")
+    monkeypatch.setenv("DATABRICKS_HOST", "https://x.cloud.databricks.com")
+    monkeypatch.setenv("DBX_APP_NAME", "ai-audit-analyst")
+    monkeypatch.delenv("DBX_WAREHOUSE_HTTP_PATH", raising=False)
+
+    exit_code = deploy_app.main(["--dry-run"])
+    assert exit_code == 0
+    captured = capsys.readouterr()
+    assert "app.yaml" in captured.out
+    assert "not touching the workspace" in captured.out
+
+
+def test_main_dry_run_with_source_code_path_mentions_it(monkeypatch, capsys):
+    monkeypatch.setenv("DBX_CATALOG", "cat")
+    monkeypatch.setenv("DBX_SCHEMA", "sch")
+    monkeypatch.setenv("DATABRICKS_HOST", "https://x.cloud.databricks.com")
+    monkeypatch.setenv("DBX_APP_NAME", "ai-audit-analyst")
+    monkeypatch.delenv("DBX_WAREHOUSE_HTTP_PATH", raising=False)
+
+    exit_code = deploy_app.main(["--dry-run", "--source-code-path", "/Workspace/Repos/me/app"])
+    assert exit_code == 0
+    captured = capsys.readouterr()
+    assert "/Workspace/Repos/me/app/app.yaml" in captured.out
+
+
+def test_main_raises_without_app_name(monkeypatch):
+    import pytest
+
+    monkeypatch.setenv("DBX_CATALOG", "cat")
+    monkeypatch.setenv("DBX_SCHEMA", "sch")
+    monkeypatch.setenv("DATABRICKS_HOST", "https://x.cloud.databricks.com")
+    monkeypatch.delenv("DBX_APP_NAME", raising=False)
+
+    with pytest.raises(SystemExit):
+        deploy_app.main(["--dry-run"])

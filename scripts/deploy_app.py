@@ -290,11 +290,35 @@ def _ensure_mlflow_experiment_permissions(w, experiment_path: str, principal: st
     print(f"Granted CAN_MANAGE on MLflow experiment {experiment_path!r} ({experiment_id}) to {principal}")
 
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--app-name", default=None, help="Overrides DBX_APP_NAME.")
     parser.add_argument("--dry-run", action="store_true", help="Build and print the plan; touch nothing.")
-    args = parser.parse_args()
+    # Independent review 2026-09-24 item 7: an alternative to uploading a
+    # bundle -- point at a workspace path a Databricks Git folder already
+    # checked this repo out to (e.g. /Workspace/Repos/<user>/<repo> or a Git
+    # folder under /Workspace/Users/<user>/.bundle/...), and this deploys
+    # FROM that path instead. Only app.yaml is written there (the rest is
+    # assumed to already be the Git folder's checked-out content); no local
+    # bundle is built or uploaded.
+    parser.add_argument(
+        "--source-code-path", default=None,
+        help="A workspace path (e.g. a Databricks Git folder) to deploy from instead of uploading a bundle. "
+             "Only app.yaml is written there.",
+    )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Importable entry point (independent review item 7 -- runnable from a
+    workspace notebook/Git folder on a cluster with notebook authentication,
+    where `WorkspaceClient()` needs no PAT). `argv` defaults to
+    `sys.argv[1:]`; returns 0 on success. Fatal configuration problems still
+    raise SystemExit (argparse's own convention, and this function's --
+    unchanged from before) rather than returning a code, since they are
+    usage errors a notebook caller should see as a raised exception, not a
+    silently-returned non-zero its caller might not check."""
+    args = build_parser().parse_args(argv)
 
     settings = load_settings()
     app_name = args.app_name or settings.app_name
@@ -371,59 +395,94 @@ def main() -> None:
     print("\n--- app.yaml ---")
     print(app_yaml_text)
 
+    if args.dry_run:
+        print("\n--dry-run: not touching the workspace. Grants that would be issued:")
+        print(f"  USE CATALOG on {settings.catalog}")
+        if source_schemas:
+            for source_schema in source_schemas:
+                print(f"  USE SCHEMA, SELECT on {source_schema}")
+        else:
+            print("  (no DBX_SOURCE_SCHEMAS configured — no source-schema grants)")
+        print(f"  USE SCHEMA, SELECT, MODIFY, CREATE TABLE on {settings.catalog}.{settings.schema}")
+        if settings.volume:
+            print(f"  READ VOLUME, WRITE VOLUME on the volume named by {settings.volume}")
+        print(f"  CAN_MANAGE on MLflow experiment {env_vars['MLFLOW_EXPERIMENT_PATH']!r} "
+              f"(created first if it does not exist)")
+        if args.source_code_path:
+            print(f"  Would write app.yaml to {args.source_code_path}/app.yaml (no bundle upload).")
+        return 0
+
+    if args.source_code_path:
+        # Independent review 2026-09-24 item 7: deploy from a workspace Git
+        # folder that has already checked this repo out -- only app.yaml is
+        # written there; app/, orchestrator/, skills/, requirements.* are
+        # assumed to already be that checkout's own content.
+        workspace_dir = args.source_code_path.rstrip("/")
+        from databricks.sdk.service.workspace import ImportFormat
+
+        w.workspace.upload(
+            f"{workspace_dir}/app.yaml", app_yaml_text.encode("utf-8"),
+            format=ImportFormat.AUTO, overwrite=True,
+        )
+        print(f"Wrote app.yaml to {workspace_dir}/app.yaml.")
+        _finish_deploy(
+            w, app_name=app_name, warehouse_id=warehouse_id, workspace_dir=workspace_dir,
+            settings=settings, source_schemas=source_schemas, env_vars=env_vars,
+        )
+        return 0
+
     with tempfile.TemporaryDirectory(prefix="ai-audit-analyst-deploy-") as tmp:
         tmp_dir = Path(tmp)
         _build_bundle(tmp_dir, app_yaml_text)
         print(f"Bundle built at {tmp_dir} (app/, orchestrator/, skills/, requirements.txt, requirements.lock, app.yaml).")
-
-        if args.dry_run:
-            print("\n--dry-run: not touching the workspace. Grants that would be issued:")
-            print(f"  USE CATALOG on {settings.catalog}")
-            if source_schemas:
-                for source_schema in source_schemas:
-                    print(f"  USE SCHEMA, SELECT on {source_schema}")
-            else:
-                print("  (no DBX_SOURCE_SCHEMAS configured — no source-schema grants)")
-            print(f"  USE SCHEMA, SELECT, MODIFY, CREATE TABLE on {settings.catalog}.{settings.schema}")
-            if settings.volume:
-                print(f"  READ VOLUME, WRITE VOLUME on the volume named by {settings.volume}")
-            print(f"  CAN_MANAGE on MLflow experiment {env_vars['MLFLOW_EXPERIMENT_PATH']!r} "
-                  f"(created first if it does not exist)")
-            return
 
         me = w.current_user.me().user_name
         workspace_dir = f"/Workspace/Users/{me}/{app_name}"
         n = _upload_dir(w, tmp_dir, workspace_dir)
         print(f"Uploaded {n} files to {workspace_dir}.")
 
-        app = _ensure_app(w, app_name, warehouse_id)
-        # service_principal_client_id (a UUID) first: Unity Catalog GRANT ...
-        # TO `<principal>` needs the application/client id, not
-        # service_principal_name -- that field is a human-readable DISPLAY
-        # name ("app-2kxaxf ai-audit-analyst", with a space in it) and is
-        # never a valid grant principal (CLAUDE.md §11 recorded results:
-        # "GRANT ... TO `<sp client id>`").
-        principal = app.service_principal_client_id or app.service_principal_id or app.service_principal_name
-        if not principal:
-            raise SystemExit(f"App {app_name!r} has no service principal yet — try again once it is provisioned.")
-
-        _grant_all(
-            w, catalog=settings.catalog, schema=settings.schema, principal=principal,
-            dbx_volume=settings.volume, source_schemas=source_schemas,
+        _finish_deploy(
+            w, app_name=app_name, warehouse_id=warehouse_id, workspace_dir=workspace_dir,
+            settings=settings, source_schemas=source_schemas, env_vars=env_vars,
         )
-        _ensure_mlflow_experiment_permissions(w, env_vars["MLFLOW_EXPERIMENT_PATH"], principal)
+    return 0
 
-        from databricks.sdk.service.apps import AppDeployment
 
-        deployment = AppDeployment(source_code_path=workspace_dir)
-        wait = w.apps.deploy(app_name, deployment)
-        result = wait.result(timeout=_WAIT_TIMEOUT) if hasattr(wait, "result") else wait
+def _finish_deploy(
+    w, *, app_name: str, warehouse_id: str, workspace_dir: str, settings, source_schemas: list[str],
+    env_vars: dict[str, str],
+) -> None:
+    """The part of a deploy common to both a bundle upload and a
+    --source-code-path deploy: create/update the App, grant its service
+    principal, and deploy from `workspace_dir`."""
+    app = _ensure_app(w, app_name, warehouse_id)
+    # service_principal_client_id (a UUID) first: Unity Catalog GRANT ...
+    # TO `<principal>` needs the application/client id, not
+    # service_principal_name -- that field is a human-readable DISPLAY
+    # name ("app-2kxaxf ai-audit-analyst", with a space in it) and is
+    # never a valid grant principal (CLAUDE.md §11 recorded results:
+    # "GRANT ... TO `<sp client id>`").
+    principal = app.service_principal_client_id or app.service_principal_id or app.service_principal_name
+    if not principal:
+        raise SystemExit(f"App {app_name!r} has no service principal yet — try again once it is provisioned.")
 
-        app = w.apps.get(app_name)
-        print("\n--- Deployed ---")
-        print(f"URL:           {app.url}")
-        print(f"Deployment id: {getattr(result, 'deployment_id', None)}")
+    _grant_all(
+        w, catalog=settings.catalog, schema=settings.schema, principal=principal,
+        dbx_volume=settings.volume, source_schemas=source_schemas,
+    )
+    _ensure_mlflow_experiment_permissions(w, env_vars["MLFLOW_EXPERIMENT_PATH"], principal)
+
+    from databricks.sdk.service.apps import AppDeployment
+
+    deployment = AppDeployment(source_code_path=workspace_dir)
+    wait = w.apps.deploy(app_name, deployment)
+    result = wait.result(timeout=_WAIT_TIMEOUT) if hasattr(wait, "result") else wait
+
+    app = w.apps.get(app_name)
+    print("\n--- Deployed ---")
+    print(f"URL:           {app.url}")
+    print(f"Deployment id: {getattr(result, 'deployment_id', None)}")
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
