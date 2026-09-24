@@ -150,7 +150,12 @@ def run_card(run: dict) -> html.Div:
             kpi_card("Open actions", str(run.get("open_actions", 0))),
         ], className="plat-kpi-row"),
         html.Div([
-            html.Span(f"Owner: {run.get('run_owner', '—')}", style={"fontSize": 10.5, "color": "#6b7283"}),
+            html.Span(
+                f"Owner: {run.get('run_owner', '—')}"
+                + (" (self-approved — segregation of duties not enforced)"
+                   if run.get("self_approved") else ""),
+                style={"fontSize": 10.5, "color": "#6b7283"},
+            ),
             html.Span(run.get("run_timestamp", "")[:16].replace("T", " "),
                       style={"fontSize": 10.5, "color": "#6b7283"}),
         ], style={"display": "flex", "justifyContent": "space-between", "marginTop": 8}),

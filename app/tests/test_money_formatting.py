@@ -40,6 +40,24 @@ def test_run_card_shows_real_zero_exposure():
     assert "$0" in text
 
 
+def test_run_card_appends_self_approved_text_when_self_approved():
+    # CLAUDE.md §11 "Approval decisions" / independent review scenario 6b:
+    # the self-approved label is required on /run/<id> AND /runs (run_card
+    # is /runs' own row component). Backend already computes self_approved
+    # in orchestrator/service.py list_runs -- this only covers the render.
+    run = _run(0.0)
+    run["self_approved"] = True
+    text = str(run_card(run))
+    assert "self-approved — segregation of duties not enforced" in text
+
+
+def test_run_card_omits_self_approved_text_when_not_self_approved():
+    run = _run(0.0)
+    run["self_approved"] = False
+    text = str(run_card(run))
+    assert "self-approved" not in text.lower()
+
+
 def _action(potential_exposure):
     return {
         "finding_title": "Missing receipts", "skill_name": "T&E ExCo", "risk": "Medium",
