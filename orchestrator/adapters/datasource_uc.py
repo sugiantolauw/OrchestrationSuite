@@ -21,6 +21,7 @@ from __future__ import annotations
 import os
 import re
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -42,6 +43,35 @@ _DEFAULT_MAX_CELLS = 20_000_000
 # every keystroke in the data-search box). Keyed by (fqn, version) -- CLAUDE.md §5
 # UI item 3's "cache by table fqn + Delta version".
 _ROW_COUNT_CACHE: dict[tuple[str, str], int] = {}
+
+# Independent review 2026-09-24 item 6: list_tables()'s DEFAULT enumeration
+# (catalog=None) walks every catalog -> every schema -> every table with no
+# query pushdown at all -- service.list_data_asset_cards() calls it fresh on
+# every keystroke in the data-search box, which is exactly the query-volume
+# shape the 2026-09-23 idle-cost incident was about. Cached process-wide
+# (same reasoning as _ROW_COUNT_CACHE above) for _TABLE_LISTING_TTL_S: a
+# keystroke inside that window hits the cache instead of re-walking Unity
+# Catalog. Keyed on (catalog, schema) so an explicit catalog=/schema=
+# narrowing never returns the default listing's cached entry by mistake.
+_TABLE_LISTING_TTL_S = 300
+_TABLE_LISTING_CACHE: dict[tuple[str | None, str | None], tuple[float, list[dict]]] = {}
+
+
+def clear_table_listing_cache() -> None:
+    """Test-only: this cache is deliberately process-wide/cross-instance
+    (see its own comment above), which means it must be reset between tests
+    that construct different fake UC listings under the same (catalog=None,
+    schema=None) key -- production never needs this (a real workspace's
+    listing does not change identity mid-process the way test fakes do)."""
+    _TABLE_LISTING_CACHE.clear()
+
+# Catalogs that are never audit source data -- excluded from the DEFAULT
+# (catalog=None) enumeration so a keystroke search never pays the cost of
+# walking them, never silently dropped when a caller actually wants one:
+# passing catalog="system" explicitly (a caller that already knows it wants
+# system.access.audit, CLAUDE.md §2.3's independent-trail note) bypasses
+# this list entirely (see the `catalog is not None` branch below).
+_SYSTEM_CATALOGS = {"system", "samples", "__databricks_internal", "hive_metastore"}
 
 
 class UCSourceError(Exception):
@@ -512,10 +542,30 @@ class UCTableDataSource:
     def list_tables(self, catalog: str | None = None, schema: str | None = None) -> list[dict]:
         """Lists tables for the UI's source-binding dropdowns (CLAUDE.md §8 P5): one
         entry per accessible table `{fqn, catalog, schema, table, comment, columns}`.
-        A catalog this identity cannot list surfaces as `{"fqn": catalog,
-        "restricted": True}` rather than being silently dropped or raising, so the
-        UI can show 'Restricted' instead of an empty list."""
-        from databricks.sdk.errors import DatabricksError
+        A catalog/schema this identity is genuinely denied access to (a real
+        PermissionDenied -- HTTP 403/PERMISSION_DENIED) surfaces as
+        `{"fqn": ..., "restricted": True}` rather than being silently dropped
+        or raising, so the UI can show 'Restricted' instead of an empty list
+        (independent review 2026-09-24 item 6: any OTHER DatabricksError --
+        a timeout, a rate limit, a genuine platform error -- is not a
+        permission question and must surface as a real error, never be
+        mislabelled 'Restricted').
+
+        The default (catalog=None) enumeration is cached process-wide for
+        _TABLE_LISTING_TTL_S and skips _SYSTEM_CATALOGS (item 6: a keystroke
+        in the data-search box must not re-walk every catalog/schema, and
+        must not walk catalogs that are never audit source data) -- pass
+        `catalog` explicitly to reach one of those, or any catalog, without
+        either restriction."""
+        from databricks.sdk.errors import DatabricksError, PermissionDenied
+
+        cache_key = (catalog, schema)
+        if catalog is None:
+            cached = _TABLE_LISTING_CACHE.get(cache_key)
+            if cached is not None:
+                cached_at, cached_results = cached
+                if time.monotonic() - cached_at < _TABLE_LISTING_TTL_S:
+                    return cached_results
 
         w = self._workspace_client()
 
@@ -524,14 +574,14 @@ class UCTableDataSource:
             catalogs = [catalog]
         else:
             try:
-                catalogs = [c.name for c in w.catalogs.list()]
+                catalogs = [c.name for c in w.catalogs.list() if c.name not in _SYSTEM_CATALOGS]
             except DatabricksError as exc:
                 raise UCSourceError(f"could not list catalogs: {exc}") from exc
 
         for cat in catalogs:
             try:
                 schemas = [schema] if schema is not None else [s.name for s in w.schemas.list(catalog_name=cat)]
-            except DatabricksError:
+            except PermissionDenied:
                 results.append({"fqn": cat, "restricted": True})
                 continue
             for sch in schemas:
@@ -553,8 +603,11 @@ class UCTableDataSource:
                         if t.updated_at:
                             entry["last_refreshed"] = _epoch_ms_to_date(t.updated_at)
                         results.append(entry)
-                except DatabricksError:
+                except PermissionDenied:
                     results.append({"fqn": f"{cat}.{sch}", "restricted": True})
+
+        if catalog is None:
+            _TABLE_LISTING_CACHE[cache_key] = (time.monotonic(), results)
         return results
 
 

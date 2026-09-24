@@ -13,11 +13,24 @@ from orchestrator.adapters.datasource_uc import (
     _build_where,
     _normalise_datetime_dtypes,
     _quote_ident,
+    clear_table_listing_cache,
 )
 from orchestrator.config import Settings
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SKILL_DIR = REPO_ROOT / "skills" / "tne_exco"
+
+
+@pytest.fixture(autouse=True)
+def _reset_table_listing_cache():
+    # Independent review 2026-09-24 item 6: list_tables()'s cache is
+    # deliberately process-wide/cross-instance (see its own module
+    # docstring) -- reset between tests so one test's fake UC listing can
+    # never leak into another's under the same (catalog=None, schema=None)
+    # cache key.
+    clear_table_listing_cache()
+    yield
+    clear_table_listing_cache()
 SYNTHETIC_DATA_DIR = REPO_ROOT / "synthetic_data"
 
 
@@ -448,18 +461,23 @@ class _FakeWorkspaceClient:
 
     class _Schemas:
         def list(self, catalog_name):
-            from databricks.sdk.errors import DatabricksError
+            # Independent review 2026-09-24 item 6: the real 403/
+            # PERMISSION_DENIED the SDK raises is the specific PermissionDenied
+            # subclass, not the bare base DatabricksError -- list_tables() now
+            # only marks "restricted" for that specific class, so this fake
+            # must raise the same class a real workspace would.
+            from databricks.sdk.errors import PermissionDenied
 
             if catalog_name == "locked_catalog":
-                raise DatabricksError("PERMISSION_DENIED")
+                raise PermissionDenied("PERMISSION_DENIED")
             return [_FakeNamed("tne_source"), _FakeNamed("locked_schema")]
 
     class _Tables:
         def list(self, catalog_name, schema_name):
-            from databricks.sdk.errors import DatabricksError
+            from databricks.sdk.errors import PermissionDenied
 
             if schema_name == "locked_schema":
-                raise DatabricksError("PERMISSION_DENIED")
+                raise PermissionDenied("PERMISSION_DENIED")
             return [
                 _FakeTable("expense_report", "T&E expense claims", ["Employee ID", "Expense Amount"]),
                 _FakeTable("booking_detail", None, ["Booking Type"]),
@@ -546,6 +564,104 @@ def test_list_tables_caches_workspace_client_across_calls():
     ds.list_tables()
 
     assert calls["n"] == 1
+
+
+# ── independent review 2026-09-24 item 6 ─────────────────────────────────────
+
+
+class _CountingWorkspaceClient(_FakeWorkspaceClient):
+    """Counts how many times the underlying SDK calls were actually made,
+    so caching/no-caching can be told apart directly."""
+
+    call_count = 0
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+
+    class _Catalogs(_FakeWorkspaceClient._Catalogs):
+        def list(self):
+            _CountingWorkspaceClient.call_count += 1
+            return super().list()
+
+
+def test_list_tables_default_enumeration_is_cached_across_instances():
+    """The cache is process-wide, not per-instance (its own docstring) --
+    proven here with two SEPARATE UCTableDataSource instances, the shape
+    every real service.list_data_asset_cards() call actually constructs
+    (CLAUDE.md §8 P5, ctx.data_source_factory builds a fresh one per call)."""
+    _CountingWorkspaceClient.call_count = 0
+    ds1, _ = _ds({}, bindings={}, workspace_client_factory=_CountingWorkspaceClient)
+    ds2, _ = _ds({}, bindings={}, workspace_client_factory=_CountingWorkspaceClient)
+
+    ds1.list_tables()
+    ds2.list_tables()
+
+    assert _CountingWorkspaceClient.call_count == 1
+
+
+def test_list_tables_explicit_catalog_bypasses_the_cache():
+    _CountingWorkspaceClient.call_count = 0
+    ds, _ = _ds({}, bindings={}, workspace_client_factory=_CountingWorkspaceClient)
+
+    ds.list_tables(catalog="orchestrationsuite")
+    ds.list_tables(catalog="orchestrationsuite")
+
+    # catalogs.list() is only ever called for the default (catalog=None)
+    # enumeration -- an explicit catalog= never triggers it at all, cached
+    # or not, so this asserts the explicit-catalog path is simply never
+    # cached (repeat calls keep working, never a stale cache hit tripping
+    # an assertion elsewhere).
+    assert _CountingWorkspaceClient.call_count == 0
+
+
+def test_list_tables_default_enumeration_excludes_system_catalogs():
+    class _WithSystemCatalog(_FakeWorkspaceClient):
+        class _Catalogs:
+            def list(self):
+                return [_FakeNamed("orchestrationsuite"), _FakeNamed("system"), _FakeNamed("samples")]
+
+    ds, _ = _ds({}, bindings={}, workspace_client_factory=_WithSystemCatalog)
+    results = ds.list_tables()
+    assert not any(r.get("catalog") in ("system", "samples") for r in results)
+    assert not any(r.get("fqn") in ("system", "samples") for r in results)
+
+
+def test_list_tables_explicit_system_catalog_is_still_reachable():
+    """`catalog=` bypasses both the default-enumeration skip-list AND the
+    cache (see the two tests above) -- a caller that already knows it wants
+    system.access.audit (CLAUDE.md §2.3's independent-trail note) is never
+    blocked from reaching it."""
+    class _WithSystemCatalog(_FakeWorkspaceClient):
+        class _Schemas:
+            def list(self, catalog_name):
+                assert catalog_name == "system"
+                return [_FakeNamed("access")]
+
+        class _Tables:
+            def list(self, catalog_name, schema_name):
+                return [_FakeTable("audit", "System audit log", ["request_params"])]
+
+    ds, _ = _ds({}, bindings={}, workspace_client_factory=_WithSystemCatalog)
+    results = ds.list_tables(catalog="system")
+    assert any(r.get("fqn") == "system.access.audit" for r in results)
+
+
+def test_list_tables_marks_restricted_only_on_real_permission_errors():
+    """A genuine PermissionDenied (403/PERMISSION_DENIED) still marks
+    'restricted'; any OTHER DatabricksError (a timeout, a rate limit, a
+    real platform error) is not a permission question and must propagate,
+    never be silently mislabelled 'Restricted' (independent review
+    2026-09-24 item 6)."""
+    from databricks.sdk.errors import DeadlineExceeded
+
+    class _FlakyWorkspaceClient(_FakeWorkspaceClient):
+        class _Schemas:
+            def list(self, catalog_name):
+                raise DeadlineExceeded("upstream timeout")
+
+    ds, _ = _ds({}, bindings={}, workspace_client_factory=_FlakyWorkspaceClient)
+    with pytest.raises(DeadlineExceeded):
+        ds.list_tables()
 
 
 # ── live equality tests: UC-backed read vs LocalFileDataSource read ─────────
