@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import subprocess
@@ -247,7 +248,20 @@ def compute_fingerprint(
         "skill_content_hash": resolved_skill_content_hash,
         "code_revision": _resolve_code_revision(code_revision, settings.code_revision),
         "dependency_lock_hash": sha256_bytes(lock_path.read_bytes()),
-        "runtime_config_hash": runtime_config_hash(settings),
+        # CLAUDE.md §11 "Paused runs across a code deploy" / independent
+        # review 2026-09-24 gap #11: orchestrator.config.runtime_config_hash
+        # hashes every Settings field not in its own operational-knobs
+        # exclusion list, and `code_revision` is one of those fields --
+        # meaning a code_revision change (the ONE difference
+        # verify_fingerprint's allow_code_revision_diff is told it may
+        # accept) would otherwise ALWAYS change runtime_config_hash too,
+        # making "every OTHER field must still match exactly" impossible to
+        # satisfy on any real redeploy. code_revision already has its own
+        # dedicated fingerprint field above; zeroing it here (for this
+        # computation only -- `settings` itself is untouched) keeps
+        # runtime_config_hash describing genuine runtime configuration,
+        # never code identity it is not this field's job to also carry.
+        "runtime_config_hash": runtime_config_hash(dataclasses.replace(settings, code_revision=None)),
         "endpoint_config": _canonical_json(endpoint_config(settings)),
         "prompt_template_version": _prompt_template_version(prompts_dirs),
     }
@@ -261,12 +275,27 @@ def compute_fingerprint(
     return result
 
 
-def verify_fingerprint(stored: dict, current: dict) -> None:
+def verify_fingerprint(stored: dict, current: dict, *, allow_code_revision_diff: bool = False) -> None:
+    """CLAUDE.md §11 "Paused runs across a code deploy" (independent review
+    2026-09-24 gap #11): a run paused at sign-off may continue its export
+    phase under a later code revision -- its numbers were already fixed by
+    `execute`, so only the code that WRITES the export actually differs.
+    `allow_code_revision_diff` is the one, narrow relaxation that permits:
+    every OTHER hashed field (source versions, Skill content hash,
+    dependency lock, runtime config, endpoint config, prompt template
+    version) must still match exactly, or this still raises. `fingerprint_id`
+    is a hash OF `code_revision` among other fields, so it is deliberately
+    excluded from its own separate check here when the relaxation is in
+    effect -- it will always differ as a direct, expected consequence of the
+    one field callers were told may differ, never a second, independent
+    signal of drift."""
     differing = {}
     for field in _HASHED_FIELDS:
+        if field == "code_revision" and allow_code_revision_diff:
+            continue
         if stored.get(field) != current.get(field):
             differing[field] = {"stored": stored.get(field), "current": current.get(field)}
-    if stored.get("fingerprint_id") != current.get("fingerprint_id"):
+    if not allow_code_revision_diff and stored.get("fingerprint_id") != current.get("fingerprint_id"):
         differing.setdefault(
             "fingerprint_id",
             {"stored": stored.get("fingerprint_id"), "current": current.get("fingerprint_id")},

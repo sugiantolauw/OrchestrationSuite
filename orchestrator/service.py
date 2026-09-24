@@ -91,6 +91,7 @@ from orchestrator.errors import (
     ExplorerEditRejected,
     ExplorerInputError,
     ExplorerPlanNotConfirmable,
+    FingerprintMismatch,
     NarrationDisabled,
     NarrationNodeUnavailable,
     NarrativeEditConflict,
@@ -100,6 +101,7 @@ from orchestrator.errors import (
     NarrativeTargetNotFound,
     PlanIntegrityError,
     PromotionRequirementsNotMet,
+    RunCodeRevisionStale,
     RunNotAwaitingSignoff,
     RunNotReady,
 )
@@ -107,7 +109,7 @@ from orchestrator.executor import ThreadExecutor
 from orchestrator.explorer.edit import apply_plan_edits, excluded_test_keys, parse_param_path
 from orchestrator.explorer.materialise import check_materialised_skill, materialise
 from orchestrator.explorer.validate import validate_proposal
-from orchestrator.fingerprint import compute_fingerprint, hash_skill_content_entries
+from orchestrator.fingerprint import compute_fingerprint, hash_skill_content_entries, verify_fingerprint
 from orchestrator.frames import not_testable_flags, read_frame_parquet
 from orchestrator.nodes.context import NodeContext
 from orchestrator.nodes.registry import NODES_FOR
@@ -1613,6 +1615,18 @@ def get_run(ctx: AppContext, run_id: str) -> dict:
     payload["status_label"] = state.status.replace("_", " ").title()
     payload["queue_note"] = _queue_affinity_note(ctx, state.status, state.fingerprint_id)
 
+    # CLAUDE.md §11 "Paused runs across a code deploy" / independent review
+    # 2026-09-24 gap #11: only computed once a run is completed (never on
+    # every poll tick of a still-active run -- run_status.py stops polling
+    # at "completed" anyway) so a run whose export ran under a different
+    # code revision than it was created under can say so, without adding
+    # query cost to the common, unpaused case.
+    if state.status == "completed":
+        fingerprint = ctx.persistence.get_fingerprint(state.fingerprint_id)
+        payload["computed_code_revision"] = fingerprint.get("code_revision")
+        run_row = ctx.persistence.get_run_row(run_id)
+        payload["export_code_revision"] = (run_row or {}).get("export_code_revision")
+
     nodes = NODES_FOR.get(state.run_kind, {}).get(state.phase, [])
     current_stage = None
     if 0 <= state.next_node_index < len(nodes):
@@ -1960,8 +1974,26 @@ def _confirm_explorer_plan(ctx: AppContext, run_id: str, actor: str) -> RunState
     return saved
 
 
+def _refuse_if_stale_before_execute(ctx: AppContext, state: RunState) -> None:
+    """CLAUDE.md §11 "Paused runs across a code deploy" / independent review
+    2026-09-24 gap #11: confirming a plan is the point this run's execute
+    phase is about to run for the first time under WHATEVER setup is current
+    right now -- unlike sign-off, execute has not yet fixed this run's
+    numbers, so it must never silently run under a setup the run was not
+    created for. Raises RunCodeRevisionStale (never a bare FingerprintMismatch)
+    so the caller can show a message that names the resolution: restart the
+    run with restart_stale_run."""
+    stored_fingerprint = ctx.persistence.get_fingerprint(state.fingerprint_id)
+    current_fingerprint = build_run_fingerprint(ctx, state)
+    try:
+        verify_fingerprint(stored_fingerprint, current_fingerprint)
+    except FingerprintMismatch as exc:
+        raise RunCodeRevisionStale(state.run_id, state.phase, exc.differing_fields) from exc
+
+
 def confirm_plan(ctx: AppContext, run_id: str, actor: str) -> RunState:
     current = ctx.persistence.load_state(run_id)
+    _refuse_if_stale_before_execute(ctx, current)
     if current.mode == "explorer":
         state = _confirm_explorer_plan(ctx, run_id, actor)
     else:
@@ -1969,6 +2001,50 @@ def confirm_plan(ctx: AppContext, run_id: str, actor: str) -> RunState:
     if ctx.executor is not None:
         ctx.executor.start(run_id, state.phase)
     return state
+
+
+def restart_stale_run(ctx: AppContext, run_id: str, actor: str) -> str:
+    """CLAUDE.md §11 "Paused runs across a code deploy" / independent review
+    2026-09-24 gap #11: the "one click" restart for a run that
+    _refuse_if_stale_before_execute (or an interrupted-run resume,
+    orchestrator.runs.resume) refused -- a run paused before its execute
+    phase completed, on a code revision this deployment no longer matches.
+    Starts a fresh run with exactly the old run's own parameters (skill,
+    bindings, audit period, objective, mode, owner and options), re-resolving
+    source versions fresh (the same TOCTOU-safe path start_audit_run always
+    takes -- never the old run's pinned versions, which may themselves be
+    stale), then marks the old run `superseded_by` the new one -- never
+    deleted (CLAUDE.md §9A Q2). Does not itself check staleness or the old
+    run's status/phase: a caller decides when a restart is warranted."""
+    old_state = ctx.persistence.load_state(run_id)
+    bindings = {b["source"]: b["table_fqn"] for b in old_state.data_assets}
+    options = old_state.options or {}
+    new_run_id = start_audit_run(
+        ctx,
+        skill_id=old_state.skill_id,
+        bindings=bindings,
+        audit_period=old_state.audit_period,
+        objective=old_state.objective,
+        run_owner=old_state.run_owner,
+        mode=old_state.mode,
+        review_plan_first=not options.get("auto_confirm_plan", True),
+        engagement_id=old_state.engagement_id,
+        business_unit=old_state.business_unit,
+        materiality=old_state.materiality,
+        generate_management_actions=options.get("generate_management_actions", True),
+        jira_preview_requested=options.get("jira_preview_requested", False),
+    )
+    now = ctx.clock()
+    ctx.persistence.mark_run_superseded(run_id, superseded_by=new_run_id, now=now)
+    _emit_service_event(
+        ctx.persistence, old_state,
+        event_id=_service_trace_event_id(run_id, "superseded", new_run_id),
+        event_type="run_superseded",
+        actor=actor,
+        message=f"Superseded by {new_run_id} (code revision changed before this run's execute phase completed)",
+        now=now,
+    )
+    return new_run_id
 
 
 def sign_off(ctx: AppContext, run_id: str, actor: str) -> RunState:

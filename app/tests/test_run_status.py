@@ -149,3 +149,39 @@ def test_poll_stops_after_the_max_idle_poll_duration():
 def test_poll_stops_for_an_unknown_run_after_the_idle_cap():
     assert run_status._should_stop_polling(None, run_status._MAX_IDLE_INTERVALS) is True
     assert run_status._should_stop_polling(None, 1) is False
+
+
+# ── §11 "Paused runs across a code deploy" / independent review 2026-09-24
+# gap #11: the run-status area states "computed under X, exported under Y"
+# only when the two differ -- text appended to the existing sign-off line,
+# no other UI change. ───────────────────────────────────────────────────
+
+
+def test_signoff_text_states_computed_and_exported_revisions_when_they_differ():
+    run = {
+        "signoff": {"approver": "auditor@example.com", "timestamp": "2026-09-24T00:00:00Z"},
+        "computed_code_revision": "rev-old",
+        "export_code_revision": "rev-new",
+    }
+    text = run_status._signoff_text(run)
+    assert "Signed off by auditor@example.com" in text
+    assert "computed under code revision rev-old, exported under rev-new" in text
+
+
+def test_signoff_text_omits_the_revision_note_when_they_match():
+    run = {
+        "signoff": {"approver": "auditor@example.com", "timestamp": "2026-09-24T00:00:00Z"},
+        "computed_code_revision": "rev-same",
+        "export_code_revision": "rev-same",
+    }
+    text = run_status._signoff_text(run)
+    assert "computed under" not in text
+
+
+def test_signoff_text_omits_the_revision_note_when_absent():
+    """A run that never exported under a different revision -- the common
+    case -- carries no export_code_revision at all (CLAUDE.md NN14: never a
+    fabricated value)."""
+    run = {"signoff": {"approver": "auditor@example.com", "timestamp": "2026-09-24T00:00:00Z"}}
+    text = run_status._signoff_text(run)
+    assert "computed under" not in text

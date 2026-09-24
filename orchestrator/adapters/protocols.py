@@ -158,6 +158,48 @@ class PersistenceAdapter(Protocol):
         "nothing to say" (service._queue_affinity_note)."""
         ...
 
+    def get_run_row(self, run_id: str) -> dict | None:
+        """The raw `runs` projection row (never `run_state`) for one run --
+        None if the run does not exist. CLAUDE.md §11 "Paused runs across a
+        code deploy": the caller this exists for is get_run's
+        `export_code_revision` lookup, a single-run read that does not
+        warrant list_runs' join against run_state and its own status
+        precedence rules."""
+        ...
+
+    def mark_run_superseded(self, run_id: str, *, superseded_by: str, now: str) -> None:
+        """CLAUDE.md §11 "Paused runs across a code deploy" / independent
+        review 2026-09-24 gap #11: orchestrator.service.restart_stale_run's
+        "never deleted" half (CLAUDE.md §9A Q2, `runs.superseded_by`) -- the
+        old run's own status/phase/RunState are left untouched (it stays
+        exactly what it was refused at: `awaiting_confirmation`, `queued`,
+        or `interrupted`), only `superseded_by` is set, the same
+        already-established column `cross_run_totals` reads to exclude a
+        superseded run from cross-run totals. Idempotent: setting it again
+        to the SAME value is a no-op; the caller decides whether a run may
+        be superseded more than once."""
+        ...
+
+    def record_export_code_revision(
+        self, run_id: str, *, fingerprint_id: str, code_revision: str, now: str
+    ) -> None:
+        """CLAUDE.md §11 "Paused runs across a code deploy" / independent
+        review 2026-09-24 gap #11: called only once verify_fingerprint has
+        already accepted a code_revision difference for this run's export
+        phase (orchestrator.pipeline.run_phase / orchestrator.runs.resume) --
+        never a decision this method makes itself. run_fingerprints stays
+        immutable (CLAUDE.md P1A), so this records the code revision that
+        actually ran export in two additive places instead: `runs.
+        export_code_revision` (a cheap direct read for get_run/list_runs/
+        exports) and an append-only row in run_fingerprint_overrides (the
+        fuller history -- run_id, phase, field, the fingerprint's original
+        value, and the value actually used). Idempotent: a re-run of the
+        export phase (or a second executor pass that finds the same
+        override already recorded) writes the SAME override_id and does not
+        duplicate the history row; `runs.export_code_revision` is simply
+        kept at the latest recorded value."""
+        ...
+
     def begin_node_attempt(
         self,
         *,

@@ -299,3 +299,42 @@ def test_verify_fingerprint_ignores_created_at():
     fp2 = dict(fp1)
     fp2["created_at"] = "some-other-timestamp"
     verify_fingerprint(fp1, fp2)  # should not raise
+
+
+# ── §11 "Paused runs across a code deploy" / independent review 2026-09-24
+# gap #11: code_revision may differ ONLY when the caller explicitly says so
+# (the export phase of a run whose execute phase already completed) --
+# every other hashed field must still match exactly regardless.
+
+
+def test_verify_fingerprint_rejects_code_revision_diff_by_default():
+    fp1 = _fp(settings=_settings(code_revision="rev-old"))
+    fp2 = _fp(settings=_settings(code_revision="rev-new"))
+    with pytest.raises(FingerprintMismatch) as exc:
+        verify_fingerprint(fp1, fp2)
+    assert "code_revision" in exc.value.differing_fields
+
+
+def test_verify_fingerprint_allows_code_revision_diff_when_told_to():
+    fp1 = _fp(settings=_settings(code_revision="rev-old"))
+    fp2 = _fp(settings=_settings(code_revision="rev-new"))
+    verify_fingerprint(fp1, fp2, allow_code_revision_diff=True)  # should not raise
+
+
+def test_verify_fingerprint_allow_code_revision_diff_still_enforces_every_other_field(tmp_path):
+    """The relaxation is code_revision ONLY -- changing the Skill content
+    hash too (a stand-in for any other hashed field, e.g. the Skill's
+    contract.yaml) must still fail even with allow_code_revision_diff=True."""
+    skill_dir_a = tmp_path / "skill_a"
+    skill_dir_a.mkdir()
+    (skill_dir_a / "manifest.yaml").write_text("id: SKILL-A\n")
+    skill_dir_b = tmp_path / "skill_b"
+    skill_dir_b.mkdir()
+    (skill_dir_b / "manifest.yaml").write_text("id: SKILL-B\n")
+
+    fp1 = _fp(settings=_settings(code_revision="rev-old"), skill_dir=skill_dir_a)
+    fp2 = _fp(settings=_settings(code_revision="rev-new"), skill_dir=skill_dir_b)
+    with pytest.raises(FingerprintMismatch) as exc:
+        verify_fingerprint(fp1, fp2, allow_code_revision_diff=True)
+    assert "skill_content_hash" in exc.value.differing_fields
+    assert "code_revision" not in exc.value.differing_fields

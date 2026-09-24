@@ -129,6 +129,188 @@ def test_full_local_run_to_signoff_and_export(tmp_path):
         ctx.executor.stop()
 
 
+# ── §11 "Paused runs across a code deploy" / independent review 2026-09-24
+# gap #11: a run pins the code revision it started on; a redeploy must not
+# strand it forever, but a run paused before execute completed must not
+# silently run under different code either. ───────────────────────────────
+
+
+def _copy_mini_skills(tmp_path: Path) -> Path:
+    """A private copy of tests/fixtures/skills (never the shared fixture
+    itself -- these tests mutate a Skill file on disk to change its content
+    hash mid-test, and must not leave that dirty for every OTHER test in the
+    session)."""
+    import shutil
+
+    dest = tmp_path / "skills"
+    shutil.copytree(MINI_SKILL_DIR.parent, dest)
+    return dest
+
+
+def test_run_continues_its_export_on_a_new_code_revision_after_signoff(tmp_path):
+    """The one narrow exception (CLAUDE.md §11): a run signed off under one
+    code revision may complete its export under a later one, since sign-off
+    means execute already fixed this run's numbers. Both `computed_code_
+    revision` (the fingerprint's own, immutable value) and `export_code_
+    revision` (recorded, never silent) are surfaced on get_run."""
+    skills_dir = _copy_mini_skills(tmp_path)
+
+    ctx_a = _build_ctx(
+        tmp_path, worker_id="worker-a",
+        env_overrides={"CODE_REVISION": "rev-old", "SKILLS_DIR": str(skills_dir)},
+    )
+    ctx_a.executor.start()
+    try:
+        bindings = service.suggest_bindings(ctx_a, "SKILL-MINI")
+        run_id = service.start_audit_run(
+            ctx_a, skill_id="SKILL-MINI", bindings=bindings,
+            audit_period=("2026-01-01", "2026-02-28"), objective="revision test", run_owner="tester",
+        )
+        status = _wait_for_status(ctx_a, run_id, {"awaiting_signoff", "failed"})
+        run = service.get_run(ctx_a, run_id)
+        assert status == "awaiting_signoff", run.get("status_reason")
+    finally:
+        ctx_a.executor.stop()
+
+    # Sign off directly against persistence, never through service.sign_off
+    # -- that would also call ctx_a.executor.start(), waking the (deliberately
+    # stopped) old-revision worker back up and racing this test's own
+    # new-revision worker B for the export phase.
+    from orchestrator import runs as runs_module
+
+    runs_module.sign_off(ctx_a.persistence, run_id, actor="approver", now=ctx_a.clock())
+    assert ctx_a.persistence.load_state(run_id).phase == "export"
+
+    # A fresh deployment: same persistence, a NEW code revision -- exactly
+    # what a redeploy after sign-off leaves behind.
+    ctx_b = _build_ctx(
+        tmp_path, worker_id="worker-b",
+        env_overrides={"CODE_REVISION": "rev-new", "SKILLS_DIR": str(skills_dir)},
+    )
+    ctx_b.executor.start()
+    try:
+        status = _wait_for_status(ctx_b, run_id, {"completed", "failed"})
+        run = service.get_run(ctx_b, run_id)
+        assert status == "completed", run.get("status_reason")
+        assert run["computed_code_revision"] == "rev-old"
+        assert run["export_code_revision"] == "rev-new"
+
+        row = ctx_b.persistence.get_run_row(run_id)
+        assert row["export_code_revision"] == "rev-new"
+    finally:
+        ctx_b.executor.stop()
+
+
+def test_signed_off_run_still_fails_if_more_than_code_revision_changed(tmp_path):
+    """The relaxation is code_revision ONLY: a run whose Skill content ALSO
+    changed between sign-off and the export attempt must still fail loudly,
+    never silently export under a materially different setup."""
+    skills_dir = _copy_mini_skills(tmp_path)
+
+    ctx_a = _build_ctx(
+        tmp_path, worker_id="worker-a",
+        env_overrides={"CODE_REVISION": "rev-old", "SKILLS_DIR": str(skills_dir)},
+    )
+    ctx_a.executor.start()
+    try:
+        bindings = service.suggest_bindings(ctx_a, "SKILL-MINI")
+        run_id = service.start_audit_run(
+            ctx_a, skill_id="SKILL-MINI", bindings=bindings,
+            audit_period=("2026-01-01", "2026-02-28"), objective="revision test", run_owner="tester",
+        )
+        status = _wait_for_status(ctx_a, run_id, {"awaiting_signoff", "failed"})
+        assert status == "awaiting_signoff"
+    finally:
+        ctx_a.executor.stop()
+
+    from orchestrator import runs as runs_module
+
+    runs_module.sign_off(ctx_a.persistence, run_id, actor="approver", now=ctx_a.clock())
+
+    # A real change to the Skill's content, not just code_revision -- a
+    # thresholds.yaml edit between sign-off and export.
+    (skills_dir / "mini" / "thresholds.yaml").write_text(
+        (skills_dir / "mini" / "thresholds.yaml").read_text() + "\n# edited after sign-off\n"
+    )
+
+    ctx_b = _build_ctx(
+        tmp_path, worker_id="worker-b",
+        env_overrides={"CODE_REVISION": "rev-new", "SKILLS_DIR": str(skills_dir)},
+    )
+    ctx_b.executor.start()
+    try:
+        status = _wait_for_status(ctx_b, run_id, {"completed", "failed"})
+        assert status == "failed"
+        run = service.get_run(ctx_b, run_id)
+        assert "skill_content_hash" in (run.get("status_reason") or "")
+    finally:
+        ctx_b.executor.stop()
+
+
+def test_confirm_refused_and_restart_service_function_for_a_stale_pre_execute_run(tmp_path):
+    """A run paused before its tests ran (plan confirmation) on an older code
+    revision cannot proceed (CLAUDE.md §11): confirm_plan refuses with
+    RunCodeRevisionStale rather than silently confirming into the new setup,
+    and restart_stale_run is the "one click" resolution -- a fresh run with
+    the same parameters, with the old one marked superseded, never deleted."""
+    from orchestrator.errors import RunCodeRevisionStale
+
+    skills_dir = _copy_mini_skills(tmp_path)
+
+    ctx_a = _build_ctx(
+        tmp_path, worker_id="worker-a",
+        env_overrides={"CODE_REVISION": "rev-old", "SKILLS_DIR": str(skills_dir)},
+    )
+    # Suppress immediate admission (this run must stay `awaiting_confirmation`,
+    # never proceed into execute under worker A).
+    ctx_a.executor = None
+    bindings = service.suggest_bindings(ctx_a, "SKILL-MINI")
+    run_id = service.start_audit_run(
+        ctx_a, skill_id="SKILL-MINI", bindings=bindings,
+        audit_period=("2026-01-01", "2026-02-28"), objective="stale confirm test",
+        run_owner="tester", review_plan_first=True,
+    )
+
+    # Run discover/profile/plan by hand (no execute phase yet) so the run
+    # reaches `awaiting_confirmation` -- the same state a real Playbook run
+    # with review_plan_first=True would reach once its own worker got to it.
+    from orchestrator.pipeline import run_phase
+
+    fingerprint_a = service.build_run_fingerprint(ctx_a, ctx_a.persistence.load_state(run_id))
+    node_ctx = service.build_node_context(ctx_a, ctx_a.persistence.load_state(run_id))
+    run_phase(
+        ctx_a.persistence, run_id, nodes_for=service.NODES_FOR, skill=node_ctx, clock=ctx_a.clock,
+        current_fingerprint=fingerprint_a,
+    )
+    state_a = ctx_a.persistence.load_state(run_id)
+    assert state_a.status == "awaiting_confirmation", state_a.status_reason
+
+    # A fresh deployment: same persistence, a NEW code revision -- confirm
+    # is attempted under the new code before the plan was ever confirmed.
+    ctx_b = _build_ctx(
+        tmp_path, worker_id="worker-b",
+        env_overrides={"CODE_REVISION": "rev-new", "SKILLS_DIR": str(skills_dir)},
+    )
+    ctx_b.executor = None
+    with pytest.raises(RunCodeRevisionStale):
+        service.confirm_plan(ctx_b, run_id, "operator")
+    # Refused, never silently confirmed.
+    assert ctx_b.persistence.load_state(run_id).status == "awaiting_confirmation"
+
+    new_run_id = service.restart_stale_run(ctx_b, run_id, "operator")
+    assert new_run_id != run_id
+
+    old_row = ctx_b.persistence.get_run_row(run_id)
+    assert old_row["superseded_by"] == new_run_id
+    # Never deleted (CLAUDE.md §9A Q2) -- the old run's own state is untouched.
+    assert ctx_b.persistence.load_state(run_id).status == "awaiting_confirmation"
+
+    new_state = ctx_b.persistence.load_state(new_run_id)
+    assert new_state.skill_id == "SKILL-MINI"
+    assert new_state.objective == "stale confirm test"
+    assert new_state.run_owner == "tester"
+
+
 def test_run_completes_promptly_with_a_near_unreachable_idle_sweep_interval(tmp_path):
     """Found-live cost review: the admission loop's idle safety-sweep
     interval must never be what makes a run progress -- every transition

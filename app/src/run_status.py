@@ -62,6 +62,16 @@ def _signoff_text(run: dict) -> str:
     text = f"Signed off by {signoff['approver']} at {signoff['timestamp']}"
     if signoff.get("self_approved"):
         text += " (self-approved — segregation of duties not enforced)"
+    # CLAUDE.md §11 "Paused runs across a code deploy" / independent review
+    # 2026-09-24 gap #11: a run paused at sign-off may continue its export
+    # under a later code revision than the one that computed its numbers --
+    # recorded (never silent) so the difference is stated here, not only in
+    # the export files. Absent for every run that exported under the same
+    # revision it was created on, which is the common case.
+    computed = run.get("computed_code_revision")
+    exported = run.get("export_code_revision")
+    if computed and exported and exported != computed:
+        text += f" — computed under code revision {computed}, exported under {exported}"
     return text
 
 

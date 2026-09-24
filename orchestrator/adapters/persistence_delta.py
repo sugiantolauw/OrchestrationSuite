@@ -873,6 +873,50 @@ class DeltaPersistence:
             rows = _fetchall_dicts(cur)
         return {r["fingerprint_id"]: r for r in rows}
 
+    def get_run_row(self, run_id: str) -> dict | None:
+        with self._cursor_ctx() as conn:
+            cur = self._execute(
+                conn, f"SELECT * FROM {self._table('runs')} WHERE run_id = :run_id", {"run_id": run_id},
+            )
+            return _fetchone_dict(cur)
+
+    def mark_run_superseded(self, run_id: str, *, superseded_by: str, now: str) -> None:
+        with self._cursor_ctx() as conn:
+            self._execute(
+                conn,
+                f"UPDATE {self._table('runs')} SET superseded_by = :superseded_by WHERE run_id = :run_id",
+                {"superseded_by": superseded_by, "run_id": run_id},
+            )
+
+    def record_export_code_revision(
+        self, run_id: str, *, fingerprint_id: str, code_revision: str, now: str
+    ) -> None:
+        stored = self.get_fingerprint(fingerprint_id)
+        override_id = hashlib.sha256(
+            f"{run_id}:export:code_revision:{code_revision}".encode("utf-8")
+        ).hexdigest()[:32]
+        with self._cursor_ctx() as conn:
+            self._execute(
+                conn,
+                f"MERGE INTO {self._table('run_fingerprint_overrides')} o "
+                "USING (SELECT :override_id AS override_id) s ON o.override_id = s.override_id "
+                "WHEN NOT MATCHED THEN INSERT (override_id, run_id, fingerprint_id, phase, field, "
+                "stored_value, override_value, recorded_at) VALUES (:override_id, :run_id, "
+                ":fingerprint_id, :phase, :field, :stored_value, :override_value, :recorded_at)",
+                {
+                    "override_id": override_id, "run_id": run_id, "fingerprint_id": fingerprint_id,
+                    "phase": "export", "field": "code_revision",
+                    "stored_value": stored.get("code_revision"), "override_value": code_revision,
+                    "recorded_at": now,
+                },
+            )
+            self._execute(
+                conn,
+                f"UPDATE {self._table('runs')} SET export_code_revision = :code_revision "
+                "WHERE run_id = :run_id",
+                {"code_revision": code_revision, "run_id": run_id},
+            )
+
     # ── engagements (P1B) ────────────────────────────────────────────────────
 
     def get_engagement(self, engagement_id: str) -> dict | None:

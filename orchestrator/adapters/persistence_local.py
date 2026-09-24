@@ -622,6 +622,42 @@ class LocalPersistence:
             self._release(conn)
         return {r["fingerprint_id"]: dict(r) for r in rows}
 
+    def get_run_row(self, run_id: str) -> dict | None:
+        conn = self._connect()
+        try:
+            row = conn.execute("SELECT * FROM runs WHERE run_id = ?", (run_id,)).fetchone()
+        finally:
+            self._release(conn)
+        return dict(row) if row is not None else None
+
+    def mark_run_superseded(self, run_id: str, *, superseded_by: str, now: str) -> None:
+        with self._writer() as conn:
+            conn.execute(
+                "UPDATE runs SET superseded_by = ? WHERE run_id = ?", (superseded_by, run_id),
+            )
+
+    def record_export_code_revision(
+        self, run_id: str, *, fingerprint_id: str, code_revision: str, now: str
+    ) -> None:
+        stored = self.get_fingerprint(fingerprint_id)
+        override_id = hashlib.sha256(
+            f"{run_id}:export:code_revision:{code_revision}".encode("utf-8")
+        ).hexdigest()[:32]
+        with self._writer() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO run_fingerprint_overrides "
+                "(override_id, run_id, fingerprint_id, phase, field, stored_value, override_value, recorded_at) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (
+                    override_id, run_id, fingerprint_id, "export", "code_revision",
+                    stored.get("code_revision"), code_revision, now,
+                ),
+            )
+            conn.execute(
+                "UPDATE runs SET export_code_revision = ? WHERE run_id = ?",
+                (code_revision, run_id),
+            )
+
     # ── engagements (P1B) ────────────────────────────────────────────────────
 
     def get_engagement(self, engagement_id: str) -> dict | None:
