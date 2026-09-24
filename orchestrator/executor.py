@@ -274,17 +274,22 @@ class ThreadExecutor:
                 self._admit_all_queued()
             except Exception:  # pragma: no cover - defensive, the loop must not die
                 logger.exception("admission loop error")
+            # A single wait, in BOTH the active and idle cases: `_wake_event`
+            # is set by every real in-process signal -- start(run_id, phase)
+            # (start_audit_run/confirm_plan/sign_off/resume_run), _on_done
+            # (a run finishing, possibly freeing the slot a queued run is
+            # waiting on -- CLAUDE.md P3 gate review: "make sure _on_done
+            # still admits queued runs after the last active run finishes"),
+            # and stop(). Event.wait(None) blocks indefinitely, which is
+            # exactly "idle sweep disabled": no timer, no persistence call,
+            # until one of those signals fires. Event.wait(interval) is the
+            # active/opt-in-idle cadence, but now ALSO wakes early on a real
+            # signal rather than always sleeping out the full interval --
+            # strictly lower latency, never higher, than waiting on
+            # `_stop_event` alone did.
             interval = self._next_poll_interval()
-            if interval is None:
-                # Idle sweep disabled (idle_poll_interval_s <= 0, the default
-                # -- CLAUDE.md P3 cost fix): no timer, so no further
-                # persistence call until something real wakes this worker.
-                # stop() also sets _wake_event, so shutdown is immediate, not
-                # bounded by any interval here.
-                self._wake_event.wait()
-                self._wake_event.clear()
-            else:
-                self._stop_event.wait(interval)
+            self._wake_event.wait(timeout=interval)
+            self._wake_event.clear()
 
     def _next_poll_interval(self) -> float | None:
         """Fast cadence while this worker has anything in flight (a run it is
@@ -483,6 +488,14 @@ class ThreadExecutor:
         except Exception:  # pragma: no cover - defensive
             logger.exception("release_lease failed for run_id=%s", run_id)
         self._sema.release()
+        # P3 gate review: a run finishing frees a concurrency slot (or, if it
+        # was the last one, makes this worker idle) -- either way the
+        # admission loop must look again promptly rather than sleeping out
+        # whatever is left of its current wait, so a queued run waiting on
+        # exactly this slot is picked up immediately, and (with the idle
+        # sweep disabled) this worker still parks on `_wake_event` rather
+        # than being left with no path back to busy at all.
+        self._wake_event.set()
         exc = future.exception()
         if exc is not None and not isinstance(exc, StaleStateError):
             logger.error("run_id=%s: executor task raised %r", run_id, exc)

@@ -304,6 +304,69 @@ def test_direct_wake_lets_a_parked_loop_take_another_tick(local_persistence):
         executor.stop()
 
 
+def test_on_done_wakes_the_loop_promptly_for_a_queued_run_waiting_on_the_freed_slot(local_persistence):
+    """P3 gate review: 'make sure _on_done still admits queued runs after
+    the last active run finishes' -- with a single concurrency slot, a run
+    still queued behind it must be admitted PROMPTLY once that run
+    finishes, not only after the (deliberately slow, here) active poll
+    interval next elapses. Proves _on_done's own wake signal does the work,
+    not a lucky coincidence of timing."""
+    persistence = local_persistence
+    clock = _make_clock()
+    run_a, run_c = "RUN-SLOT-A", "RUN-SLOT-C"
+    _create(persistence, run_a, clock)
+    _create(persistence, run_c, clock)
+
+    a_entered = threading.Event()
+    a_release = threading.Event()
+    c_entered = threading.Event()
+
+    def node_a(ctx, state):
+        a_entered.set()
+        a_release.wait(timeout=10)
+        return dataclasses.replace(state, events=state.events + [{"node": "a"}])
+
+    def node_c(ctx, state):
+        c_entered.set()
+        return dataclasses.replace(state, events=state.events + [{"node": "c"}])
+
+    # Both runs share the same node list (nodes_for is keyed by run_kind/
+    # phase, not by run_id) -- dispatch to a per-run node function by
+    # run_id so run C's own entry (node_c) is what distinguishes "run C got
+    # admitted" from "run A is still occupying the only slot".
+    def dispatch(ctx, state):
+        return (node_a if state.run_id == run_a else node_c)(ctx, state)
+
+    nodes_for = {"fieldwork": {"plan": [("n", dispatch)], "execute": [], "export": []}}
+
+    class _SettingsOneSlot:
+        max_concurrent_runs = 1
+
+    executor = ThreadExecutor(
+        persistence=persistence, settings=_SettingsOneSlot(), worker_id="worker-slot",
+        ctx_factory=lambda rid: object(),
+        fingerprint_factory=lambda rid: _fingerprint(f"FP-{rid}"),
+        clock=clock, nodes_for=nodes_for,
+        # Deliberately slow active cadence -- if C's admission depended on
+        # waiting out this interval rather than _on_done's wake, this test
+        # would take ~5s instead of well under 1s.
+        poll_interval_s=5.0, idle_poll_interval_s=0.0, lease_ttl_s=30,
+    )
+    try:
+        executor.start()
+        assert a_entered.wait(timeout=10)
+        assert not c_entered.is_set()  # C is queued, waiting on the only slot
+
+        start = time.time()
+        a_release.set()
+        assert c_entered.wait(timeout=2), "run C was not admitted promptly after run A finished"
+        elapsed = time.time() - start
+        assert elapsed < 2, f"run C's admission took {elapsed:.2f}s -- bounded by the active interval, not the wake"
+    finally:
+        a_release.set()
+        executor.stop()
+
+
 def test_busy_admission_loop_keeps_the_active_interval(local_persistence):
     """The counterpart of the idle test above: while this worker has a run
     admitted (in `_active_runs`), the loop must keep polling at the fast
