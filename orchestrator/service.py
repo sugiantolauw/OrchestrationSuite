@@ -706,7 +706,9 @@ def start_audit_run(
     return state.run_id
 
 
-def _queue_affinity_note(ctx: AppContext, status: str, fingerprint_id: str | None) -> str | None:
+def _queue_affinity_note_from_fingerprint(
+    status: str, own_code_revision: str | None, stored_fingerprint: dict | None
+) -> str | None:
     """P3 gate review item 4: a run created by a different deployment is left
     `queued` untouched rather than claimed and failed at fingerprint
     verification (ThreadExecutor's own admission-time check,
@@ -716,20 +718,36 @@ def _queue_affinity_note(ctx: AppContext, status: str, fingerprint_id: str | Non
     Returns None whenever there is nothing to say -- not queued, this
     deployment's own code_revision is not configured (dev/local, where every
     run is presumed this deployment's own), or the fingerprint row cannot be
-    read."""
+    read (`stored_fingerprint` is None). Takes an already-resolved
+    fingerprint dict rather than fetching one itself (independent review
+    2026-09-24 item 6) -- callers listing many runs fetch every needed
+    fingerprint in one batched call (get_fingerprints) rather than one
+    query per run; the single-run caller (get_run, below) still fetches
+    its own."""
     if status != "queued":
         return None
-    own_code_revision = getattr(ctx.settings, "code_revision", None)
-    if own_code_revision is None or not fingerprint_id:
-        return None
-    try:
-        stored_fingerprint = ctx.persistence.get_fingerprint(fingerprint_id)
-    except Exception:
+    if own_code_revision is None:
         return None
     stored_code_revision = (stored_fingerprint or {}).get("code_revision")
     if stored_code_revision and stored_code_revision != own_code_revision:
         return f"queued — created by a different deployment (code revision {stored_code_revision[:12]})"
     return None
+
+
+def _queue_affinity_note(ctx: AppContext, status: str, fingerprint_id: str | None) -> str | None:
+    """Single-fetch wrapper around _queue_affinity_note_from_fingerprint for
+    a caller with exactly one run to check (get_run) -- list_runs fetches
+    every fingerprint it needs in one batched call instead of calling this."""
+    if status != "queued" or not fingerprint_id:
+        return None
+    own_code_revision = getattr(ctx.settings, "code_revision", None)
+    if own_code_revision is None:
+        return None
+    try:
+        stored_fingerprint = ctx.persistence.get_fingerprint(fingerprint_id)
+    except Exception:
+        return None
+    return _queue_affinity_note_from_fingerprint(status, own_code_revision, stored_fingerprint)
 
 
 def get_run(ctx: AppContext, run_id: str) -> dict:
@@ -751,17 +769,35 @@ def get_run(ctx: AppContext, run_id: str) -> dict:
 
 
 def list_runs(ctx: AppContext, filters: dict | None = None) -> list[dict]:
+    """Independent review 2026-09-24 item 6: this used to issue 3 extra
+    queries PER RUN (list_findings, list_management_actions, get_run_metrics)
+    plus a 4th for any queued run (get_fingerprint) -- a genuine N+1 query
+    cost, and directly the shape of query the 2026-09-23 idle-cost incident
+    was about. Every one of those is now a single batched call for the
+    WHOLE page, keyed by run_id, looked up per row from an in-memory dict --
+    same output, same per-run logic, one round trip per data source instead
+    of one per run."""
     rows = ctx.persistence.list_runs(filters=filters)
     skills_by_id = {e["skill_id"]: e for e in list_skills(ctx)}
     data_mode = "Local test data" if ctx.backend == "local" else "Unity Catalog"
 
+    run_ids = [r["run_id"] for r in rows]
+    findings_by_run = ctx.persistence.list_findings_for_runs(run_ids)
+    actions_by_run = ctx.persistence.list_management_actions_for_runs(run_ids)
+    metrics_by_run = ctx.persistence.get_run_metrics_for_runs(run_ids)
+    own_code_revision = getattr(ctx.settings, "code_revision", None)
+    queued_fingerprint_ids = [
+        r["fingerprint_id"] for r in rows if r["status"] == "queued" and r.get("fingerprint_id")
+    ]
+    fingerprints_by_id = ctx.persistence.get_fingerprints(queued_fingerprint_ids)
+
     out = []
     for r in rows:
         run_id = r["run_id"]
-        findings = ctx.persistence.list_findings(run_id)
-        actions = ctx.persistence.list_management_actions(filters={"run_id": run_id})
+        findings = findings_by_run.get(run_id, [])
+        actions = actions_by_run.get(run_id, [])
         open_actions = [a for a in actions if a.get("status") != "closed"]
-        exposure_metric = ctx.persistence.get_run_metrics(run_id).get("run_exposure_headline")
+        exposure_metric = metrics_by_run.get(run_id, {}).get("run_exposure_headline")
         skill_entry = skills_by_id.get(r.get("skill_id"))
 
         # approved_by (runs.approved_by, populated by orchestrator.runs.sign_off
@@ -799,7 +835,9 @@ def list_runs(ctx: AppContext, filters: dict | None = None) -> list[dict]:
                 "approved_by": approved_by,
                 "self_approved": self_approved,
                 "sod_enforced": SOD_ENFORCED,
-                "queue_note": _queue_affinity_note(ctx, r["status"], r.get("fingerprint_id")),
+                "queue_note": _queue_affinity_note_from_fingerprint(
+                    r["status"], own_code_revision, fingerprints_by_id.get(r.get("fingerprint_id"))
+                ),
             }
         )
     return out

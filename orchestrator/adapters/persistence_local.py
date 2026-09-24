@@ -447,6 +447,19 @@ class LocalPersistence:
             raise RunNotFound(fingerprint_id)
         return dict(row)
 
+    def get_fingerprints(self, fingerprint_ids: list[str]) -> dict[str, dict]:
+        if not fingerprint_ids:
+            return {}
+        placeholders = ", ".join("?" for _ in fingerprint_ids)
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                f"SELECT * FROM run_fingerprints WHERE fingerprint_id IN ({placeholders})", fingerprint_ids
+            ).fetchall()
+        finally:
+            self._release(conn)
+        return {r["fingerprint_id"]: dict(r) for r in rows}
+
     # ── engagements (P1B) ────────────────────────────────────────────────────
 
     def get_engagement(self, engagement_id: str) -> dict | None:
@@ -675,6 +688,26 @@ class LocalPersistence:
         finally:
             self._release(conn)
         return [_finding_dict_from_row(dict(r)) for r in rows]
+
+    def list_findings_for_runs(self, run_ids: list[str]) -> dict[str, list[dict]]:
+        out: dict[str, list[dict]] = {rid: [] for rid in run_ids}
+        if not run_ids:
+            return out
+        placeholders = ", ".join("?" for _ in run_ids)
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                f"SELECT * FROM findings WHERE run_id IN ({placeholders}) ORDER BY run_id, "
+                "CASE severity WHEN 'High' THEN 0 WHEN 'Medium' THEN 1 WHEN 'Low' THEN 2 ELSE 3 END, "
+                "rule_id",
+                run_ids,
+            ).fetchall()
+        finally:
+            self._release(conn)
+        for r in rows:
+            d = _finding_dict_from_row(dict(r))
+            out[d["run_id"]].append(d)
+        return out
 
     def set_finding_review_state(self, finding_id: str, *, to_state: str, actor: str, now: str) -> dict:
         with self._writer() as conn:
@@ -974,6 +1007,24 @@ class LocalPersistence:
             self._release(conn)
         return {r["metric_name"]: _metric_dict_from_row(dict(r)) for r in rows}
 
+    def get_run_metrics_for_runs(self, run_ids: list[str]) -> dict[str, dict[str, dict]]:
+        out: dict[str, dict[str, dict]] = {rid: {} for rid in run_ids}
+        if not run_ids:
+            return out
+        placeholders = ", ".join("?" for _ in run_ids)
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                f"SELECT * FROM run_metrics WHERE run_id IN ({placeholders}) ORDER BY run_id, metric_name",
+                run_ids,
+            ).fetchall()
+        finally:
+            self._release(conn)
+        for r in rows:
+            d = dict(r)
+            out[d["run_id"]][d["metric_name"]] = _metric_dict_from_row(d)
+        return out
+
     def write_issues_for_findings(
         self, run_id: str, findings: list[dict], *, engagement_id, now: str
     ) -> list[dict]:
@@ -1088,6 +1139,26 @@ class LocalPersistence:
         finally:
             self._release(conn)
         return [dict(r) for r in rows]
+
+    def list_management_actions_for_runs(self, run_ids: list[str]) -> dict[str, list[dict]]:
+        out: dict[str, list[dict]] = {rid: [] for rid in run_ids}
+        if not run_ids:
+            return out
+        placeholders = ", ".join("?" for _ in run_ids)
+        sql = (
+            "SELECT ma.*, f.title AS finding_title, f.observation AS finding_observation "
+            "FROM management_actions ma LEFT JOIN findings f ON f.finding_id = ma.finding_id "
+            f"WHERE ma.run_id IN ({placeholders}) ORDER BY ma.run_id, ma.created_at DESC"
+        )
+        conn = self._connect()
+        try:
+            rows = conn.execute(sql, run_ids).fetchall()
+        finally:
+            self._release(conn)
+        for r in rows:
+            d = dict(r)
+            out[d["run_id"]].append(d)
+        return out
 
     def record_export(
         self, run_id: str, kind: str, *, path: str, sha256: str, created_by: str, now: str

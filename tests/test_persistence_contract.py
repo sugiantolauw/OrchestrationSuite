@@ -368,3 +368,78 @@ def test_append_only_and_no_delete_enforced_locally():
         conn.execute("UPDATE run_fingerprints SET code_revision = 'x' WHERE fingerprint_id = 'FP-APPEND-ONLY'")
     with pytest.raises(Exception):
         conn.execute("DELETE FROM run_fingerprints WHERE fingerprint_id = 'FP-APPEND-ONLY'")
+
+
+# ── batch read methods (independent review 2026-09-24 item 6) ──────────────
+
+
+def test_batch_read_methods_match_the_per_id_methods(persistence, uid):
+    """list_findings_for_runs / get_run_metrics_for_runs /
+    list_management_actions_for_runs / get_fingerprints -- one query for
+    many ids instead of one per id (orchestrator.service.list_runs' own
+    N+1 query cost). Each batch result must equal calling the single-id
+    method once per id, on every backend, including a run/id with nothing
+    recorded (present with an empty result, never omitted)."""
+    from tests.test_persistence_p2 import _finding
+
+    run_a = f"RUN-BATCH-A-{uid}"
+    run_b = f"RUN-BATCH-B-{uid}"
+    run_empty = f"RUN-BATCH-EMPTY-{uid}"
+    fp_a = f"FP-BATCH-A-{uid}"
+    fp_b = f"FP-BATCH-B-{uid}"
+
+    persistence.create_run(_state(run_a, fingerprint_id=fp_a), _fingerprint(fp_a))
+    persistence.create_run(_state(run_b, fingerprint_id=fp_b), _fingerprint(fp_b))
+    persistence.create_run(_state(run_empty, fingerprint_id=f"FP-BATCH-EMPTY-{uid}"), _fingerprint(f"FP-BATCH-EMPTY-{uid}"))
+
+    persistence.write_findings(
+        run_a, [_finding(f"F-BATCH-A1-{uid}", rule_id="R1"), _finding(f"F-BATCH-A2-{uid}", rule_id="R2")],
+        engagement_id="ENG-DEFAULT", skill_id="SKILL-001", skill_version="v1", now=canonical_ts(1),
+    )
+    persistence.write_findings(
+        run_b, [_finding(f"F-BATCH-B1-{uid}", rule_id="R1")],
+        engagement_id="ENG-DEFAULT", skill_id="SKILL-001", skill_version="v1", now=canonical_ts(1),
+    )
+
+    persistence.write_run_metrics(run_a, [
+        {"metric_name": "m1", "value": 1.0, "unit": "AUD", "source_ref": {}, "test_id": "T1"},
+    ])
+    persistence.write_run_metrics(run_b, [
+        {"metric_name": "m2", "value": 2.0, "unit": "AUD", "source_ref": {}, "test_id": "T1"},
+    ])
+
+    persistence.write_management_actions(run_a, [
+        {"action_id": f"MA-BATCH-A1-{uid}", "finding_id": f"F-BATCH-A1-{uid}", "engagement_id": "ENG-DEFAULT",
+         "skill_id": "SKILL-001", "title": "Fix it", "status": "draft"},
+    ], now=canonical_ts(1))
+
+    run_ids = [run_a, run_b, run_empty]
+    findings_batch = persistence.list_findings_for_runs(run_ids)
+    metrics_batch = persistence.get_run_metrics_for_runs(run_ids)
+    actions_batch = persistence.list_management_actions_for_runs(run_ids)
+    fp_batch = persistence.get_fingerprints([fp_a, fp_b])
+
+    for rid in run_ids:
+        assert rid in findings_batch
+        assert rid in metrics_batch
+        assert rid in actions_batch
+        expected_findings = {f["finding_id"] for f in persistence.list_findings(rid)}
+        assert {f["finding_id"] for f in findings_batch[rid]} == expected_findings
+        assert metrics_batch[rid] == persistence.get_run_metrics(rid)
+        expected_actions = {a["action_id"] for a in persistence.list_management_actions(filters={"run_id": rid})}
+        assert {a["action_id"] for a in actions_batch[rid]} == expected_actions
+
+    assert findings_batch[run_empty] == []
+    assert metrics_batch[run_empty] == {}
+    assert actions_batch[run_empty] == []
+
+    assert fp_batch[fp_a]["code_revision"] == persistence.get_fingerprint(fp_a)["code_revision"]
+    assert fp_batch[fp_b]["code_revision"] == persistence.get_fingerprint(fp_b)["code_revision"]
+    assert "FP-DOES-NOT-EXIST" not in persistence.get_fingerprints(["FP-DOES-NOT-EXIST"])
+
+
+def test_batch_read_methods_with_no_ids_return_empty(persistence):
+    assert persistence.list_findings_for_runs([]) == {}
+    assert persistence.get_run_metrics_for_runs([]) == {}
+    assert persistence.list_management_actions_for_runs([]) == {}
+    assert persistence.get_fingerprints([]) == {}

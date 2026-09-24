@@ -715,6 +715,20 @@ class DeltaPersistence:
             raise RunNotFound(fingerprint_id)
         return row
 
+    def get_fingerprints(self, fingerprint_ids: list[str]) -> dict[str, dict]:
+        if not fingerprint_ids:
+            return {}
+        placeholders = ", ".join(f":f{i}" for i in range(len(fingerprint_ids)))
+        params = {f"f{i}": fid for i, fid in enumerate(fingerprint_ids)}
+        with self._cursor_ctx() as conn:
+            cur = self._execute(
+                conn,
+                f"SELECT * FROM {self._table('run_fingerprints')} WHERE fingerprint_id IN ({placeholders})",
+                params,
+            )
+            rows = _fetchall_dicts(cur)
+        return {r["fingerprint_id"]: r for r in rows}
+
     # ── engagements (P1B) ────────────────────────────────────────────────────
 
     def get_engagement(self, engagement_id: str) -> dict | None:
@@ -993,6 +1007,26 @@ class DeltaPersistence:
             )
             rows = _fetchall_dicts(cur)
         return [_finding_dict_from_row(r) for r in rows]
+
+    def list_findings_for_runs(self, run_ids: list[str]) -> dict[str, list[dict]]:
+        out: dict[str, list[dict]] = {rid: [] for rid in run_ids}
+        if not run_ids:
+            return out
+        placeholders = ", ".join(f":r{i}" for i in range(len(run_ids)))
+        params = {f"r{i}": rid for i, rid in enumerate(run_ids)}
+        with self._cursor_ctx() as conn:
+            cur = self._execute(
+                conn,
+                f"SELECT * FROM {self._table('findings')} WHERE run_id IN ({placeholders}) ORDER BY run_id, "
+                "CASE severity WHEN 'High' THEN 0 WHEN 'Medium' THEN 1 WHEN 'Low' THEN 2 ELSE 3 END, "
+                "rule_id",
+                params,
+            )
+            rows = _fetchall_dicts(cur)
+        for r in rows:
+            d = _finding_dict_from_row(r)
+            out[d["run_id"]].append(d)
+        return out
 
     def set_finding_review_state(self, finding_id: str, *, to_state: str, actor: str, now: str) -> dict:
         with self._cursor_ctx() as conn:
@@ -1375,6 +1409,24 @@ class DeltaPersistence:
             rows = _fetchall_dicts(cur)
         return {r["metric_name"]: _metric_dict_from_row(r) for r in rows}
 
+    def get_run_metrics_for_runs(self, run_ids: list[str]) -> dict[str, dict[str, dict]]:
+        out: dict[str, dict[str, dict]] = {rid: {} for rid in run_ids}
+        if not run_ids:
+            return out
+        placeholders = ", ".join(f":r{i}" for i in range(len(run_ids)))
+        params = {f"r{i}": rid for i, rid in enumerate(run_ids)}
+        with self._cursor_ctx() as conn:
+            cur = self._execute(
+                conn,
+                f"SELECT * FROM {self._table('run_metrics')} WHERE run_id IN ({placeholders}) "
+                "ORDER BY run_id, metric_name",
+                params,
+            )
+            rows = _fetchall_dicts(cur)
+        for r in rows:
+            out[r["run_id"]][r["metric_name"]] = _metric_dict_from_row(r)
+        return out
+
     def write_issues_for_findings(
         self, run_id: str, findings: list[dict], *, engagement_id, now: str
     ) -> list[dict]:
@@ -1501,6 +1553,25 @@ class DeltaPersistence:
         with self._cursor_ctx() as conn:
             cur = self._execute(conn, sql_text, params)
             return _fetchall_dicts(cur)
+
+    def list_management_actions_for_runs(self, run_ids: list[str]) -> dict[str, list[dict]]:
+        out: dict[str, list[dict]] = {rid: [] for rid in run_ids}
+        if not run_ids:
+            return out
+        placeholders = ", ".join(f":r{i}" for i in range(len(run_ids)))
+        params = {f"r{i}": rid for i, rid in enumerate(run_ids)}
+        sql_text = (
+            f"SELECT ma.*, f.title AS finding_title, f.observation AS finding_observation "
+            f"FROM {self._table('management_actions')} ma "
+            f"LEFT JOIN {self._table('findings')} f ON f.finding_id = ma.finding_id "
+            f"WHERE ma.run_id IN ({placeholders}) ORDER BY ma.run_id, ma.created_at DESC"
+        )
+        with self._cursor_ctx() as conn:
+            cur = self._execute(conn, sql_text, params)
+            rows = _fetchall_dicts(cur)
+        for r in rows:
+            out[r["run_id"]].append(r)
+        return out
 
     def record_export(
         self, run_id: str, kind: str, *, path: str, sha256: str, created_by: str, now: str

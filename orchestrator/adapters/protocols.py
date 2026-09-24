@@ -94,6 +94,14 @@ class PersistenceAdapter(Protocol):
     def get_fingerprint(self, fingerprint_id: str) -> dict:
         ...
 
+    def get_fingerprints(self, fingerprint_ids: list[str]) -> dict[str, dict]:
+        """Batched get_fingerprint (independent review 2026-09-24 item 6):
+        {fingerprint_id: fingerprint}; a fingerprint_id that does not
+        resolve is simply absent from the result (never a KeyError or a
+        fabricated row) -- callers already treat "unknown fingerprint" as
+        "nothing to say" (service._queue_affinity_note)."""
+        ...
+
     def begin_node_attempt(
         self,
         *,
@@ -197,6 +205,15 @@ class PersistenceAdapter(Protocol):
     def list_findings(self, run_id: str) -> list[dict]:
         ...
 
+    def list_findings_for_runs(self, run_ids: list[str]) -> dict[str, list[dict]]:
+        """Batched list_findings (independent review 2026-09-24 item 6): one
+        query for every run_id in `run_ids` instead of one per run, so a
+        run-listing page never pays an N+1 query cost. {run_id: [finding,
+        ...]}; a run_id with no findings is present with an empty list, not
+        omitted -- callers must never distinguish "no findings yet" from
+        "never asked" by key absence."""
+        ...
+
     def set_finding_review_state(self, finding_id: str, *, to_state: str, actor: str, now: str) -> dict:
         ...
 
@@ -219,6 +236,12 @@ class PersistenceAdapter(Protocol):
     def get_run_metrics(self, run_id: str) -> dict[str, dict]:
         ...
 
+    def get_run_metrics_for_runs(self, run_ids: list[str]) -> dict[str, dict[str, dict]]:
+        """Batched get_run_metrics (independent review 2026-09-24 item 6):
+        {run_id: {metric_name: metric}}; a run_id with no metrics yet is
+        present with an empty dict, never omitted."""
+        ...
+
     def write_issues_for_findings(
         self, run_id: str, findings: list[dict], *, engagement_id: str | None, now: str
     ) -> list[dict]:
@@ -232,6 +255,13 @@ class PersistenceAdapter(Protocol):
         ...
 
     def list_management_actions(self, filters: dict | None = None) -> list[dict]:
+        ...
+
+    def list_management_actions_for_runs(self, run_ids: list[str]) -> dict[str, list[dict]]:
+        """Batched list_management_actions (independent review 2026-09-24
+        item 6), scoped to `run_id` only (unlike list_management_actions'
+        general `filters`) -- {run_id: [action, ...]}, a run_id with none
+        present with an empty list, never omitted."""
         ...
 
     def record_export(
