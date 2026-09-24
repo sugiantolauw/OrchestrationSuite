@@ -86,13 +86,23 @@ def make_narration_harness(
     local_persistence, tmp_path, *, model_client=None, narration_enabled: bool = True,
     model_sonnet: str | None = MODEL_SONNET_ENDPOINT, model_gpt_oss: str | None = MODEL_GPT_OSS_ENDPOINT,
     llm_cache_mode: str = "live", run_owner: str = "alice", engagement_id: str = "ENG-DEFAULT",
+    skill_dir: Path = MINI_SKILL_DIR, ai_proposed_findings_enabled: bool = False,
+    narration_max_candidates: int = 3, data_writer=_write_mini_data,
 ) -> NarrationHarness:
+    # `skill_dir`/`ai_proposed_findings_enabled`/`narration_max_candidates`/
+    # `data_writer` (P6 WP N8): every existing caller omits them, so every
+    # existing test's behaviour is unchanged -- `tests/test_candidates.py`
+    # is the only caller that passes a non-default `skill_dir` (a dedicated
+    # fixture with a genuine C-2 anchor; the shared `mini` Skill's two rule
+    # findings fully cite both of their own tests' metrics, so it has none)
+    # or a non-default `data_writer` (G10: a clean population, no
+    # exceptions on either test).
     persistence = local_persistence
     data_dir = tmp_path / "data"
     data_dir.mkdir(parents=True)
-    _write_mini_data(data_dir)
+    data_writer(data_dir)
 
-    skill = load_skill(MINI_SKILL_DIR)
+    skill = load_skill(skill_dir)
     skill.validate()
     data_source = LocalFileDataSource(root_dir=data_dir, sources=skill.contract["sources"])
     source_versions = {name: data_source.resolve_version(name) for name in skill.contract["sources"]}
@@ -109,7 +119,8 @@ def make_narration_harness(
 
     settings = Settings(
         model_sonnet=model_sonnet, model_gpt_oss=model_gpt_oss, narration_enabled=narration_enabled,
-        llm_cache_mode=llm_cache_mode,
+        llm_cache_mode=llm_cache_mode, ai_proposed_findings_enabled=ai_proposed_findings_enabled,
+        narration_max_candidates=narration_max_candidates,
     )
     export_dir = tmp_path / "exports"
     ctx = NodeContext(

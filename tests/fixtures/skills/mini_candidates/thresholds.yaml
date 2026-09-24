@@ -1,0 +1,19 @@
+hv_limit:
+  value: 500
+  unit: AUD
+  description: High-value claim threshold
+  used_by: [T1]
+  effective_date: "2025-01-01"
+  provenance:
+    type: analyst-set
+    pending_policy_confirmation: true
+
+hv_high:
+  value: 1
+  unit: count
+  description: Count of high-value claims that drives High severity
+  used_by: [T1]
+  effective_date: "2025-01-01"
+  provenance:
+    type: analyst-set
+    pending_policy_confirmation: true

@@ -10,11 +10,14 @@ referenced from `RunState` by id, CLAUDE.md §6.2) and, where a theme's
 synthesis proposes one, `findings.theme_id` / `proposed_severity` /
 `proposed_severity_reason` (existing columns, migration 002/011).
 
-AI-proposed CANDIDATE findings (§5, `find_candidates`) are explicitly out of
-this WP's scope -- WP N8's job. `NARRATION_MAX_CANDIDATES`/
-`ai_proposed_findings_enabled` are read by nothing here; the hook is simply
-that N8 adds its own call inside this same node body, after synthesis and
-before `act`'s remediation drafts, once it lands.
+AI-proposed CANDIDATE findings (§5, `find_candidates`, P6 WP N8) are proposed
+here too, behind the `ai_proposed_findings_enabled` switch (default off,
+§1 #9) -- one call, after synthesis and before `act`'s remediation drafts,
+via `orchestrator.narration.candidates.narrate_candidates`. A candidate is
+never merged into `findings`: it stays a separate, undecided row in
+`finding_candidates` until an auditor accepts or rejects it (N9's job), so
+`narrate_priority`/`narrate_remediation` below still see only rule
+findings.
 
 Idempotent per CLAUDE.md §2.3 rule 1: every persistence write below either
 upserts by a deterministic id (`upsert_narrative` by `narrative_id`,
@@ -26,6 +29,7 @@ from __future__ import annotations
 
 import dataclasses
 
+from orchestrator.narration import candidates as candidates_module
 from orchestrator.narration import runner
 from orchestrator.narration.payloads import finding_key, pii_columns_masked
 from orchestrator.narration.prompts import NarrationPromptRepository
@@ -149,6 +153,15 @@ def narrate(ctx: NodeContext, state: RunState) -> RunState:
             skill_version=state.skill_version, now=now,
         )
 
+    candidate_rows: list[dict] = []
+    superseded_count = 0
+    ai_proposed_enabled = bool(getattr(ctx.settings, "ai_proposed_findings_enabled", False))
+    if ai_proposed_enabled:
+        candidate_rows, superseded_count = candidates_module.narrate_candidates(
+            rc, state=state, skill=skill, metrics=metrics, findings=findings,
+            max_candidates=int(getattr(ctx.settings, "narration_max_candidates", 3) or 0),
+        )
+
     priority_rationale = runner.narrate_priority(rc, findings, skill=skill, period=period)
     remediation_drafts = runner.narrate_remediation(rc, findings, skill=skill, period=period)
     exec_summary_id = runner.narrate_exec_summary(rc, state, findings, metrics, themes=themes)
@@ -161,6 +174,24 @@ def narrate(ctx: NodeContext, state: RunState) -> RunState:
         f"Narration: {counts.get('model', 0)} model, {counts.get('model_repaired', 0)} repaired, "
         f"{fallback_count} fallback; {len(themes)} theme(s)"
     )
+    if ai_proposed_enabled:
+        message += f"; {len(candidate_rows)} AI-proposed"
+
+    events = [_event("narrate", message, now)]
+    if superseded_count:
+        events.append(
+            _event("narrate", f"{superseded_count} AI-proposed candidate(s) superseded (generation {generation})", now)
+        )
+    for row in candidate_rows:
+        events.append(
+            _event(
+                "narrate",
+                f"AI-proposed candidate {row['rule_id']}: {row['proposed_severity']}, "
+                f"headline_eligible={row['headline_eligible']}",
+                now,
+            )
+        )
+
     return dataclasses.replace(
         state,
         profile_narrative=profile_narrative_id,
@@ -169,5 +200,5 @@ def narrate(ctx: NodeContext, state: RunState) -> RunState:
         remediation_drafts=remediation_drafts,
         exec_summary=exec_summary_id,
         chart_captions=chart_captions,
-        events=state.events + [_event("narrate", message, now)],
+        events=state.events + events,
     )

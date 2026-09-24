@@ -1,11 +1,15 @@
-"""G11 (docs/specs/P6_narration_design.md §3.6, §11, §12 WP N2):
+"""G11 (docs/specs/P6_narration_design.md §3.6, §11, §12 WP N2/N8):
 
 1. The 30-case golden set (`tests/fixtures/narration/g11_golden.yaml`, 10
    valid, 20 invalid) -- every case run through
    `orchestrator.narration.validate.validate_prose` and checked against its
-   expected verdict and rule id(s). See that file's header for the two
-   cases substituted for the design spec's candidate-level (C-2) examples,
-   which belong to WP N8's not-yet-built `candidates.py`.
+   expected verdict and rule id(s), EXCEPT the two `check: candidate` cases
+   (§5.1's C-2, "a candidate duplicating a rule finding" / "a candidate on
+   a zero-exception test"), which are not validate_prose rules at all --
+   those two run through
+   `orchestrator.narration.candidates._build_candidate_row` instead
+   (P6 WP N8) and are expected to come back `None` (dropped, never
+   repaired). See that file's header for the exact case shape.
 2. The template-parity check ("outside the 30", §3.6): each of SKILL-001's
    13 `findings.yaml` observation/recommendation templates, mechanically
    rewritten from `findings.yaml`'s bare `{name}` form into the typed
@@ -26,6 +30,7 @@ import pytest
 import yaml
 
 from orchestrator.findings import _format_template, format_metric_value
+from orchestrator.narration.candidates import _build_candidate_row
 from orchestrator.narration.placeholders import PlaceholderEntry, class_for_unit, render
 from orchestrator.narration.validate import validate_prose
 
@@ -69,11 +74,50 @@ def _load_golden_cases() -> list[dict]:
 GOLDEN_CASES = _load_golden_cases()
 
 
+def _run_candidate_case(case: dict) -> dict | None:
+    """The two `check: candidate` cases (§5.1's C-2): builds the same kwargs
+    `orchestrator.nodes.narration.narrate` (via
+    `orchestrator.narration.candidates.narrate_candidates`) would, from the
+    case's own `context` block, and returns whatever
+    `_build_candidate_row` returns -- `None` for both golden cases here
+    (dropped, never repaired: C-2 is a Python-only data rule, not a
+    validate_prose rule, so there is no repair round to assert against)."""
+    ctx = case["context"]
+    metrics = {
+        name: {"value": spec["value"], "unit": spec["unit"], "test_id": spec.get("test_id")}
+        for name, spec in ctx["metrics"].items()
+    }
+    rule_cited = set(ctx.get("rule_cited_metric_names", []))
+    findings = (
+        [{"metrics_cited": {n: metrics[n] for n in rule_cited if n in metrics}, "monetary_basis": "none"}]
+        if rule_cited else []
+    )
+    test_results_by_id = {
+        tid: {"test_id": tid, **spec} for tid, spec in ctx.get("test_results", {}).items()
+    }
+    amount_metric_names = {n for n, spec in ctx["metrics"].items() if spec["unit"] == "AUD"}
+    return _build_candidate_row(
+        case["candidate"], run_id="RUN-GOLDEN", generation=0, skill_id="SKILL-GOLDEN", engagement_id=None,
+        metrics=metrics, rule_cited_metric_names=rule_cited, test_results_by_id=test_results_by_id,
+        amount_metric_names=amount_metric_names, metric_kind_by_name={}, findings=findings,
+        decided_rule_ids=set(), seen_rule_ids=set(), test_line_values_by_test={}, call_id="CALL-GOLDEN",
+    )
+
+
 # ---------------------------------------------------------------------------
 # The 30-case golden set.
 # ---------------------------------------------------------------------------
 @pytest.mark.parametrize("case", GOLDEN_CASES, ids=[c["id"] for c in GOLDEN_CASES])
 def test_g11_golden_case(case: dict) -> None:
+    expected = case["expected"]
+    if case.get("check") == "candidate":
+        row = _run_candidate_case(case)
+        if expected["valid"]:
+            assert row is not None, f"{case['id']}: expected a built candidate row, got None"
+        else:
+            assert row is None, f"{case['id']}: expected the candidate to be dropped (C-2), got a row"
+        return
+
     table = _table(case.get("table"))
     result = validate_prose(
         case["text"],
@@ -84,7 +128,6 @@ def test_g11_golden_case(case: dict) -> None:
         require_coverage=case.get("require_coverage", False),
         required_placeholders=case.get("required_placeholders"),
     )
-    expected = case["expected"]
     assert result.valid is expected["valid"], (
         f"{case['id']}: expected valid={expected['valid']}, got violations "
         f"{[(v.rule_id, v.message) for v in result.violations]}"
