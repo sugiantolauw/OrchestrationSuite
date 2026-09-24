@@ -30,6 +30,7 @@ from __future__ import annotations
 import dataclasses
 
 from orchestrator import exposure
+from orchestrator.catalogue_counts import catalogue_tests_for_skill
 from orchestrator.narration import candidates as candidates_module
 from orchestrator.narration import resolve
 from orchestrator.narration import runner
@@ -175,7 +176,8 @@ def narrate(ctx: NodeContext, state: RunState) -> RunState:
 
     priority_rationale = runner.narrate_priority(rc, findings, skill=skill, period=period)
     remediation_drafts = runner.narrate_remediation(rc, findings, skill=skill, period=period)
-    exec_summary_id = runner.narrate_exec_summary(rc, state, findings, metrics, themes=themes)
+    catalogue_tests = catalogue_tests_for_skill(skill)
+    exec_summary_id = runner.narrate_exec_summary(rc, state, findings, metrics, catalogue_tests=catalogue_tests, themes=themes)
     chart_specs, chart_metrics = _chart_specs(findings, metrics)
     chart_captions = runner.narrate_captions(rc, chart_specs, chart_metrics)
 

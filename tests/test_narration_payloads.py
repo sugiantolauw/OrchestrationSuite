@@ -82,7 +82,7 @@ def test_run_values_counts_severities_and_tests():
         "run_exposure_headline": _metric(1234.5, unit="AUD"),
         "run_approved_not_spent_total": _metric(50.0, unit="AUD"),
     }
-    table = run_values(state, findings, metrics)
+    table = run_values(state, findings, metrics, catalogue_tests=[])
 
     assert table["run_finding_count"].value == 4
     assert table["run_high_count"].value == 2
@@ -103,7 +103,7 @@ def test_run_values_never_fabricates_the_headline_when_absent():
     # Before prioritise/finalise has run, run_metrics has no
     # run_exposure_headline row -- the entry is None, never a fabricated 0.
     state = _State()
-    table = run_values(state, [], {})
+    table = run_values(state, [], {}, catalogue_tests=[])
     assert table["run_exposure_headline"].value is None
     assert table["run_finding_count"].value == 0
 
@@ -153,10 +153,11 @@ def test_run_values_catalogue_tests_give_14_grain_counts(skill):
     assert catalogue_table["run_tests_with_exceptions"].value == 5  # T3.2a, T6.1d, T4.1, T4.4, T5.1
     assert catalogue_table["run_tests_not_testable"].value == 2  # T3.3a, T4.3
 
-    # Without catalogue_tests, the prior plan-grain fallback still counts 21
-    # sub-tests -- proves the fix changes behaviour, not just adds an unused
-    # parameter.
-    plan_grain_table = run_values(state, [], {})
+    # An explicit catalogue_tests=[] (never an omitted argument -- the
+    # parameter is required, see run_values' own docstring) still falls
+    # back to the prior plan-grain count of 21 sub-tests -- proves the fix
+    # changes behaviour, not just adds an unused parameter.
+    plan_grain_table = run_values(state, [], {}, catalogue_tests=[])
     assert plan_grain_table["run_tests_total"].value == 21
     assert plan_grain_table["run_tests_with_exceptions"].value == 7
     assert plan_grain_table["run_tests_not_testable"].value == 4
@@ -319,14 +320,14 @@ def test_build_remediation_payload_carries_effective_recommendation(skill):
 
 def test_build_exec_summary_payload_none_on_a_clean_run():
     state = _State()
-    assert build_exec_summary_payload(state, [], {}) is None
+    assert build_exec_summary_payload(state, [], {}, catalogue_tests=[]) is None
 
 
 def test_build_exec_summary_payload_top_5_by_severity():
     state = _State()
     findings = [_finding(finding_id=f"R:{i}", rule_id=f"SKILL-001.T{i}", severity=sev, title=f"F{i}")
                 for i, sev in enumerate(["Low", "High", "Medium", "High", "Low", "High"])]
-    payload, table = build_exec_summary_payload(state, findings, {})
+    payload, table = build_exec_summary_payload(state, findings, {}, catalogue_tests=[])
     assert len(payload["top_findings"]) == 5
     assert payload["top_findings"][0]["severity"] == "High"
     assert table["run_finding_count"].value == 6
@@ -485,7 +486,7 @@ def test_g15_sentinel_absent_from_every_payload_built_with_tainted_contract_meta
         build_synthesis_payload([finding], skill=tainted)[0],
         build_priority_payload([finding], skill=tainted, period=period)[0],
         build_remediation_payload([finding], skill=tainted, period=period)[0],
-        build_exec_summary_payload(state, [finding], {})[0],
+        build_exec_summary_payload(state, [finding], {}, catalogue_tests=[])[0],
         build_caption_payload([{"chart_id": "c", "what_it_plots": "x", "metric_names": []}], {})[0],
         build_profile_payload(state)[0],
     ]

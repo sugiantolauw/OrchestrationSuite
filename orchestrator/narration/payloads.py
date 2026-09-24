@@ -430,13 +430,13 @@ def build_remediation_payload(items: list[dict], *, skill, period: tuple[str, st
 
 
 def build_exec_summary_payload(
-    state, findings: list[dict], metrics: dict[str, dict], *, themes: list[dict] = (),
+    state, findings: list[dict], metrics: dict[str, dict], *, catalogue_tests: list[dict], themes: list[dict] = (),
 ) -> tuple[dict, dict[str, PlaceholderEntry]] | None:
     if not findings:
         return None
     from orchestrator.narration.run_values import run_values
 
-    table = run_values(state, findings, metrics)
+    table = run_values(state, findings, metrics, catalogue_tests=catalogue_tests)
     top5 = sorted(findings, key=lambda f: _SEVERITY_ORDER.get(f.get("severity"), 3))[:5]
     payload = {
         "placeholders": _serialise_table(table),

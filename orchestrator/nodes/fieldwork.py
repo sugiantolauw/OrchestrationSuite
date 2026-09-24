@@ -933,19 +933,20 @@ def prioritise(ctx: NodeContext, state: RunState) -> RunState:
         "source_ref": {
             "label": "Potential exposure",
             "basis": (
-                "The amount at risk: every distinct flagged transaction line from findings whose "
-                "monetary_basis is 'spend' or 'excess' counts exactly once, at the LARGEST amount "
-                "at risk any finding attributes to it -- a 'spend' finding attributes the line's "
-                "own full amount, an 'excess' finding attributes only the at-risk portion (the "
-                "lines beyond the first in a duplicate group, or a per-diem day's over-limit "
-                "amount allocated pro rata to that day's lines). Line identity is row identity for "
-                "a row-grain source, or a declared repeats-grain entry_key (contract.yaml) where "
-                "one source row is genuinely the same business entry as another (e.g. one row per "
-                "attendee of one entertainment claim). Excludes 'approved_not_spent' findings "
-                "(money approved but never actually spent -- see run_approved_not_spent_total) and "
-                "'none' (no dollar figure). Per-finding exposure_amount figures overlap with each "
-                "other and with this headline by design (the same line can be cited by more than "
-                "one finding) and must never be summed."
+                "The amount at risk: every distinct flagged transaction line counts exactly once, "
+                "at the largest amount any finding attributes to it. A finding that flags a full "
+                "spend amount counts the line's own full value; a finding that flags only an "
+                "excess over a limit counts only the at-risk portion (for example the extra lines "
+                "beyond the first in a duplicate group, or the part of a per-diem day's spend that "
+                "is over the daily limit, allocated pro rata to that day's lines). Line identity is "
+                "the row's own identity for a one-row-per-entry source, or a repeats-grain key "
+                "declared in the Skill's source contract where one source row is genuinely the same "
+                "business entry as another (e.g. one row per attendee of one entertainment claim). "
+                "Findings for money that was approved but never spent are excluded here and "
+                "reported separately as approved-but-unspent; findings with no dollar figure are "
+                "also excluded. Per-finding exposure figures overlap with each other and with this "
+                "headline by design (the same line can be cited by more than one finding) and must "
+                "never be summed."
             ),
             "sources": outcome["headline_provenance"],
         },
