@@ -50,6 +50,7 @@ FULL_STATE_KWARGS = dict(
     plan={"tests": [{"primitive": "duplicate_detection"}]},
     plan_confirmed=True,
     plan_edits=[{"field": "threshold", "old": 10, "new": 20}],
+    confirmed_plan_hash="a" * 64,
     test_results=[{"test_id": "T5.1", "exceptions": 12}],
     flagged_table="run_1234_flags",
     reconciliation={"rows": 4200, "sum": 123456.78},

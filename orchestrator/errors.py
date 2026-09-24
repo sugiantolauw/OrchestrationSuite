@@ -223,6 +223,52 @@ class MonthlyLLMBudgetExceeded(Exception):
         )
 
 
+class ExplorerInputError(Exception):
+    """docs/specs/P6_P8_explorer_llm_design.md §4.2: start_explorer_run was
+    given inputs it cannot honour -- wrong number of sources, an unset
+    audit_timezone, an objective outside its length bounds, or a rendered
+    planner prompt over explorer_max_prompt_chars (§4.4's size guard,
+    raised loudly before any model call, never truncated)."""
+
+
+class ExplorerEditRejected(Exception):
+    """docs/specs/P6_P8_explorer_llm_design.md §4.10: a submitted batch of
+    plan_edits would leave an included test invalid. The whole batch is
+    refused -- nothing partial is ever recorded."""
+
+    def __init__(self, reasons: list[str]):
+        self.reasons = list(reasons)
+        super().__init__(f"edit rejected: {'; '.join(self.reasons)}")
+
+
+class ExplorerPlanNotConfirmable(Exception):
+    """docs/specs/P6_P8_explorer_llm_design.md §4.10 confirm_plan: the plan
+    is not in a confirmable state -- not awaiting_confirmation, not
+    Explorer mode, plan.status != 'proposed' (e.g. llm_unavailable or
+    no_valid_tests), or no included test remains valid after edits."""
+
+
+class PlanIntegrityError(Exception):
+    """docs/specs/P6_P8_explorer_llm_design.md §4.11 resolve_run_skill: an
+    Explorer run's confirmed_plan_hash does not match its EXPLORER-<run_id>
+    ledger row's content_hash (or that row is missing) -- the SAME handling
+    as a fingerprint mismatch (CLAUDE.md §3 non-negotiable 8): the executor
+    pass fails the run rather than executing against a Skill nobody
+    confirmed."""
+
+
+class PromotionRequirementsNotMet(Exception):
+    """docs/specs/P6_P8_explorer_llm_design.md §4.13: publish_skill's guard
+    -- Surface 2 results, a named reviewer distinct from created_by, and a
+    'draft' status are all required before a Skill (repo or Explorer) may
+    move to 'published'. No publish UI exists yet (§4.13); this is the
+    guard alone."""
+
+    def __init__(self, missing: list[str]):
+        self.missing = list(missing)
+        super().__init__(f"cannot publish: requirements not met: {', '.join(self.missing)}")
+
+
 class MissingSeverityProvenance(Exception):
     """CLAUDE.md §0.4/G8, P2/P3 gate review item 3: a finding whose severity
     provenance (analyst_set_severity / severity_basis) was never persisted.

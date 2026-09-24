@@ -11,6 +11,14 @@ from orchestrator.errors import ConfigError, FingerprintMismatch
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
+# Sentinel distinguishing "no override given" from "the caller explicitly
+# wants skill_content_hash=None" (Explorer's plan phase has neither a
+# skill_dir NOR a None hash -- it has a real, non-None hash computed from
+# its OWN inputs, docs/specs/P6_P8_explorer_llm_design.md §4.2). A default
+# of `None` on compute_fingerprint's own keyword could not tell that apart
+# from "compute it from skill_dir as usual".
+_UNSET = object()
+
 _SKILL_FILES = (
     "manifest.yaml",
     "contract.yaml",
@@ -208,6 +216,7 @@ def compute_fingerprint(
     reference_files: list[Path] | None = None,
     code_revision: str | None = None,
     dependency_lock_path: Path | None = None,
+    skill_content_hash: str | None | object = _UNSET,
 ) -> dict:
     requirements_path = Path(requirements_path)
     # P2/P3 gate review item 8: `dependency_lock_hash` hashes a REAL lock --
@@ -228,11 +237,14 @@ def compute_fingerprint(
             f"scripts/generate_requirements_lock.py (CLAUDE.md P2/P3 gate review item 8; "
             f"requirements.txt alone is not a lock)"
         )
+    resolved_skill_content_hash = (
+        _skill_content_hash(skill_dir) if skill_content_hash is _UNSET else skill_content_hash
+    )
     fields = {
         "source_table_versions": _canonical_json(source_table_versions),
         "uploaded_file_hashes": _canonical_json(uploaded_file_hashes),
         "reference_data_hashes": _canonical_json(_reference_data_hashes(reference_files)),
-        "skill_content_hash": _skill_content_hash(skill_dir),
+        "skill_content_hash": resolved_skill_content_hash,
         "code_revision": _resolve_code_revision(code_revision, settings.code_revision),
         "dependency_lock_hash": sha256_bytes(lock_path.read_bytes()),
         "runtime_config_hash": runtime_config_hash(settings),

@@ -81,7 +81,14 @@ class NodeContext:
     settings: Any
     persistence: Any
     data_source: Any
-    skill: Skill
+    # Skill | None: None only during an Explorer run's plan phase, before
+    # confirm_plan has materialised a ledger Skill (docs/specs/
+    # P6_P8_explorer_llm_design.md §4.11 resolve_run_skill's "Explorer
+    # before confirmation: None") -- the Explorer discover/profile/plan
+    # branches never read ctx.skill; every Playbook and post-confirmation
+    # Explorer node gets a real Skill, same as before this field could ever
+    # be None.
+    skill: Skill | None
     clock: Callable[[], str]
     export_storage: Any = None
     tracer: Any = None
@@ -93,6 +100,15 @@ class NodeContext:
     # only consulted by the T4.3 row-level classification capability, which
     # itself only runs when Settings.enable_row_level_llm is true.
     model_client: Any = None
+    # docs/specs/P6_P8_explorer_llm_design.md §4.12 item 2: the Explorer
+    # plan node's LLMGateway/FilePromptRepository, built once by
+    # service.build_node_context per executor pass and shared by every node
+    # in it (same rationale as _CachingDataSource above -- one gateway/
+    # persistence-write path per pass, not one per node). None for a
+    # Playbook run: the execute-phase nodes (unchanged by this step) ignore
+    # both fields regardless of whether they are set.
+    llm: Any = None
+    prompts: Any = None
 
     def __post_init__(self) -> None:
         if self.data_source is not None and not isinstance(self.data_source, _CachingDataSource):

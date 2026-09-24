@@ -87,6 +87,13 @@ class RunState:
     plan: dict | None = None
     plan_confirmed: bool = False
     plan_edits: list[dict] = field(default_factory=list)
+    # Explorer only (docs/specs/P6_P8_explorer_llm_design.md §4.1): the
+    # materialised Skill's content_hash, set by confirm_plan and never
+    # again -- LIFECYCLE, not node-owned, because it pins WHICH ledger
+    # skill_versions row resolve_run_skill must load (§4.11), the same way
+    # fingerprint_id pins a run_fingerprints row. None for a Playbook run,
+    # and for an Explorer run before confirmation.
+    confirmed_plan_hash: str | None = None
 
     # results — REFS AND SCALARS ONLY, never DataFrames
     test_results: list[dict] = field(default_factory=list)
@@ -177,6 +184,7 @@ LIFECYCLE: frozenset[str] = frozenset(
         "current_node_attempt_id",
         "plan_confirmed",
         "plan_edits",
+        "confirmed_plan_hash",
         "signoff",
         "status_reason",
         "status",

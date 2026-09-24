@@ -34,6 +34,13 @@ Public API (signatures kept stable for the UI to import against):
     health(ctx) -> dict
     ready(ctx) -> dict
     readiness_report(ctx, force=False) -> dict
+    start_explorer_run(ctx, *, objective, sources, audit_period, run_owner,
+                        engagement_id='ENG-DEFAULT', ..., supersedes_run_id=None) -> str
+    get_explorer_review(ctx, run_id) -> dict
+    edit_explorer_plan(ctx, run_id, edits, actor) -> RunState
+    save_explorer_draft_skill(ctx, run_id, actor) -> dict
+    publish_skill(ctx, skill_id, version, reviewer) -> dict
+    resolve_run_skill(ctx, state) -> Skill | None
 
 `ORCH_BACKEND=local` (env) selects LocalPersistence + a local-file
 DataSourceAdapter for local/E2E runs (against synthetic_data/ by default) --
@@ -50,9 +57,10 @@ import hashlib
 import json
 import logging
 import os
+import re
 import string
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable
 
@@ -65,16 +73,27 @@ from orchestrator.adapters.persistence_delta import DeltaPersistence
 from orchestrator.adapters.persistence_local import LocalPersistence
 from orchestrator.config import Settings, load_settings
 from orchestrator.contract import ContractViolation, LocalFileDataSource
-from orchestrator.errors import RunNotReady
+from orchestrator.errors import (
+    ConfigError,
+    ExplorerEditRejected,
+    ExplorerInputError,
+    ExplorerPlanNotConfirmable,
+    PlanIntegrityError,
+    PromotionRequirementsNotMet,
+    RunNotReady,
+)
 from orchestrator.executor import ThreadExecutor
-from orchestrator.fingerprint import compute_fingerprint
+from orchestrator.explorer.edit import apply_plan_edits, excluded_test_keys, parse_param_path
+from orchestrator.explorer.materialise import check_materialised_skill, materialise
+from orchestrator.explorer.validate import validate_proposal
+from orchestrator.fingerprint import compute_fingerprint, hash_skill_content_entries
 from orchestrator.frames import not_testable_flags, read_frame_parquet
 from orchestrator.nodes.context import NodeContext
 from orchestrator.nodes.registry import NODES_FOR
 from orchestrator.pipeline import NODE_STAGE_LABELS
 from orchestrator.signoff_policy import SOD_ENFORCED, evaluate_signoff
 from orchestrator.skill_registry import register_skill
-from orchestrator.skills import load_skill, plan_test_flags
+from orchestrator.skills import Skill, load_skill, load_skill_from_ledger, plan_test_flags
 from orchestrator.source_bindings import (
     bindings_for_skill,
     load_source_bindings,
@@ -82,6 +101,7 @@ from orchestrator.source_bindings import (
     volume_file_paths,
 )
 from orchestrator.state import RunState, to_json
+from orchestrator.status import transition
 from orchestrator.timeutil import utc_now
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -196,6 +216,257 @@ def _skill_dir_for(ctx: AppContext, skill_id: str | None) -> Path:
     raise ValueError(f"no skill directory under {ctx.skills_dir} with manifest id={skill_id!r}")
 
 
+def load_skill_by_id(ctx: AppContext, skill_id: str, version: str | None = None) -> Skill:
+    """docs/specs/P6_P8_explorer_llm_design.md §4.13 point 5: a repo Skill
+    directory first (the existing _skill_dir_for lookup, unchanged) -- if
+    none exists under this skill_id, the skill_versions ledger row this
+    skill_id/version was saved as (an Explorer-saved draft, origin
+    'explorer_saved', §4.13 point 2's fixed version "0.1.0"). Running a
+    saved draft Skill is then an ordinary Playbook run: start_audit_run and
+    the Playbook branch of resolve_run_skill both go through this."""
+    try:
+        skill_dir = _skill_dir_for(ctx, skill_id)
+        return load_skill(skill_dir)
+    except ValueError:
+        pass
+    resolved_version = version or "0.1.0"
+    row = ctx.persistence.get_skill_version(skill_id, resolved_version)
+    if row is None:
+        raise ValueError(
+            f"no skill directory under {ctx.skills_dir} and no skill_versions row "
+            f"({skill_id!r}, {resolved_version!r}) -- unknown skill_id"
+        )
+    return load_skill_from_ledger(row)
+
+
+def resolve_run_skill(ctx: AppContext, state: RunState) -> Skill | None:
+    """docs/specs/P6_P8_explorer_llm_design.md §4.11: Playbook loads from the
+    repo directory (or the ledger, via load_skill_by_id, for a Playbook run
+    of a saved Explorer draft) exactly as before. An Explorer run has no
+    Skill at all before confirm_plan -- the plan-phase nodes' Explorer
+    branches (discover/profile/plan in orchestrator.nodes.fieldwork) never
+    read ctx.skill, so None is the correct answer, not a fabricated one.
+    After confirmation it loads the EXPLORER-<run_id> ledger row confirm_plan
+    materialised, and refuses to proceed (PlanIntegrityError -- the same
+    handling as a fingerprint mismatch, CLAUDE.md §3 non-negotiable 8) if
+    that row is missing or its content_hash no longer matches
+    state.confirmed_plan_hash."""
+    if state.mode == "explorer":
+        if not state.confirmed_plan_hash:
+            return None
+        skill_id = f"EXPLORER-{state.run_id}"
+        row = ctx.persistence.get_skill_version(skill_id, "run")
+        if row is None:
+            raise PlanIntegrityError(
+                f"run {state.run_id!r}: plan_confirmed=True (hash {state.confirmed_plan_hash[:12]}) "
+                f"but no {skill_id!r} skill_versions row exists"
+            )
+        skill = load_skill_from_ledger(row)
+        if skill.content_hash != state.confirmed_plan_hash:
+            raise PlanIntegrityError(
+                f"run {state.run_id!r}: confirmed_plan_hash {state.confirmed_plan_hash!r} does not "
+                f"match the ledger Skill's content_hash {skill.content_hash!r} -- the materialised "
+                f"Skill may have been tampered with"
+            )
+        return skill
+    return load_skill_by_id(ctx, state.skill_id, state.skill_version)
+
+
+_DATA_FILE_EXTS = (".csv", ".xlsx", ".xls", ".parquet")
+_FORMAT_BY_EXT = {".csv": "csv", ".xlsx": "xlsx", ".xls": "xlsx", ".parquet": "parquet"}
+_SOURCE_NAME_INVALID_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _explorer_source_name(ref: str, taken: set[str]) -> str:
+    """docs/specs/P6_P8_explorer_llm_design.md §4.2: "Take the last
+    identifier segment (the table name or the file stem), lowercase it,
+    replace runs of [^a-z0-9] with _, strip, prefix s_ if it starts with a
+    digit, and suffix _2, _3 on collision, in input order.\""""
+    if "/" in ref or "\\" in ref:
+        stem = Path(ref).stem
+    elif ref.lower().endswith(_DATA_FILE_EXTS):
+        stem = Path(ref).stem
+    elif "." in ref:
+        stem = ref.rsplit(".", 1)[-1]
+    else:
+        stem = ref
+    name = _SOURCE_NAME_INVALID_RE.sub("_", stem.lower()).strip("_") or "source"
+    if name[0].isdigit():
+        name = f"s_{name}"
+    base, n = name, 2
+    while name in taken:
+        name = f"{base}_{n}"
+        n += 1
+    taken.add(name)
+    return name
+
+
+def _infer_source_format(ref: str) -> str:
+    ext = Path(ref).suffix.lower()
+    fmt = _FORMAT_BY_EXT.get(ext)
+    if fmt is None:
+        raise ExplorerInputError(
+            f"start_explorer_run: cannot infer a file format for {ref!r} -- "
+            f"expected one of {sorted(_FORMAT_BY_EXT)}"
+        )
+    return fmt
+
+
+def _explorer_inputs_hash(reference_skill_ids: list[str]) -> str:
+    """docs/specs/P6_P8_explorer_llm_design.md §4.2: the Explorer run
+    fingerprint's skill_content_hash override -- there is no Skill on disk
+    yet (skill_dir=None), so this hashes exactly what the plan node's own
+    proposal depends on: the wire schema and the validator's rule version
+    (WHICH reference Skills to pass is a later work package, per
+    orchestrator.explorer.payload's own docstring -- this step always
+    passes none, so reference_skills is always {}). Recomputed identically
+    by build_run_fingerprint on every executor pass and at resume (CLAUDE.md
+    §4.1), so it never drifts from what start_explorer_run pinned."""
+    from orchestrator.explorer.validate import EXPLORER_VALIDATOR_VERSION
+    from orchestrator.explorer.wire_schema import WIRE_SCHEMA_SHA256
+
+    payload = {
+        "reference_skills": {}, "wire_schema_sha256": WIRE_SCHEMA_SHA256,
+        "validator_rules_version": EXPLORER_VALIDATOR_VERSION,
+    }
+    return "explorer-inputs:" + hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _build_explorer_data_source(ctx: AppContext, state: RunState):
+    """The DataSourceAdapter for an Explorer run's OWN bound sources
+    (state.data_assets / options.explorer.sources) -- built directly per
+    backend rather than through ctx.data_source_factory, because that
+    factory's `contract_sources` argument is keyed by a repo Skill's own
+    contract.yaml source configs (orchestrator.service._local_data_source_
+    factory), which an Explorer source (chosen at run setup, not declared by
+    any Skill) never appears in. Used by every Explorer-mode node (via
+    build_node_context) and by the plan-review/confirm service functions
+    below (V-C3's distinct_count check, and re-validation after edits)."""
+    options = (state.options or {}).get("explorer", {})
+    sources_cfg = {s["name"]: s for s in options.get("sources", [])}
+    if ctx.backend == "local":
+        local_sources: dict[str, dict] = {}
+        for b in state.data_assets:
+            name = b["source"]
+            cfg = sources_cfg.get(name, {})
+            entry: dict = {"format": cfg.get("format") or "csv", "file": cfg.get("file") or b["table_fqn"]}
+            if cfg.get("sheet"):
+                entry["sheet"] = cfg["sheet"]
+            local_sources[name] = entry
+        return LocalFileDataSource(root_dir=ctx.local_data_root, sources=local_sources)
+
+    from orchestrator.adapters.datasource_uc import UCTableDataSource
+    from orchestrator.adapters.datasource_volume_upload import VolumeUploadAwareDataSource
+
+    bindings = {b["source"]: b["table_fqn"] for b in state.data_assets}
+    table_source = UCTableDataSource(ctx.settings, bindings)
+    # An `upload`-kind Explorer source's table_fqn is the uploaded file's own
+    # volume_path (start_explorer_run pins it that way), so the SAME
+    # VolumeUploadAwareDataSource wrapper Playbook uses (build_app_context's
+    # _uc_factory) reads it from the Volume via the Files API instead of
+    # sending it through the UC table SQL path -- there is no Explorer-
+    # specific `contract_sources`, so format is inferred from the file's own
+    # extension (that wrapper's own fallback, never guessed here).
+    return VolumeUploadAwareDataSource(
+        table_source=table_source, bindings=bindings, contract_sources={},
+        persistence=ctx.persistence, export_storage=ctx.export_storage,
+    )
+
+
+def _explorer_run_sources_for_materialise(options: dict) -> list[dict]:
+    """`orchestrator.explorer.materialise.materialise`'s `run_sources` shape
+    (`{"name", "kind", "format", "file"}`) from `options.explorer.sources`
+    (§4.2), resolving `file` the SAME way `_build_explorer_data_source`
+    resolves a local source's own file binding: an auditor-given `file`
+    override when there is one, otherwise the source's own `ref` for a
+    `local_file`/`upload` source (a `uc_table` source has no file at all).
+    Without this fallback, `contract.yaml`'s schema requires `file` for
+    every csv/xlsx/parquet format entry (§4.11's contract schema change)
+    and materialisation would fail outright for the common case of an
+    Explorer source bound directly by its own path/upload id, never given a
+    SEPARATE file override."""
+    out = []
+    for s in options.get("sources", []):
+        file_ = s.get("file")
+        if not file_ and s.get("kind") in ("local_file", "upload"):
+            file_ = s.get("ref")
+        out.append({"name": s["name"], "kind": s["kind"], "format": s.get("format"), "file": file_})
+    return out
+
+
+def _build_explorer_llm(ctx: AppContext):
+    """docs/specs/P6_P8_explorer_llm_design.md §4.12 item 2: one LLMGateway/
+    FilePromptRepository pair per executor pass, shared by every node in it.
+    On the local backend, `client` stays exactly what ctx.model_client is
+    (None unless a test overrode it) -- never a real DatabricksModelClient,
+    so a local/test run can never make a live network call by accident; the
+    gateway itself still degrades cleanly to 'unavailable' whenever the
+    resolved endpoint (Settings.model_sonnet/model_gpt_oss) is unset,
+    exactly the CLAUDE.md §6 NN13 behaviour a real deployment relies on."""
+    from orchestrator.config import NODE_MODELS
+    from orchestrator.llm.gateway import LLMGateway
+    from orchestrator.llm.prompts import FilePromptRepository
+
+    client = ctx.model_client
+    if client is None and ctx.backend != "local":  # pragma: no cover -- real client, RUN_LIVE_LLM=1 only
+        from orchestrator.adapters.model_databricks import DatabricksModelClient
+
+        client = DatabricksModelClient()
+    llm = LLMGateway(
+        settings=ctx.settings, client=client, persistence=ctx.persistence, node_models=NODE_MODELS,
+        clock=ctx.clock, retry_backoff_s=getattr(ctx.settings, "llm_retry_backoff_s", 5.0),
+        timeout_s=getattr(ctx.settings, "llm_timeout_s", 180.0),
+    )
+    return llm, FilePromptRepository()
+
+
+def _edit_before_value(proposal: dict, prior_edits: list[dict], edit: dict):
+    """The value `edit` is about to change, as of right before it -- i.e.
+    the base proposal narrowed by every edit already recorded (`prior_edits`,
+    in order), never the edit's OWN op alone. For `exclude_test`/
+    `include_test` this is "was the test included right before this edit"
+    (`excluded_test_keys(prior_edits)`, so a second toggle of the same test
+    records a correct before/after pair rather than a constant guessed from
+    the op name). For `set_column`/`set_enum`/`set_threshold` it is the
+    param/threshold value in `apply_plan_edits(proposal, prior_edits)` --
+    the latest value any earlier edit in this run's history left it at."""
+    op = edit["op"]
+    if op in ("exclude_test", "include_test"):
+        return edit["test_key"] not in excluded_test_keys(prior_edits)
+    effective_before = apply_plan_edits(proposal, prior_edits)
+    if op in ("set_column", "set_enum"):
+        test = next((t for t in effective_before.get("tests", []) if t["key"] == edit.get("test_key")), None)
+        if test is None:
+            return None
+        try:
+            node = test
+            path = parse_param_path(edit["param_path"])
+            for part in path[:-1]:
+                node = node[part]
+            return node[path[-1]]
+        except (KeyError, IndexError, TypeError):
+            return None
+    if op == "set_threshold":
+        th = next((t for t in effective_before.get("thresholds", []) if t["id"] == edit.get("threshold_id")), None)
+        return th.get("value") if th else None
+    return None
+
+
+def _describe_edit(edit: dict) -> str:
+    op = edit["op"]
+    if op == "exclude_test":
+        return f"Excluded test {edit['test_key']}"
+    if op == "include_test":
+        return f"Included test {edit['test_key']}"
+    if op in ("set_column", "set_enum"):
+        return f"Set {edit['test_key']}.{edit['param_path']}: {edit.get('value')!r}"
+    if op == "set_threshold":
+        return f"Set threshold {edit['threshold_id']}: {edit.get('value')!r}"
+    return f"{op} edit"
+
+
 def _compute_run_fingerprint(
     ctx: AppContext, skill_dir: Path, source_table_versions: dict[str, str],
     uploaded_file_hashes: dict[str, str] | None = None,
@@ -217,10 +488,33 @@ def _compute_run_fingerprint(
 
 
 def build_node_context(ctx: AppContext, state: RunState) -> NodeContext:
-    skill_dir = _skill_dir_for(ctx, state.skill_id)
-    skill = load_skill(skill_dir)
-    bindings = {b["source"]: b["table_fqn"] for b in state.data_assets}
-    data_source = ctx.data_source_factory(bindings, skill.contract.get("sources", {}), state.skill_id)
+    # resolve_run_skill (docs/specs/P6_P8_explorer_llm_design.md §4.11)
+    # returns None for an Explorer run before confirm_plan, and the
+    # EXPLORER-<run_id> ledger Skill after it -- EVERY Explorer pass (not
+    # only before confirmation) builds its data source from the run's OWN
+    # bindings (state.data_assets/options.explorer.sources), never through
+    # ctx.data_source_factory: that factory's `contract_sources` argument is
+    # resolved from `skills_dir`'s REPO Skills at AppContext-construction
+    # time (_all_skill_source_configs), so it has no way to see a
+    # confirmed-but-never-published Explorer ledger Skill's own
+    # contract.yaml -- state.skill_id is also None throughout an Explorer
+    # run, which the Playbook factory needs to look anything up by. A
+    # Playbook run (state.mode == "playbook") is unaffected: it always goes
+    # through ctx.data_source_factory, exactly as before.
+    skill = resolve_run_skill(ctx, state)
+    if state.mode == "explorer":
+        data_source = _build_explorer_data_source(ctx, state)
+    else:
+        bindings = {b["source"]: b["table_fqn"] for b in state.data_assets}
+        data_source = ctx.data_source_factory(bindings, skill.contract.get("sources", {}), state.skill_id)
+
+    # §4.12 item 2: an Explorer run's plan node needs a live LLMGateway/
+    # FilePromptRepository pair; Playbook's execute-phase nodes (unchanged
+    # by this step) ignore both regardless of whether they are set.
+    llm = prompts = None
+    if state.mode == "explorer":
+        llm, prompts = _build_explorer_llm(ctx)
+
     return NodeContext(
         settings=ctx.settings,
         persistence=ctx.persistence,
@@ -230,6 +524,8 @@ def build_node_context(ctx: AppContext, state: RunState) -> NodeContext:
         export_storage=ctx.export_storage,
         backend=ctx.backend,
         model_client=ctx.model_client,
+        llm=llm,
+        prompts=prompts,
     )
 
 
@@ -248,8 +544,35 @@ def _flat_file_hashes(ctx: AppContext, skill_id: str | None, path_versions: dict
     return {path: version for path, version in path_versions.items() if path in flat_paths}
 
 
+def _build_explorer_run_fingerprint(ctx: AppContext, state: RunState) -> dict:
+    """docs/specs/P6_P8_explorer_llm_design.md §4.2/§7: recomputed IDENTICALLY
+    to what start_explorer_run pinned -- skill_dir=None (there is no Skill on
+    disk), skill_content_hash overridden to the same explorer_inputs_hash
+    (a pure function of the run's OWN options, never of anything a Skill
+    directory could hold), never resolve_run_skill (that would return None
+    before confirmation and a DIFFERENT, per-run ledger Skill after it --
+    the fingerprint is immutable at creation and never depends on which
+    Skill a run's plan was eventually confirmed into, §7's own table)."""
+    options = (state.options or {}).get("explorer", {})
+    pinned_versions = {b["source"]: b["version"] for b in state.data_assets}
+    uploaded_file_hashes = _flat_file_hashes(
+        ctx, None, {b["table_fqn"]: b["version"] for b in state.data_assets}
+    )
+    return compute_fingerprint(
+        settings=ctx.settings, source_table_versions=pinned_versions,
+        uploaded_file_hashes=uploaded_file_hashes, skill_dir=None,
+        requirements_path=REPO_ROOT / "requirements.txt",
+        prompts_dirs=[REPO_ROOT / "orchestrator" / "prompts" / "explorer"],
+        reference_files=[], code_revision=None,
+        skill_content_hash=_explorer_inputs_hash(options.get("reference_skill_ids", [])),
+    )
+
+
 def build_run_fingerprint(ctx: AppContext, state: RunState) -> dict:
-    skill_dir = _skill_dir_for(ctx, state.skill_id)
+    if state.mode == "explorer":
+        return _build_explorer_run_fingerprint(ctx, state)
+    skill = load_skill_by_id(ctx, state.skill_id, state.skill_version)
+    skill_dir = skill.skill_dir
     pinned_versions = {b["source"]: b["version"] for b in state.data_assets}
     # Same reconstruction as start_audit_run: a binding whose value is a
     # recorded upload's volume_path -- or a configured Volume file's path --
@@ -723,9 +1046,12 @@ def start_audit_run(
         if blocking:
             raise RunNotReady([c.name for c in blocking])
 
-    skill_dir = _skill_dir_for(ctx, skill_id)
-    skill = load_skill(skill_dir)
+    # load_skill_by_id (docs/specs/P6_P8_explorer_llm_design.md §4.13 point
+    # 5): a repo Skill directory as before, or -- for a Playbook run of a
+    # saved Explorer draft -- its skill_versions ledger row.
+    skill = load_skill_by_id(ctx, skill_id)
     skill.validate()
+    skill_dir = skill.skill_dir
 
     contract_sources = skill.contract.get("sources", {})
     missing = sorted(set(contract_sources) - set(bindings))
@@ -804,6 +1130,416 @@ def start_audit_run(
         ctx.executor.start(state.run_id, state.phase)
 
     return state.run_id
+
+
+def _explorer_source_entries(sources: list[dict]) -> list[dict]:
+    """docs/specs/P6_P8_explorer_llm_design.md §4.2: `{"name", "kind", "ref",
+    "format", "file"}` per given `{"kind", "ref"}`, names derived
+    deterministically from `ref` and de-duplicated in input order. `format`
+    is inferred from `ref`'s own extension for `local_file`/`upload`
+    sources when the caller did not give one; a `uc_table` source has none."""
+    taken: set[str] = set()
+    out: list[dict] = []
+    for s in sources:
+        kind = s.get("kind")
+        ref = s.get("ref")
+        if kind not in ("uc_table", "upload", "local_file"):
+            raise ExplorerInputError(f"start_explorer_run: unsupported source kind {kind!r}")
+        if not ref:
+            raise ExplorerInputError("start_explorer_run: every source needs a non-empty ref")
+        name = _explorer_source_name(ref, taken)
+        entry: dict = {"name": name, "kind": kind, "ref": ref}
+        if kind in ("local_file", "upload"):
+            entry["format"] = s.get("format") or _infer_source_format(ref)
+        if s.get("file"):
+            entry["file"] = s["file"]
+        out.append(entry)
+    return out
+
+
+def _resolve_explorer_sources(
+    ctx: AppContext, entries: list[dict]
+) -> tuple[dict[str, str], dict[str, str], dict[str, dict]]:
+    """Resolves every Explorer source's version BEFORE any read (CLAUDE.md
+    §4.1 TOCTOU ordering -- the same discipline start_audit_run's own
+    source_versions resolution follows). Returns `(table_fqn_by_name,
+    version_by_name, uploaded_file_hashes)`. An `upload` source's
+    `table_fqn` is the uploaded file's OWN volume_path (never its upload_id)
+    so `_build_explorer_data_source`'s VolumeUploadAwareDataSource wrapping
+    recognises it the same way a Playbook upload binding does; its version
+    is the sha256 already recorded at upload time -- read again, never
+    trusted blind, the next time `_build_explorer_data_source` actually
+    reads it."""
+    table_fqn_by_name: dict[str, str] = {}
+    version_by_name: dict[str, str] = {}
+    uploaded_file_hashes: dict[str, str] = {}
+
+    if ctx.backend == "local":
+        local_sources = {
+            e["name"]: {"format": e.get("format") or "csv", "file": e.get("file") or e["ref"]}
+            for e in entries
+        }
+        data_source = LocalFileDataSource(root_dir=ctx.local_data_root, sources=local_sources)
+        for e in entries:
+            table_fqn_by_name[e["name"]] = e["ref"]
+            version_by_name[e["name"]] = data_source.resolve_version(e["name"])
+        return table_fqn_by_name, version_by_name, uploaded_file_hashes
+
+    uc_names = [e for e in entries if e["kind"] == "uc_table"]
+    if uc_names:
+        from orchestrator.adapters.datasource_uc import UCTableDataSource
+
+        uc_bindings = {e["name"]: e["ref"] for e in uc_names}
+        uc_source = UCTableDataSource(ctx.settings, uc_bindings)
+        for e in uc_names:
+            table_fqn_by_name[e["name"]] = e["ref"]
+            version_by_name[e["name"]] = uc_source.resolve_version(e["name"])
+
+    for e in entries:
+        if e["kind"] != "upload":
+            continue
+        row = ctx.persistence.get_uploaded_file(e["ref"])
+        if row is None or row.get("status") != "Ready":
+            raise ExplorerInputError(
+                f"start_explorer_run: upload {e['ref']!r} is not a Ready uploaded file"
+            )
+        table_fqn_by_name[e["name"]] = row["volume_path"]
+        version_by_name[e["name"]] = row["sha256"]
+        uploaded_file_hashes[row["volume_path"]] = row["sha256"]
+
+    if any(e["kind"] == "local_file" for e in entries):
+        raise ExplorerInputError(
+            "start_explorer_run: 'local_file' sources are only supported on the local backend"
+        )
+
+    return table_fqn_by_name, version_by_name, uploaded_file_hashes
+
+
+def start_explorer_run(
+    ctx: AppContext,
+    *,
+    objective: str,
+    sources: list[dict],
+    audit_period: tuple[str, str],
+    run_owner: str,
+    engagement_id: str = "ENG-DEFAULT",
+    business_unit: str | None = None,
+    materiality: float | None = None,
+    generate_management_actions: bool = True,
+    jira_preview_requested: bool = False,
+    supersedes_run_id: str | None = None,
+    reference_skill_ids: list[str] | None = None,
+) -> str:
+    """docs/specs/P6_P8_explorer_llm_design.md §4.2: creates an Explorer run
+    (mode='explorer', skill_id=None, phase='plan') from 1-5 selected data
+    sources and an auditor's objective. `auto_confirm_plan` is always False
+    -- plan confirmation is mandatory in Explorer (§2.4), never the
+    Playbook `review_plan_first`-driven default."""
+    if ctx.readiness is not None:
+        report = ctx.readiness.get()
+        blocking = report.blocking_failures()
+        if blocking:
+            raise RunNotReady([c.name for c in blocking])
+
+    if not (1 <= len(sources) <= 5):
+        raise ExplorerInputError(
+            f"start_explorer_run: sources must have 1 to 5 entries, got {len(sources)}"
+        )
+    if not objective or not objective.strip():
+        raise ExplorerInputError("start_explorer_run: objective must be non-empty")
+    if len(objective) > 4000:
+        raise ExplorerInputError("start_explorer_run: objective exceeds 4000 characters")
+    audit_timezone = getattr(ctx.settings, "audit_timezone", None)
+    if not audit_timezone:
+        raise ConfigError("start_explorer_run: settings.audit_timezone is unset (CLAUDE.md NN14)")
+
+    now = ctx.clock()
+
+    if supersedes_run_id:
+        prior = ctx.persistence.load_state(supersedes_run_id)
+        if prior.mode == "explorer" and prior.status == "awaiting_confirmation":
+            runs_module.reject(
+                ctx.persistence, supersedes_run_id, actor=run_owner,
+                reason=f"Superseded by a new Explorer objective (see run started at {now})",
+                now=now,
+            )
+
+    entries = _explorer_source_entries(sources)
+    table_fqn_by_name, version_by_name, uploaded_file_hashes = _resolve_explorer_sources(ctx, entries)
+
+    fingerprint = compute_fingerprint(
+        settings=ctx.settings, source_table_versions=dict(version_by_name),
+        uploaded_file_hashes=uploaded_file_hashes, skill_dir=None,
+        requirements_path=REPO_ROOT / "requirements.txt",
+        prompts_dirs=[REPO_ROOT / "orchestrator" / "prompts" / "explorer"],
+        reference_files=[], code_revision=None,
+        skill_content_hash=_explorer_inputs_hash(reference_skill_ids or []),
+    )
+
+    options = {
+        "auto_confirm_plan": False,
+        "generate_management_actions": generate_management_actions,
+        "jira_preview_requested": jira_preview_requested,
+        "explorer": {
+            "sources": [
+                {
+                    "name": e["name"], "kind": e["kind"], "ref": e["ref"],
+                    "format": e.get("format"), "file": e.get("file"),
+                }
+                for e in entries
+            ],
+            "reference_skill_ids": list(reference_skill_ids or []),
+            "audit_timezone": audit_timezone,
+        },
+    }
+    data_assets = [
+        {"source": e["name"], "table_fqn": table_fqn_by_name[e["name"]], "version": version_by_name[e["name"]],
+         "kind": e["kind"]}
+        for e in entries
+    ]
+
+    state = runs_module.create_run(
+        ctx.persistence,
+        run_kind="fieldwork",
+        engagement_id=engagement_id,
+        skill_id=None,
+        skill_version=None,
+        mode="explorer",
+        audit_period=tuple(audit_period),
+        objective=objective,
+        run_owner=run_owner,
+        business_unit=business_unit,
+        materiality=materiality,
+        options=options,
+        data_assets=data_assets,
+        fingerprint=fingerprint,
+        now=now,
+    )
+
+    if ctx.executor is not None:
+        ctx.executor.start(state.run_id, state.phase)
+
+    return state.run_id
+
+
+def get_explorer_review(ctx: AppContext, run_id: str) -> dict:
+    """docs/specs/P6_P8_explorer_llm_design.md §5.1 "get_explorer_review":
+    the Explorer proposal in review-panel shape -- every proposed test with
+    its validity, reasons, rationale and current included/excluded state
+    (state.plan_edits applied), for the workflow-preview row-per-test
+    rendering and for confirm_plan's own precondition check. Column/enum/
+    threshold ALLOWED VALUES for the edit UI (§4.10's own "computed by
+    Python" column) are not computed here yet -- D4's day-one edit surface
+    is include/exclude only, and full param editing is deferred (§4.13/§10)."""
+    state = ctx.persistence.load_state(run_id)
+    plan = state.plan or {}
+    proposal = plan.get("proposal")
+    validation = plan.get("validation") or {"tests": {}, "findings": {}, "proposal_errors": [], "warnings": []}
+    excluded = excluded_test_keys(state.plan_edits)
+
+    tests: list[dict] = []
+    for t in (proposal or {}).get("tests", []):
+        key = t["key"]
+        v = validation.get("tests", {}).get(key) or {"valid": False, "reasons": []}
+        valid = bool(v.get("valid"))
+        tests.append({
+            "key": key,
+            "name": t.get("name"),
+            "primitive": t.get("primitive"),
+            "control_objective": t.get("control_objective"),
+            "risk_hypothesis": t.get("risk_hypothesis"),
+            "rationale": state.plan_rationale.get(key, ""),
+            "valid": valid,
+            "reasons": v.get("reasons", []),
+            "excluded": key in excluded,
+            "included": valid and key not in excluded,
+        })
+
+    return {
+        "run_id": run_id,
+        "run_status": state.status,
+        "plan_status": plan.get("status"),
+        "llm_unavailable": plan.get("status") == "llm_unavailable",
+        "label": plan.get("label"),
+        "proposal_errors": validation.get("proposal_errors", []),
+        "warnings": validation.get("warnings", []),
+        "tests": tests,
+        "n_valid": sum(1 for t in tests if t["valid"]),
+        "n_total": len(tests),
+        "n_included": sum(1 for t in tests if t["included"]),
+        "data_gaps": plan.get("data_gaps_computed", []),
+        "assumptions": (proposal or {}).get("assumptions", []),
+        "summary": (proposal or {}).get("summary"),
+        "edits": list(state.plan_edits),
+        "confirmable": plan.get("status") == "proposed" and any(t["included"] for t in tests),
+    }
+
+
+def edit_explorer_plan(ctx: AppContext, run_id: str, edits: list[dict], actor: str) -> RunState:
+    """docs/specs/P6_P8_explorer_llm_design.md §4.10: applies `edits` on top
+    of `state.plan_edits`, revalidates the WHOLE resulting proposal, and
+    refuses the batch outright (ExplorerEditRejected, nothing partial ever
+    recorded) if any still-included test would come out invalid. Only on
+    success are the edits appended -- each with its real before/after value
+    (`_edit_before_value`) -- and a `plan_edited` trace event emitted."""
+    now = ctx.clock()
+    state = ctx.persistence.load_state(run_id)
+    if state.mode != "explorer" or state.status != "awaiting_confirmation":
+        raise ExplorerPlanNotConfirmable(
+            f"run {run_id!r} is not an Explorer run awaiting_confirmation "
+            f"(status={state.status!r}, mode={state.mode!r})"
+        )
+    plan = state.plan or {}
+    proposal = plan.get("proposal")
+    if plan.get("status") != "proposed" or proposal is None:
+        raise ExplorerEditRejected([f"plan.status is {plan.get('status')!r}, not 'proposed' -- nothing to edit"])
+    if not edits:
+        return state
+
+    candidate_edits = list(state.plan_edits) + [dict(e) for e in edits]
+    effective = apply_plan_edits(proposal, candidate_edits)
+    data_source = _build_explorer_data_source(ctx, state)
+    sources = (state.profile_result or {}).get("sources", {})
+    pinned_versions = {b["source"]: b["version"] for b in state.data_assets}
+    report = validate_proposal(
+        effective, profile=sources, run_sources=sorted(sources), data_source=data_source,
+        pinned_versions=pinned_versions,
+    )
+    included_keys = {t["key"] for t in effective.get("tests", [])}
+    invalid_included = sorted(key for key in included_keys if not report["tests"].get(key, {}).get("valid"))
+    if invalid_included:
+        reasons = [
+            f"{key}: {r['rule']}: {r['message']}"
+            for key in invalid_included
+            for r in report["tests"].get(key, {}).get("reasons", [])
+        ] or [f"edit would leave {invalid_included} invalid"]
+        raise ExplorerEditRejected(reasons)
+
+    recorded: list[dict] = []
+    for i, edit in enumerate(edits):
+        prior_edits = list(state.plan_edits) + edits[:i]
+        record = dict(edit)
+        record["before"] = _edit_before_value(proposal, prior_edits, edit)
+        record["after"] = (
+            edit["value"] if edit.get("op") in ("set_column", "set_enum", "set_threshold")
+            else edit.get("op") == "include_test"
+        )
+        record["actor"] = actor
+        record["at"] = now
+        recorded.append(record)
+
+    new_state = replace(state, plan_edits=list(state.plan_edits) + recorded)
+    saved = ctx.persistence.save_state(new_state)
+    message = "; ".join(_describe_edit(e) for e in recorded)
+    runs_module._emit(ctx.persistence, saved, event_type="plan_edited", actor=actor, message=message, now=now)
+    return saved
+
+
+def save_explorer_draft_skill(ctx: AppContext, run_id: str, actor: str) -> dict:
+    """docs/specs/P6_P8_explorer_llm_design.md §4.13: saves a COMPLETED,
+    signed-off Explorer run's EXPLORER-<run_id> ledger Skill as a draft Skill
+    a Playbook run can load by skill_id (origin='explorer_saved'). Rewrites
+    only manifest.yaml (id/version/status/owner/description); every other
+    file is carried over byte-for-byte. Idempotent: the SAME run saved twice
+    re-derives the identical content_hash (the id itself is derived from it),
+    so record_skill_version's own idempotency (CLAUDE.md §4.6/§8) returns
+    the existing row rather than raising SkillVersionConflict."""
+    now = ctx.clock()
+    state = ctx.persistence.load_state(run_id)
+    if state.mode != "explorer" or state.status != "completed" or state.signoff is None:
+        raise ExplorerPlanNotConfirmable(
+            f"run {run_id!r} is not a signed-off, completed Explorer run "
+            f"(status={state.status!r}, signoff={'present' if state.signoff else 'absent'})"
+        )
+    row = ctx.persistence.get_skill_version(f"EXPLORER-{run_id}", "run")
+    if row is None:
+        raise PlanIntegrityError(f"run {run_id!r}: no EXPLORER-{run_id} ledger row to save a draft from")
+
+    files = dict(row["content"]["files"])
+    manifest = yaml.safe_load(files["manifest.yaml"]) or {}
+    ns = row["content_hash"][:8]
+    skill_id = f"SKILL-X-{ns}"
+    description = (manifest.get("description") or "").rstrip()
+    suffix = (
+        f" Authored in Explorer Mode from run {run_id}; thresholds are analyst-set "
+        f"pending policy confirmation."
+    )
+    manifest = {
+        **manifest,
+        "id": skill_id,
+        "version": "0.1.0",
+        "status": "draft",
+        "owner": actor,
+        "description": (description + suffix).strip(),
+    }
+    files["manifest.yaml"] = yaml.safe_dump(manifest, sort_keys=False, allow_unicode=True)
+
+    entries = [(name, text.encode("utf-8")) for name, text in files.items()]
+    content_hash = hash_skill_content_entries(entries)
+    new_content = {"files": files, "origin": "explorer_saved", "source_run_id": run_id}
+    saved_row = ctx.persistence.record_skill_version(
+        skill_id=skill_id, version="0.1.0", content_hash=content_hash, content=new_content,
+        created_by=actor, now=now, status="draft",
+    )
+
+    message = f"Saved as draft Skill {skill_id} v0.1.0 by {actor}"
+    event_id = hashlib.sha256(f"{run_id}|skill_draft_saved|{content_hash}".encode("utf-8")).hexdigest()[:32]
+    ctx.persistence.append_trace_event({
+        "event_id": event_id, "run_id": run_id, "engagement_id": state.engagement_id,
+        "event_type": "skill_draft_saved", "event_time": now, "stage": "Skills", "status": state.status,
+        "message": message, "duration_s": None, "node_name": None, "execution_key": None,
+        "actor": actor, "state_version": state.state_version,
+    })
+    return {"skill_id": skill_id, "version": "0.1.0", "content_hash": saved_row["content_hash"]}
+
+
+_SURFACE2_MIN_PRECISION = 0.98
+_SURFACE2_MIN_RECALL = 0.95
+
+
+def _surface2_all_pass(results: Any) -> bool:
+    if isinstance(results, str):
+        try:
+            results = json.loads(results)
+        except (TypeError, ValueError):
+            return False
+    if not isinstance(results, dict) or not results:
+        return False
+    for score in results.values():
+        if not isinstance(score, dict):
+            return False
+        precision, recall = score.get("precision"), score.get("recall")
+        if precision is None or recall is None:
+            return False
+        if precision < _SURFACE2_MIN_PRECISION or recall < _SURFACE2_MIN_RECALL:
+            return False
+    return True
+
+
+def publish_skill(ctx: AppContext, skill_id: str, version: str, reviewer: str | None) -> dict:
+    """docs/specs/P6_P8_explorer_llm_design.md §4.13 "Promotion draft ->
+    published": a GUARD ONLY -- no publish UI or persistence write-through
+    exists yet (a planted-fixture generator for arbitrary Explorer
+    contracts, the prerequisite for any Explorer draft to ever earn a
+    passing Surface 2 result, is P8/P9 follow-up work, §10). Raises
+    PromotionRequirementsNotMet naming every unmet requirement; a future
+    caller wires the actual status transition once that generator exists."""
+    row = ctx.persistence.get_skill_version(skill_id, version)
+    if row is None:
+        raise PromotionRequirementsNotMet([f"no skill_versions row for ({skill_id!r}, {version!r})"])
+
+    missing: list[str] = []
+    if row.get("status") != "draft":
+        missing.append(f"status is {row.get('status')!r}, not 'draft'")
+    if not reviewer or reviewer == row.get("created_by"):
+        missing.append("a named reviewer distinct from created_by is required")
+    if not _surface2_all_pass(row.get("surface2_results_json")):
+        missing.append(
+            "Surface 2 results (precision >= 0.98, recall >= 0.95 per test) are not recorded for this version"
+        )
+    if missing:
+        raise PromotionRequirementsNotMet(missing)
+    return {"skill_id": skill_id, "version": version, "status": "requirements_met", "reviewed_by": reviewer}
 
 
 def _queue_affinity_note_from_fingerprint(
@@ -972,8 +1708,104 @@ def list_management_actions(ctx: AppContext, filters: dict | None = None) -> lis
     return out
 
 
+def _confirm_explorer_plan(ctx: AppContext, run_id: str, actor: str) -> RunState:
+    """docs/specs/P6_P8_explorer_llm_design.md §4.10 "confirm_plan (Explorer
+    branch)": narrow the proposal by the accumulated plan_edits, revalidate,
+    require at least one included test still valid, run the V-Z1
+    belt-and-braces check (§4.7), materialise + record the EXPLORER-<run_id>
+    ledger row, register its proposed risks/controls, then set
+    plan_confirmed/confirmed_plan_hash and transition exactly like the
+    Playbook path (orchestrator.runs.confirm_plan) does."""
+    now = ctx.clock()
+    state = ctx.persistence.load_state(run_id)
+    if state.status != "awaiting_confirmation" or state.mode != "explorer":
+        raise ExplorerPlanNotConfirmable(
+            f"run {run_id!r} is not an Explorer run awaiting_confirmation "
+            f"(status={state.status!r}, mode={state.mode!r})"
+        )
+    plan = state.plan or {}
+    proposal = plan.get("proposal")
+    if plan.get("status") != "proposed" or proposal is None:
+        raise ExplorerPlanNotConfirmable(
+            f"run {run_id!r}: plan.status is {plan.get('status')!r}, not 'proposed' -- "
+            f"nothing to confirm"
+        )
+
+    effective = apply_plan_edits(proposal, state.plan_edits)
+    sources = (state.profile_result or {}).get("sources", {})
+    data_source = _build_explorer_data_source(ctx, state)
+    pinned_versions = {b["source"]: b["version"] for b in state.data_assets}
+    report = validate_proposal(
+        effective, profile=sources, run_sources=sorted(sources), data_source=data_source,
+        pinned_versions=pinned_versions,
+    )
+    valid_tests = [t for t in effective.get("tests", []) if report["tests"].get(t["key"], {}).get("valid")]
+    if not valid_tests:
+        raise ExplorerPlanNotConfirmable(f"run {run_id!r}: no included test is valid -- nothing to confirm")
+    valid_keys = {t["key"] for t in valid_tests}
+    effective = dict(effective)
+    effective["tests"] = valid_tests
+    effective["findings"] = [f for f in effective.get("findings", []) if f.get("test_key") in valid_keys]
+
+    options = (state.options or {}).get("explorer", {})
+    run_sources_for_materialise = _explorer_run_sources_for_materialise(options)
+    audit_timezone = options.get("audit_timezone") or getattr(ctx.settings, "audit_timezone", None)
+
+    # V-Z1 (§4.7): should never fire against an already-validated subset,
+    # but this is the belt-and-braces check that catches a violation the
+    # named rules could not -- refused before anything is written, never
+    # silently materialised.
+    vz1 = check_materialised_skill(
+        effective, profile=sources, run_sources=run_sources_for_materialise, run_id=run_id,
+        confirmed_at=now, owner=actor, audit_timezone=audit_timezone,
+    )
+    if vz1["proposal_errors"] or vz1["test_violations"]:
+        raise ExplorerPlanNotConfirmable(f"run {run_id!r}: materialised Skill failed validation (V-Z1): {vz1}")
+
+    files = materialise(
+        effective, profile=sources, run_sources=run_sources_for_materialise, run_id=run_id,
+        confirmed_at=now, owner=actor, audit_timezone=audit_timezone,
+    )
+    content_hash = hash_skill_content_entries(list(files.items()))
+    content = {
+        "files": {name: text.decode("utf-8") for name, text in files.items()},
+        "origin": "explorer_run", "source_run_id": run_id,
+    }
+    ctx.persistence.record_skill_version(
+        skill_id=f"EXPLORER-{run_id}", version="run", content_hash=content_hash, content=content,
+        created_by=actor, now=now, status="draft",
+    )
+
+    rc = yaml.safe_load(files["risk_control.yaml"].decode("utf-8")) or {"risks": [], "controls": []}
+    risks = [
+        {"risk_id": r["risk_id"], "title": r["title"], "description": r.get("description"),
+         "category": None, "status": "proposed", "source": "explorer"}
+        for r in rc.get("risks", [])
+    ]
+    controls = [
+        {"control_id": c["control_id"], "risk_id": c["risk_id"], "title": c["title"],
+         "description": c.get("description"), "type": c.get("type"), "frequency": None}
+        for c in rc.get("controls", [])
+    ]
+    if risks:
+        ctx.persistence.upsert_risks(risks, now=now)
+    if controls:
+        ctx.persistence.upsert_controls(controls, now=now)
+
+    state = replace(state, plan_confirmed=True, confirmed_plan_hash=content_hash)
+    new_state = transition(state, "queued", now=now, phase="execute")
+    saved = ctx.persistence.save_state(new_state)
+    message = f"Explorer plan confirmed by {actor} — {len(valid_tests)} test(s), content {content_hash[:12]}"
+    runs_module._emit(ctx.persistence, saved, event_type="plan_confirmed", actor=actor, message=message, now=now)
+    return saved
+
+
 def confirm_plan(ctx: AppContext, run_id: str, actor: str) -> RunState:
-    state = runs_module.confirm_plan(ctx.persistence, run_id, actor=actor, now=ctx.clock())
+    current = ctx.persistence.load_state(run_id)
+    if current.mode == "explorer":
+        state = _confirm_explorer_plan(ctx, run_id, actor)
+    else:
+        state = runs_module.confirm_plan(ctx.persistence, run_id, actor=actor, now=ctx.clock())
     if ctx.executor is not None:
         ctx.executor.start(run_id, state.phase)
     return state
@@ -1071,8 +1903,7 @@ def get_run_frames(ctx: AppContext, run_id: str) -> dict[str, pd.DataFrame]:
     slow path this function exists to avoid, kept only for runs that predate
     the fix."""
     state = ctx.persistence.load_state(run_id)
-    skill_dir = _skill_dir_for(ctx, state.skill_id)
-    skill = load_skill(skill_dir)
+    skill = resolve_run_skill(ctx, state)
 
     frame_exports = (state.exports or {}).get("frames")
     if frame_exports:
