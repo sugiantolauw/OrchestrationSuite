@@ -1615,14 +1615,24 @@ class LocalPersistence:
             self._release(conn)
         return dict(row) if row else None
 
-    def find_llm_cache(self, prompt_sha256: str, endpoint: str, params_json: str) -> list[dict]:
+    def find_llm_cache(
+        self, prompt_sha256: str, endpoint: str, params_json: str,
+        served_model_version: str | None = None,
+    ) -> list[dict]:
         conn = self._connect()
         try:
-            rows = conn.execute(
-                "SELECT * FROM llm_cache WHERE prompt_sha256 = ? AND endpoint = ? AND params_json = ? "
-                "ORDER BY created_at DESC",
-                (prompt_sha256, endpoint, params_json),
-            ).fetchall()
+            if served_model_version is not None:
+                rows = conn.execute(
+                    "SELECT * FROM llm_cache WHERE prompt_sha256 = ? AND endpoint = ? AND params_json = ? "
+                    "AND served_model_version = ? ORDER BY created_at DESC",
+                    (prompt_sha256, endpoint, params_json, served_model_version),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM llm_cache WHERE prompt_sha256 = ? AND endpoint = ? AND params_json = ? "
+                    "ORDER BY created_at DESC",
+                    (prompt_sha256, endpoint, params_json),
+                ).fetchall()
         finally:
             self._release(conn)
         return [dict(r) for r in rows]

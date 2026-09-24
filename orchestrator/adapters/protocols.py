@@ -452,7 +452,17 @@ class PersistenceAdapter(Protocol):
     def get_llm_cache(self, cache_key: str) -> dict | None:
         ...
 
-    def find_llm_cache(self, prompt_sha256: str, endpoint: str, params_json: str) -> list[dict]:
+    def find_llm_cache(
+        self, prompt_sha256: str, endpoint: str, params_json: str,
+        served_model_version: str | None = None,
+    ) -> list[dict]:
+        """Response-cache rows matching (prompt_sha256, endpoint,
+        params_json). With `served_model_version` given, scoped to the full
+        NN8 key (docs/specs/P6_P8_explorer_llm_design.md §3.6 steps 5-6) --
+        at most one row, since cache_key is a deterministic hash of the
+        4-tuple. Left as None, returns every cached version for this
+        prompt/endpoint/params, ordered by created_at desc -- used only to
+        resolve an ambiguous served version in replay mode (step 5)."""
         ...
 
     def put_llm_cache_if_absent(self, row: dict) -> bool:

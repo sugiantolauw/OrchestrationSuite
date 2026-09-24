@@ -133,8 +133,10 @@ orchestrator/llm/capabilities.yaml      # recorded parameter matrix, by role (§
 orchestrator/llm/capabilities.py        # loads it; filter(task_params) -> (sent, dropped)
 orchestrator/llm/tasks.py               # TASK_PROFILES: desired params per task (§3.4)
 orchestrator/llm/gateway.py             # LLMGateway.call() (§3.6)
-orchestrator/llm/errors.py              # EndpointUnavailable, RateLimited, TransientModelError,
-                                        # ModelBadRequest, LLMReplayMiss, LLMLoggingError, LLMConfigError
+orchestrator/llm/errors.py              # ModelUnavailable, RateLimited, TransientModelError,
+                                        # TruncatedOutput, InvalidModelOutput, LLMReplayMiss,
+                                        # LLMLoggingError, LLMConfigError (shipped names; a 400 raises
+                                        # LLMConfigError directly, no separate ModelBadRequest class)
 orchestrator/llm/prompts.py             # FilePromptRepository (§3.10)
 orchestrator/prompts/explorer/planner_system.md
 orchestrator/prompts/explorer/planner_user.md
@@ -164,7 +166,7 @@ Add to `Settings` (and `.env.example`, with comments):
 
 `NODE_MODELS` is unchanged. Add `FALLBACK_ROLE: dict[str, str | None]` beside it, per §6:
 `profile/prioritise/act → "model_gpt_oss"` and every other task `→ None`. Only `None` entries are
-exercised in this step.
+exercised in this step. (Shipped in `orchestrator/llm/tasks.py`, alongside `TASK_PROFILES`.)
 
 ### 3.3 `orchestrator/llm/capabilities.yaml`
 
@@ -251,11 +253,11 @@ class ModelClient(Protocol):
 
 | Condition | Raise | Retried? |
 |---|---|---|
-| 403, or a message containing `rate limit of 0` | `EndpointUnavailable(permanent=True)` | no |
-| 404 (no such endpoint) | `EndpointUnavailable(permanent=True)` | no |
+| 403, or a message containing `rate limit of 0` | `ModelUnavailable(endpoint, message, permanent=True)` | no |
+| 404 (no such endpoint) | `ModelUnavailable(endpoint, message, permanent=True)` | no |
 | 429 | `RateLimited` | once |
 | 5xx, timeout, connection error | `TransientModelError` | once |
-| 400 | `ModelBadRequest` (a configuration bug) | no |
+| 400 | `LLMConfigError` directly (a configuration bug; shipped code has no separate `ModelBadRequest` class) | no |
 
 - `FakeModelClient(responses: dict[task_or_prompt_sha -> ModelResponse | Exception])` and
   `RaisingModelClient` (fails any call) live in `orchestrator/adapters/model_fake.py` for tests.
@@ -306,12 +308,13 @@ Algorithm. Numbered steps are normative:
    never a live call in replay mode.
 8. Live call, with at most two transport attempts. Each attempt writes its own `llm_calls` row
    (`transport_attempt` 1 or 2):
-   - `EndpointUnavailable`: log `unavailable` and return `unavailable`. There is no second attempt
-     and no fallback for tasks whose `FALLBACK_ROLE` is `None`.
+   - `ModelUnavailable`: log `unavailable` and return `unavailable`. There is no second attempt
+     and no fallback for tasks whose `FALLBACK_ROLE` (`orchestrator/llm/tasks.py`) is `None`.
    - `RateLimited` or `TransientModelError`: log `failed_transport`. On attempt 1, sleep
      `llm_retry_backoff_s` and retry. On attempt 2, return `unavailable`.
-   - `ModelBadRequest`: log `bad_request`, then raise `LLMConfigError`. This fails the node, which is
-     correct because it is a configuration bug.
+   - 400: `DatabricksModelClient` raises `LLMConfigError` directly (there is no separate
+     `ModelBadRequest` class to catch and re-raise in the shipped code). This fails the node, which
+     is correct because it is a configuration bug.
 9. On a response, the output is valid when `finish_reason == "stop"`, `text` is non-empty, and, if
    there is a schema, `json.loads(text)` succeeds **exactly** (no fence stripping, §6) and
    `jsonschema.validate` passes. Log outcome `succeeded` or `invalid_output` (with the reason).
@@ -400,7 +403,10 @@ Persistence contract (both backends, the same contract test):
 - `record_llm_call(row) -> None` MERGEs on `call_id`.
 - `last_live_version(endpoint) -> str | None`.
 - `get_llm_cache(cache_key) -> dict | None`.
-- `find_llm_cache(prompt_sha256, endpoint, params_json) -> list[dict]`.
+- `find_llm_cache(prompt_sha256, endpoint, params_json, served_model_version=None) -> list[dict]`.
+  With `served_model_version` given, scoped to the full NN8 key (steps 5-6 above) -- at most one
+  row. Left as `None`, returns every cached version for this prompt/endpoint/params, ordered by
+  `created_at desc` -- used only to resolve an ambiguous served version in replay mode (step 5).
 - `put_llm_cache_if_absent(row) -> bool` uses MERGE WHEN NOT MATCHED. It never updates.
 - `list_llm_calls(run_id) -> list[dict]`.
 - `record_skill_version(..., origin: str = "repo", source_run_id: str | None = None)` gains two
@@ -1305,7 +1311,7 @@ All of these run in CI with no endpoint and no workspace, except §8.8.
      today's platform block is visible, not hidden.
    - (c) a repair smoke on GPT-OSS with the full-size wire schema, to confirm the large strict schema
      is accepted.
-9. **`tests/test_explorer_degraded.py`**. The planner raises `EndpointUnavailable`, and the test
+9. **`tests/test_explorer_degraded.py`**. The planner raises `ModelUnavailable`, and the test
    asserts:
    - `plan.status == "llm_unavailable"`;
    - the exact label string;

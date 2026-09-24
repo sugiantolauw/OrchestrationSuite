@@ -535,6 +535,44 @@ def test_find_llm_cache_scoped_to_exact_prompt_endpoint_and_params(persistence, 
     assert len(persistence.find_llm_cache(prompt_sha, endpoint, row["params_json"])) == 1
 
 
+def test_find_llm_cache_scoped_to_served_model_version(persistence, uid):
+    # NN8 / §3.6 steps 5-6 (independent review fix): a cache lookup must be
+    # able to scope to the full (prompt_sha256, endpoint, served_model_
+    # version, params_json) key, not just the first three -- otherwise a
+    # replay after a provider model upgrade can return an older model's
+    # response. `served_model_version=None` (the default) keeps returning
+    # every cached version, unfiltered, for resolving an ambiguous version.
+    prompt_sha = f"ph-ver-{uid}"
+    endpoint = f"ep-ver-{uid}"
+    params_json = '{"max_tokens": 10}'
+    row_v1 = {
+        "cache_key": f"CACHE-VER-V1-{uid}", "prompt_sha256": prompt_sha, "endpoint": endpoint,
+        "served_model_version": "v1", "params_json": params_json, "response_text": "v1 response",
+        "finish_reason": "stop", "usage_json": "{}", "source_call_id": f"CALL-VER-V1-{uid}",
+        "created_at": canonical_ts(0),
+    }
+    row_v2 = {
+        "cache_key": f"CACHE-VER-V2-{uid}", "prompt_sha256": prompt_sha, "endpoint": endpoint,
+        "served_model_version": "v2", "params_json": params_json, "response_text": "v2 response",
+        "finish_reason": "stop", "usage_json": "{}", "source_call_id": f"CALL-VER-V2-{uid}",
+        "created_at": canonical_ts(1),
+    }
+    persistence.put_llm_cache_if_absent(row_v1)
+    persistence.put_llm_cache_if_absent(row_v2)
+
+    unfiltered = persistence.find_llm_cache(prompt_sha, endpoint, params_json)
+    assert {r["served_model_version"] for r in unfiltered} == {"v1", "v2"}
+
+    scoped_v1 = persistence.find_llm_cache(prompt_sha, endpoint, params_json, served_model_version="v1")
+    assert [r["cache_key"] for r in scoped_v1] == [f"CACHE-VER-V1-{uid}"]
+    assert scoped_v1[0]["response_text"] == "v1 response"
+
+    scoped_v2 = persistence.find_llm_cache(prompt_sha, endpoint, params_json, served_model_version="v2")
+    assert [r["cache_key"] for r in scoped_v2] == [f"CACHE-VER-V2-{uid}"]
+
+    assert persistence.find_llm_cache(prompt_sha, endpoint, params_json, served_model_version="v3") == []
+
+
 # ── sum_llm_call_tokens_since (L0.3, LIFECYCLE_design.md §2.6 monthly admission) ──
 
 
