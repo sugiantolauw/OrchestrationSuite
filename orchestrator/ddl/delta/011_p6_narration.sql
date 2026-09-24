@@ -119,6 +119,9 @@ ALTER TABLE ${catalog}.${schema}.findings ADD COLUMN accepted_by STRING;
 ALTER TABLE ${catalog}.${schema}.findings ADD COLUMN accepted_at TIMESTAMP;
 ALTER TABLE ${catalog}.${schema}.findings ADD CONSTRAINT findings_origin_chk
   CHECK (origin IS NULL OR origin IN ('rule', 'ai_proposed'));
+ALTER TABLE ${catalog}.${schema}.findings DROP CONSTRAINT findings_severity_basis_chk;
+ALTER TABLE ${catalog}.${schema}.findings ADD CONSTRAINT findings_severity_basis_chk
+  CHECK (severity_basis IS NULL OR severity_basis IN ('fixed', 'threshold', 'indeterminate', 'ai_proposed'));
 ALTER TABLE ${catalog}.${schema}.management_actions ADD COLUMN description_origin STRING;
 ALTER TABLE ${catalog}.${schema}.management_actions ADD CONSTRAINT management_actions_description_origin_chk
   CHECK (description_origin IS NULL OR description_origin IN ('template', 'model', 'human'));
