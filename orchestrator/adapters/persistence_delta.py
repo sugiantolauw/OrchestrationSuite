@@ -101,6 +101,11 @@ _FINDING_COLUMNS = (
     "management_questions_json", "exposure_amount", "exposure_basis", "theme_id",
     "review_state", "prior_finding_id", "recurrence_count", "created_at", "updated_at",
     "analyst_set_severity", "severity_basis", "monetary_basis",
+    # P6 (docs/specs/P6_narration_design.md §6.1, migration 011): an AI-proposed
+    # finding accepted at sign-off (CLAUDE.md §3 NN2 amendment) -- origin
+    # distinguishes it from a rule finding, candidate_id traces it back to its
+    # finding_candidates row, accepted_by/accepted_at record the decision.
+    "origin", "candidate_id", "accepted_by", "accepted_at",
 )
 
 # On a re-write of a finding_id that already exists (a node overwriting its own prior
@@ -213,6 +218,13 @@ def _finding_row_values(
         "analyst_set_severity": finding.get("analyst_set_severity"),
         "severity_basis": finding.get("severity_basis"),
         "monetary_basis": finding.get("monetary_basis"),
+        # P6 §5.2/§6.1: a rule finding omits these (None -> NULL); `finalise`
+        # supplies all four for an accepted AI-proposed finding. No default
+        # invented here either.
+        "origin": finding.get("origin"),
+        "candidate_id": finding.get("candidate_id"),
+        "accepted_by": finding.get("accepted_by"),
+        "accepted_at": finding.get("accepted_at"),
     }
 
 
@@ -228,6 +240,124 @@ def _finding_dict_from_row(row: dict) -> dict:
 def _skill_version_dict_from_row(row: dict) -> dict:
     d = dict(row)
     d["content"] = json.loads(d.pop("content_json"))
+    return d
+
+
+# ── P6 narration (docs/specs/P6_narration_design.md §6.1, migration 011) ──────────
+
+_NARRATIVE_COLUMNS = (
+    "narrative_id", "run_id", "engagement_id", "target_kind", "target_id", "field",
+    "version", "generation", "origin", "template_text", "sources_json", "call_ids_json",
+    "served_model_version", "violations_json", "updated_by", "updated_at",
+)
+
+_NARRATIVE_EDIT_COLUMNS = (
+    "edit_id", "narrative_id", "run_id", "version", "origin", "action", "actor", "at",
+    "before_text", "after_text", "diff", "reason", "call_id",
+)
+
+_CANDIDATE_COLUMNS = (
+    "candidate_id", "run_id", "engagement_id", "skill_id", "generation", "rule_id",
+    "title", "metrics_cited_json", "producing_test_ids_json", "proposed_severity",
+    "severity_reason", "rationale", "monetary_basis", "monetary_basis_note",
+    "exposure_amount", "headline_eligible", "headline_ineligible_reason",
+    "candidate_status", "decided_by", "decided_at", "decision_reason",
+    "decided_severity", "call_id", "created_at", "updated_at",
+)
+# A re-upsert of an existing candidate_id (a re-executed `narrate` node, §5.1/§5.2)
+# never resets the auditor's decision or the row's first-seen timestamp -- same
+# sticky-column discipline as _FINDING_STICKY_COLUMNS above.
+_CANDIDATE_STICKY_COLUMNS = (
+    "candidate_id", "candidate_status", "decided_by", "decided_at", "decision_reason",
+    "decided_severity", "created_at",
+)
+_CANDIDATE_UPDATE_COLUMNS = tuple(c for c in _CANDIDATE_COLUMNS if c not in _CANDIDATE_STICKY_COLUMNS)
+
+_THEME_COLUMNS = ("theme_id", "run_id", "generation", "ordinal", "finding_ids_json", "superseded", "created_at")
+
+
+def _narrative_row_values(row: dict) -> dict:
+    return {
+        "narrative_id": row["narrative_id"],
+        "run_id": row["run_id"],
+        "engagement_id": row.get("engagement_id"),
+        "target_kind": row["target_kind"],
+        "target_id": row["target_id"],
+        "field": row["field"],
+        "version": row["version"],
+        "generation": row["generation"],
+        "origin": row["origin"],
+        "template_text": row.get("template_text"),
+        "sources_json": _canonical_json(row.get("sources", [])),
+        "call_ids_json": _canonical_json(row.get("call_ids", [])),
+        "served_model_version": row.get("served_model_version"),
+        "violations_json": _canonical_json(row["violations"]) if row.get("violations") is not None else None,
+        "updated_by": row["updated_by"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def _narrative_dict_from_row(row: dict) -> dict:
+    d = dict(row)
+    d["sources"] = json.loads(d.pop("sources_json") or "[]")
+    d["call_ids"] = json.loads(d.pop("call_ids_json") or "[]")
+    violations_json = d.pop("violations_json")
+    d["violations"] = json.loads(violations_json) if violations_json is not None else None
+    return d
+
+
+def _candidate_row_values(run_id: str, candidate: dict, *, now: str) -> dict:
+    return {
+        "candidate_id": candidate["candidate_id"],
+        "run_id": run_id,
+        "engagement_id": candidate.get("engagement_id"),
+        "skill_id": candidate.get("skill_id"),
+        "generation": candidate["generation"],
+        "rule_id": candidate["rule_id"],
+        "title": candidate["title"],
+        "metrics_cited_json": _canonical_json(candidate.get("metrics_cited", [])),
+        "producing_test_ids_json": _canonical_json(candidate.get("producing_test_ids", [])),
+        "proposed_severity": candidate["proposed_severity"],
+        "severity_reason": candidate.get("severity_reason"),
+        "rationale": candidate.get("rationale"),
+        "monetary_basis": candidate["monetary_basis"],
+        "monetary_basis_note": candidate.get("monetary_basis_note"),
+        "exposure_amount": candidate.get("exposure_amount"),
+        "headline_eligible": bool(candidate["headline_eligible"]),
+        "headline_ineligible_reason": candidate.get("headline_ineligible_reason"),
+        "candidate_status": candidate.get("candidate_status", "candidate"),
+        "decided_by": candidate.get("decided_by"),
+        "decided_at": candidate.get("decided_at"),
+        "decision_reason": candidate.get("decision_reason"),
+        "decided_severity": candidate.get("decided_severity"),
+        "call_id": candidate["call_id"],
+        "created_at": now,
+        "updated_at": now,
+    }
+
+
+def _candidate_dict_from_row(row: dict) -> dict:
+    d = dict(row)
+    d["metrics_cited"] = json.loads(d.pop("metrics_cited_json") or "[]")
+    d["producing_test_ids"] = json.loads(d.pop("producing_test_ids_json") or "[]")
+    return d
+
+
+def _theme_row_values(run_id: str, theme: dict, *, now: str) -> dict:
+    return {
+        "theme_id": theme["theme_id"],
+        "run_id": run_id,
+        "generation": theme["generation"],
+        "ordinal": theme["ordinal"],
+        "finding_ids_json": _canonical_json(theme.get("finding_ids", [])),
+        "superseded": bool(theme.get("superseded", False)),
+        "created_at": now,
+    }
+
+
+def _theme_dict_from_row(row: dict) -> dict:
+    d = dict(row)
+    d["finding_ids"] = json.loads(d.pop("finding_ids_json") or "[]")
     return d
 
 
@@ -1501,13 +1631,13 @@ class DeltaPersistence:
                 "title = :title, description = :description, owner = :owner, risk = :risk, "
                 "status = :status, target_date = :target_date, "
                 "potential_exposure = :potential_exposure, evidence_link = :evidence_link, "
-                "last_updated = :last_updated "
+                "last_updated = :last_updated, description_origin = :description_origin "
                 "WHEN NOT MATCHED THEN INSERT (action_id, issue_id, finding_id, run_id, "
                 "engagement_id, skill_id, title, description, owner, risk, status, target_date, "
-                "potential_exposure, evidence_link, created_at, last_updated) VALUES (:action_id, "
-                ":issue_id, :finding_id, :run_id, :engagement_id, :skill_id, :title, :description, "
-                ":owner, :risk, :status, :target_date, :potential_exposure, :evidence_link, "
-                ":created_at, :last_updated)"
+                "potential_exposure, evidence_link, created_at, last_updated, description_origin) "
+                "VALUES (:action_id, :issue_id, :finding_id, :run_id, :engagement_id, :skill_id, "
+                ":title, :description, :owner, :risk, :status, :target_date, :potential_exposure, "
+                ":evidence_link, :created_at, :last_updated, :description_origin)"
             )
             for a in actions:
                 # potential_exposure is money (CLAUDE.md P2/P3 gate review item 1) --
@@ -1532,6 +1662,9 @@ class DeltaPersistence:
                         "evidence_link": a.get("evidence_link"),
                         "created_at": now,
                         "last_updated": now,
+                        # P6 §6.1: template|model|human -- no default invented (None ->
+                        # NULL) for an action write that predates this field or omits it.
+                        "description_origin": a.get("description_origin"),
                     },
                 )
 
@@ -1614,6 +1747,230 @@ class DeltaPersistence:
             cur = self._execute(
                 conn,
                 f"SELECT * FROM {self._table('exports')} WHERE run_id = :run_id ORDER BY kind",
+                {"run_id": run_id},
+            )
+            return _fetchall_dicts(cur)
+
+    # ── narration (P6, docs/specs/P6_narration_design.md §6.1 / WP N3b) ────────
+
+    def upsert_narrative(self, row: dict) -> None:
+        values = _narrative_row_values(row)
+        update_set = ", ".join(f"{c} = :{c}" for c in _NARRATIVE_COLUMNS if c != "narrative_id")
+        insert_cols = ", ".join(_NARRATIVE_COLUMNS)
+        insert_vals = ", ".join(f":{c}" for c in _NARRATIVE_COLUMNS)
+        with self._cursor_ctx() as conn:
+            self._execute(
+                conn,
+                f"MERGE INTO {self._table('narratives')} t "
+                "USING (SELECT :narrative_id AS narrative_id) s ON t.narrative_id = s.narrative_id "
+                f"WHEN MATCHED THEN UPDATE SET {update_set} "
+                f"WHEN NOT MATCHED THEN INSERT ({insert_cols}) VALUES ({insert_vals})",
+                values,
+            )
+
+    def get_narratives(self, run_id: str) -> list[dict]:
+        with self._cursor_ctx() as conn:
+            cur = self._execute(
+                conn,
+                f"SELECT * FROM {self._table('narratives')} WHERE run_id = :run_id "
+                "ORDER BY target_kind, target_id, field",
+                {"run_id": run_id},
+            )
+            rows = _fetchall_dicts(cur)
+        return [_narrative_dict_from_row(r) for r in rows]
+
+    def append_narrative_edit(self, row: dict) -> None:
+        # G14 append-only: MERGE with only a WHEN NOT MATCHED clause -- a retried
+        # write of the same edit_id is a no-op, never an update (this table is
+        # never rewritten, only ever grown). Same shape as put_llm_cache_if_absent.
+        insert_cols = ", ".join(_NARRATIVE_EDIT_COLUMNS)
+        insert_vals = ", ".join(f":{c}" for c in _NARRATIVE_EDIT_COLUMNS)
+        params = {c: row.get(c) for c in _NARRATIVE_EDIT_COLUMNS}
+        with self._cursor_ctx() as conn:
+            self._execute(
+                conn,
+                f"MERGE INTO {self._table('narrative_edits')} t "
+                "USING (SELECT :edit_id AS edit_id) s ON t.edit_id = s.edit_id "
+                f"WHEN NOT MATCHED THEN INSERT ({insert_cols}) VALUES ({insert_vals})",
+                params,
+            )
+
+    def list_narrative_edits(self, run_id: str) -> list[dict]:
+        with self._cursor_ctx() as conn:
+            cur = self._execute(
+                conn,
+                f"SELECT * FROM {self._table('narrative_edits')} WHERE run_id = :run_id "
+                "ORDER BY narrative_id, version",
+                {"run_id": run_id},
+            )
+            return _fetchall_dicts(cur)
+
+    def write_candidates(self, run_id: str, candidates: list[dict], *, now: str) -> None:
+        # Upsert only -- never prunes and never deletes (§5.2: a superseded or
+        # decided candidate stays in Delta forever). A re-upsert of an existing
+        # candidate_id (an idempotent retry of `narrate` for the SAME generation,
+        # CLAUDE.md §2.3 rule 1) leaves the decision columns untouched
+        # (_CANDIDATE_STICKY_COLUMNS), the same discipline write_findings uses
+        # for review-lifecycle columns. Looped rather than batched (§5.1 caps
+        # candidates at NARRATION_MAX_CANDIDATES, default 3 -- never worth a
+        # VALUES-list batch like write_flagged_rows/write_run_metrics).
+        update_set = ", ".join(f"{c} = :{c}" for c in _CANDIDATE_UPDATE_COLUMNS)
+        insert_cols = ", ".join(_CANDIDATE_COLUMNS)
+        insert_vals = ", ".join(f":{c}" for c in _CANDIDATE_COLUMNS)
+        merge_sql = (
+            f"MERGE INTO {self._table('finding_candidates')} t "
+            "USING (SELECT :candidate_id AS candidate_id) s ON t.candidate_id = s.candidate_id "
+            f"WHEN MATCHED THEN UPDATE SET {update_set} "
+            f"WHEN NOT MATCHED THEN INSERT ({insert_cols}) VALUES ({insert_vals})"
+        )
+        with self._cursor_ctx() as conn:
+            for candidate in candidates:
+                values = _candidate_row_values(run_id, candidate, now=now)
+                # exposure_amount is money (CLAUDE.md P2/P3 gate review item 1) --
+                # bind it as an explicit DOUBLE rather than the driver's inference.
+                self._execute_typed(conn, merge_sql, values)
+
+    def list_candidates(self, run_id: str) -> list[dict]:
+        with self._cursor_ctx() as conn:
+            cur = self._execute(
+                conn,
+                f"SELECT * FROM {self._table('finding_candidates')} WHERE run_id = :run_id "
+                "ORDER BY generation, rule_id",
+                {"run_id": run_id},
+            )
+            rows = _fetchall_dicts(cur)
+        return [_candidate_dict_from_row(r) for r in rows]
+
+    def decide_candidate_cas(
+        self,
+        candidate_id: str,
+        *,
+        decision: str,
+        reason: str | None,
+        decided_severity: str | None,
+        actor: str,
+        now: str,
+    ) -> bool:
+        with self._cursor_ctx() as conn:
+            cur = self._execute(
+                conn,
+                f"UPDATE {self._table('finding_candidates')} SET candidate_status = :decision, "
+                "decided_by = :actor, decided_at = :now, decision_reason = :reason, "
+                "decided_severity = :decided_severity, updated_at = :now "
+                "WHERE candidate_id = :candidate_id AND candidate_status = 'candidate'",
+                {
+                    "decision": decision, "actor": actor, "now": now, "reason": reason,
+                    "decided_severity": decided_severity, "candidate_id": candidate_id,
+                },
+            )
+            return _num_affected_rows(cur) > 0
+
+    def supersede_undecided(self, run_id: str, *, below_generation: int, now: str) -> int:
+        with self._cursor_ctx() as conn:
+            cur = self._execute(
+                conn,
+                f"UPDATE {self._table('finding_candidates')} SET candidate_status = 'superseded', "
+                "updated_at = :now WHERE run_id = :run_id AND generation < :below_generation "
+                "AND candidate_status = 'candidate'",
+                {"now": now, "run_id": run_id, "below_generation": below_generation},
+            )
+            return _num_affected_rows(cur)
+
+    def write_themes(self, run_id: str, themes: list[dict], *, now: str) -> None:
+        # Upsert only, same never-prune/never-delete discipline as
+        # write_candidates -- a prior generation's themes remain, distinguished
+        # by generation/superseded, never overwritten out from under a caller
+        # that only re-reads them by run_id. created_at is sticky (first-seen).
+        update_cols = tuple(c for c in _THEME_COLUMNS if c not in ("theme_id", "created_at"))
+        update_set = ", ".join(f"{c} = :{c}" for c in update_cols)
+        insert_cols = ", ".join(_THEME_COLUMNS)
+        insert_vals = ", ".join(f":{c}" for c in _THEME_COLUMNS)
+        merge_sql = (
+            f"MERGE INTO {self._table('finding_themes')} t "
+            "USING (SELECT :theme_id AS theme_id) s ON t.theme_id = s.theme_id "
+            f"WHEN MATCHED THEN UPDATE SET {update_set} "
+            f"WHEN NOT MATCHED THEN INSERT ({insert_cols}) VALUES ({insert_vals})"
+        )
+        with self._cursor_ctx() as conn:
+            for theme in themes:
+                self._execute(conn, merge_sql, _theme_row_values(run_id, theme, now=now))
+
+    def list_themes(self, run_id: str) -> list[dict]:
+        with self._cursor_ctx() as conn:
+            cur = self._execute(
+                conn,
+                f"SELECT * FROM {self._table('finding_themes')} WHERE run_id = :run_id "
+                "ORDER BY generation, ordinal",
+                {"run_id": run_id},
+            )
+            rows = _fetchall_dicts(cur)
+        return [_theme_dict_from_row(r) for r in rows]
+
+    def put_test_line_values(self, run_id: str, rows: list[dict]) -> None:
+        # MERGE + prune, batched (see write_flagged_rows above) -- overwrite
+        # semantics: `rows` becomes this run's entire test_line_values set.
+        new_keys = {(r["test_id"], r["source"], r["row_key"]) for r in rows}
+        with self._cursor_ctx() as conn:
+            cur = self._execute(
+                conn,
+                f"SELECT test_id, source, row_key FROM {self._table('test_line_values')} "
+                "WHERE run_id = :run_id",
+                {"run_id": run_id},
+            )
+            existing_keys = {(r["test_id"], r["source"], r["row_key"]) for r in _fetchall_dicts(cur)}
+
+            for batch in _batched(rows, _MERGE_BATCH_SIZE):
+                values_sql = ", ".join(
+                    f"(:run_id, :t{i}, :s{i}, :rk{i}, :lk{i}, :sp{i}, :ex{i})" for i in range(len(batch))
+                )
+                params: dict = {"run_id": run_id}
+                for i, r in enumerate(batch):
+                    params[f"t{i}"] = r["test_id"]
+                    params[f"s{i}"] = r["source"]
+                    params[f"rk{i}"] = r["row_key"]
+                    params[f"lk{i}"] = r["line_key"]
+                    params[f"sp{i}"] = r["spend_amount"]
+                    params[f"ex{i}"] = r.get("excess_amount")
+                merge_sql = (
+                    f"MERGE INTO {self._table('test_line_values')} t "
+                    "USING (SELECT col1 AS run_id, col2 AS test_id, col3 AS source, "
+                    "col4 AS row_key, col5 AS line_key, col6 AS spend_amount, col7 AS excess_amount "
+                    f"FROM (VALUES {values_sql})) s "
+                    "ON t.run_id = s.run_id AND t.test_id = s.test_id AND t.source = s.source "
+                    "AND t.row_key = s.row_key "
+                    "WHEN MATCHED THEN UPDATE SET line_key = s.line_key, "
+                    "spend_amount = s.spend_amount, excess_amount = s.excess_amount "
+                    "WHEN NOT MATCHED THEN INSERT (run_id, test_id, source, row_key, line_key, "
+                    "spend_amount, excess_amount) VALUES (s.run_id, s.test_id, s.source, s.row_key, "
+                    "s.line_key, s.spend_amount, s.excess_amount)"
+                )
+                # spend_amount/excess_amount are money (CLAUDE.md P2/P3 gate review
+                # item 1) -- bind them as explicit DOUBLEs rather than the driver's
+                # inference.
+                self._execute_typed(conn, merge_sql, params)
+
+            orphans = existing_keys - new_keys
+            if orphans:
+                clauses = []
+                params = {"run_id": run_id}
+                for i, (test_id, source, row_key) in enumerate(orphans):
+                    clauses.append(f"(test_id = :t{i} AND source = :s{i} AND row_key = :rk{i})")
+                    params[f"t{i}"] = test_id
+                    params[f"s{i}"] = source
+                    params[f"rk{i}"] = row_key
+                self._execute(
+                    conn,
+                    f"DELETE FROM {self._table('test_line_values')} WHERE run_id = :run_id "
+                    f"AND ({' OR '.join(clauses)})",
+                    params,
+                )
+
+    def list_test_line_values(self, run_id: str) -> list[dict]:
+        with self._cursor_ctx() as conn:
+            cur = self._execute(
+                conn,
+                f"SELECT * FROM {self._table('test_line_values')} WHERE run_id = :run_id "
+                "ORDER BY test_id, source, row_key",
                 {"run_id": run_id},
             )
             return _fetchall_dicts(cur)

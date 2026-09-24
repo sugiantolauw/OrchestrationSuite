@@ -70,6 +70,11 @@ _FINDING_COLUMNS = (
     "management_questions_json", "exposure_amount", "exposure_basis", "theme_id",
     "review_state", "prior_finding_id", "recurrence_count", "created_at", "updated_at",
     "analyst_set_severity", "severity_basis", "monetary_basis",
+    # P6 (docs/specs/P6_narration_design.md §6.1, migration 011): an AI-proposed
+    # finding accepted at sign-off (CLAUDE.md §3 NN2 amendment) -- origin
+    # distinguishes it from a rule finding, candidate_id traces it back to its
+    # finding_candidates row, accepted_by/accepted_at record the decision.
+    "origin", "candidate_id", "accepted_by", "accepted_at",
 )
 
 # On a re-write of a finding_id that already exists (a node overwriting its own prior
@@ -199,6 +204,13 @@ def _finding_row_values(
         # enforced) -- no default invented here; a caller that omits it gets
         # a persisted None, same tri-state discipline as analyst_set_severity.
         "monetary_basis": finding.get("monetary_basis"),
+        # P6 §5.2/§6.1: a rule finding omits these (None -> NULL); `finalise`
+        # supplies all four for an accepted AI-proposed finding. No default
+        # invented here either.
+        "origin": finding.get("origin"),
+        "candidate_id": finding.get("candidate_id"),
+        "accepted_by": finding.get("accepted_by"),
+        "accepted_at": finding.get("accepted_at"),
     }
 
 
@@ -220,6 +232,126 @@ def _finding_dict_from_row(row: dict) -> dict:
 def _skill_version_dict_from_row(row: dict) -> dict:
     d = dict(row)
     d["content"] = json.loads(d.pop("content_json"))
+    return d
+
+
+# ── P6 narration (docs/specs/P6_narration_design.md §6.1, migration 011) ──────────
+
+_NARRATIVE_COLUMNS = (
+    "narrative_id", "run_id", "engagement_id", "target_kind", "target_id", "field",
+    "version", "generation", "origin", "template_text", "sources_json", "call_ids_json",
+    "served_model_version", "violations_json", "updated_by", "updated_at",
+)
+
+_NARRATIVE_EDIT_COLUMNS = (
+    "edit_id", "narrative_id", "run_id", "version", "origin", "action", "actor", "at",
+    "before_text", "after_text", "diff", "reason", "call_id",
+)
+
+_CANDIDATE_COLUMNS = (
+    "candidate_id", "run_id", "engagement_id", "skill_id", "generation", "rule_id",
+    "title", "metrics_cited_json", "producing_test_ids_json", "proposed_severity",
+    "severity_reason", "rationale", "monetary_basis", "monetary_basis_note",
+    "exposure_amount", "headline_eligible", "headline_ineligible_reason",
+    "candidate_status", "decided_by", "decided_at", "decision_reason",
+    "decided_severity", "call_id", "created_at", "updated_at",
+)
+# A re-upsert of an existing candidate_id (a re-executed `narrate` node, §5.1/§5.2)
+# never resets the auditor's decision or the row's first-seen timestamp -- same
+# sticky-column discipline as _FINDING_STICKY_COLUMNS above.
+_CANDIDATE_STICKY_COLUMNS = (
+    "candidate_id", "candidate_status", "decided_by", "decided_at", "decision_reason",
+    "decided_severity", "created_at",
+)
+_CANDIDATE_UPDATE_COLUMNS = tuple(c for c in _CANDIDATE_COLUMNS if c not in _CANDIDATE_STICKY_COLUMNS)
+
+_THEME_COLUMNS = ("theme_id", "run_id", "generation", "ordinal", "finding_ids_json", "superseded", "created_at")
+
+
+def _narrative_row_values(row: dict) -> dict:
+    return {
+        "narrative_id": row["narrative_id"],
+        "run_id": row["run_id"],
+        "engagement_id": row.get("engagement_id"),
+        "target_kind": row["target_kind"],
+        "target_id": row["target_id"],
+        "field": row["field"],
+        "version": row["version"],
+        "generation": row["generation"],
+        "origin": row["origin"],
+        "template_text": row.get("template_text"),
+        "sources_json": _canonical_json(row.get("sources", [])),
+        "call_ids_json": _canonical_json(row.get("call_ids", [])),
+        "served_model_version": row.get("served_model_version"),
+        "violations_json": _canonical_json(row["violations"]) if row.get("violations") is not None else None,
+        "updated_by": row["updated_by"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def _narrative_dict_from_row(row: dict) -> dict:
+    d = dict(row)
+    d["sources"] = json.loads(d.pop("sources_json") or "[]")
+    d["call_ids"] = json.loads(d.pop("call_ids_json") or "[]")
+    violations_json = d.pop("violations_json")
+    d["violations"] = json.loads(violations_json) if violations_json is not None else None
+    return d
+
+
+def _candidate_row_values(run_id: str, candidate: dict, *, now: str) -> dict:
+    return {
+        "candidate_id": candidate["candidate_id"],
+        "run_id": run_id,
+        "engagement_id": candidate.get("engagement_id"),
+        "skill_id": candidate.get("skill_id"),
+        "generation": candidate["generation"],
+        "rule_id": candidate["rule_id"],
+        "title": candidate["title"],
+        "metrics_cited_json": _canonical_json(candidate.get("metrics_cited", [])),
+        "producing_test_ids_json": _canonical_json(candidate.get("producing_test_ids", [])),
+        "proposed_severity": candidate["proposed_severity"],
+        "severity_reason": candidate.get("severity_reason"),
+        "rationale": candidate.get("rationale"),
+        "monetary_basis": candidate["monetary_basis"],
+        "monetary_basis_note": candidate.get("monetary_basis_note"),
+        "exposure_amount": candidate.get("exposure_amount"),
+        "headline_eligible": int(bool(candidate["headline_eligible"])),
+        "headline_ineligible_reason": candidate.get("headline_ineligible_reason"),
+        "candidate_status": candidate.get("candidate_status", "candidate"),
+        "decided_by": candidate.get("decided_by"),
+        "decided_at": candidate.get("decided_at"),
+        "decision_reason": candidate.get("decision_reason"),
+        "decided_severity": candidate.get("decided_severity"),
+        "call_id": candidate["call_id"],
+        "created_at": now,
+        "updated_at": now,
+    }
+
+
+def _candidate_dict_from_row(row: dict) -> dict:
+    d = dict(row)
+    d["metrics_cited"] = json.loads(d.pop("metrics_cited_json") or "[]")
+    d["producing_test_ids"] = json.loads(d.pop("producing_test_ids_json") or "[]")
+    d["headline_eligible"] = bool(d["headline_eligible"])
+    return d
+
+
+def _theme_row_values(run_id: str, theme: dict, *, now: str) -> dict:
+    return {
+        "theme_id": theme["theme_id"],
+        "run_id": run_id,
+        "generation": theme["generation"],
+        "ordinal": theme["ordinal"],
+        "finding_ids_json": _canonical_json(theme.get("finding_ids", [])),
+        "superseded": int(bool(theme.get("superseded", False))),
+        "created_at": now,
+    }
+
+
+def _theme_dict_from_row(row: dict) -> dict:
+    d = dict(row)
+    d["finding_ids"] = json.loads(d.pop("finding_ids_json") or "[]")
+    d["superseded"] = bool(d["superseded"])
     return d
 
 
@@ -1111,8 +1243,9 @@ class LocalPersistence:
                 conn.execute(
                     "INSERT INTO management_actions (action_id, issue_id, finding_id, run_id, "
                     "engagement_id, skill_id, title, description, owner, risk, status, "
-                    "target_date, potential_exposure, evidence_link, created_at, last_updated) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+                    "target_date, potential_exposure, evidence_link, created_at, last_updated, "
+                    "description_origin) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
                     "ON CONFLICT(action_id) DO UPDATE SET issue_id = excluded.issue_id, "
                     "finding_id = excluded.finding_id, run_id = excluded.run_id, "
                     "engagement_id = excluded.engagement_id, skill_id = excluded.skill_id, "
@@ -1120,7 +1253,8 @@ class LocalPersistence:
                     "owner = excluded.owner, risk = excluded.risk, status = excluded.status, "
                     "target_date = excluded.target_date, "
                     "potential_exposure = excluded.potential_exposure, "
-                    "evidence_link = excluded.evidence_link, last_updated = excluded.last_updated",
+                    "evidence_link = excluded.evidence_link, last_updated = excluded.last_updated, "
+                    "description_origin = excluded.description_origin",
                     (
                         a["action_id"],
                         a.get("issue_id"),
@@ -1138,6 +1272,9 @@ class LocalPersistence:
                         a.get("evidence_link"),
                         now,
                         now,
+                        # P6 §6.1: template|model|human -- no default invented (None -> NULL)
+                        # for an action write that predates this field or omits it.
+                        a.get("description_origin"),
                     ),
                 )
             orphans = existing_ids - new_ids
@@ -1210,6 +1347,183 @@ class LocalPersistence:
         try:
             rows = conn.execute(
                 "SELECT * FROM exports WHERE run_id = ? ORDER BY kind", (run_id,)
+            ).fetchall()
+        finally:
+            self._release(conn)
+        return [dict(r) for r in rows]
+
+    # ── narration (P6, docs/specs/P6_narration_design.md §6.1 / WP N3b) ────────
+
+    def upsert_narrative(self, row: dict) -> None:
+        values = _narrative_row_values(row)
+        update_clause = ", ".join(f"{c} = excluded.{c}" for c in _NARRATIVE_COLUMNS if c != "narrative_id")
+        placeholders = ",".join("?" for _ in _NARRATIVE_COLUMNS)
+        with self._writer() as conn:
+            conn.execute(
+                f"INSERT INTO narratives ({','.join(_NARRATIVE_COLUMNS)}) VALUES ({placeholders}) "
+                f"ON CONFLICT(narrative_id) DO UPDATE SET {update_clause}",
+                tuple(values[c] for c in _NARRATIVE_COLUMNS),
+            )
+
+    def get_narratives(self, run_id: str) -> list[dict]:
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM narratives WHERE run_id = ? ORDER BY target_kind, target_id, field",
+                (run_id,),
+            ).fetchall()
+        finally:
+            self._release(conn)
+        return [_narrative_dict_from_row(dict(r)) for r in rows]
+
+    def append_narrative_edit(self, row: dict) -> None:
+        # G14 append-only: INSERT ... ON CONFLICT DO NOTHING -- a retried write of
+        # the same edit_id is a no-op, never an update (this table is never
+        # rewritten, only ever grown).
+        placeholders = ",".join("?" for _ in _NARRATIVE_EDIT_COLUMNS)
+        with self._writer() as conn:
+            conn.execute(
+                f"INSERT INTO narrative_edits ({','.join(_NARRATIVE_EDIT_COLUMNS)}) "
+                f"VALUES ({placeholders}) ON CONFLICT(edit_id) DO NOTHING",
+                tuple(row.get(c) for c in _NARRATIVE_EDIT_COLUMNS),
+            )
+
+    def list_narrative_edits(self, run_id: str) -> list[dict]:
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM narrative_edits WHERE run_id = ? ORDER BY narrative_id, version",
+                (run_id,),
+            ).fetchall()
+        finally:
+            self._release(conn)
+        return [dict(r) for r in rows]
+
+    def write_candidates(self, run_id: str, candidates: list[dict], *, now: str) -> None:
+        # Upsert only -- never prunes and never deletes (§5.2: a superseded or
+        # decided candidate stays in Delta forever). A re-upsert of an existing
+        # candidate_id (an idempotent retry of `narrate` for the SAME generation,
+        # CLAUDE.md §2.3 rule 1) leaves the decision columns untouched
+        # (_CANDIDATE_STICKY_COLUMNS), the same discipline write_findings uses
+        # for review-lifecycle columns.
+        update_clause = ", ".join(f"{c} = excluded.{c}" for c in _CANDIDATE_UPDATE_COLUMNS)
+        placeholders = ",".join("?" for _ in _CANDIDATE_COLUMNS)
+        with self._writer() as conn:
+            for candidate in candidates:
+                values = _candidate_row_values(run_id, candidate, now=now)
+                conn.execute(
+                    f"INSERT INTO finding_candidates ({','.join(_CANDIDATE_COLUMNS)}) "
+                    f"VALUES ({placeholders}) ON CONFLICT(candidate_id) DO UPDATE SET {update_clause}",
+                    tuple(values[c] for c in _CANDIDATE_COLUMNS),
+                )
+
+    def list_candidates(self, run_id: str) -> list[dict]:
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM finding_candidates WHERE run_id = ? ORDER BY generation, rule_id",
+                (run_id,),
+            ).fetchall()
+        finally:
+            self._release(conn)
+        return [_candidate_dict_from_row(dict(r)) for r in rows]
+
+    def decide_candidate_cas(
+        self,
+        candidate_id: str,
+        *,
+        decision: str,
+        reason: str | None,
+        decided_severity: str | None,
+        actor: str,
+        now: str,
+    ) -> bool:
+        with self._writer() as conn:
+            cur = conn.execute(
+                "UPDATE finding_candidates SET candidate_status = ?, decided_by = ?, "
+                "decided_at = ?, decision_reason = ?, decided_severity = ?, updated_at = ? "
+                "WHERE candidate_id = ? AND candidate_status = 'candidate'",
+                (decision, actor, now, reason, decided_severity, now, candidate_id),
+            )
+            return cur.rowcount > 0
+
+    def supersede_undecided(self, run_id: str, *, below_generation: int, now: str) -> int:
+        with self._writer() as conn:
+            cur = conn.execute(
+                "UPDATE finding_candidates SET candidate_status = 'superseded', updated_at = ? "
+                "WHERE run_id = ? AND generation < ? AND candidate_status = 'candidate'",
+                (now, run_id, below_generation),
+            )
+            return cur.rowcount
+
+    def write_themes(self, run_id: str, themes: list[dict], *, now: str) -> None:
+        # Upsert only, same never-prune/never-delete discipline as
+        # write_candidates -- a prior generation's themes remain, distinguished
+        # by generation/superseded, never overwritten out from under a caller
+        # that only re-reads them by run_id. created_at is sticky (first-seen),
+        # like _CANDIDATE_STICKY_COLUMNS/_FINDING_STICKY_COLUMNS.
+        update_cols = tuple(c for c in _THEME_COLUMNS if c not in ("theme_id", "created_at"))
+        update_clause = ", ".join(f"{c} = excluded.{c}" for c in update_cols)
+        placeholders = ",".join("?" for _ in _THEME_COLUMNS)
+        with self._writer() as conn:
+            for theme in themes:
+                values = _theme_row_values(run_id, theme, now=now)
+                conn.execute(
+                    f"INSERT INTO finding_themes ({','.join(_THEME_COLUMNS)}) VALUES ({placeholders}) "
+                    f"ON CONFLICT(theme_id) DO UPDATE SET {update_clause}",
+                    tuple(values[c] for c in _THEME_COLUMNS),
+                )
+
+    def list_themes(self, run_id: str) -> list[dict]:
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM finding_themes WHERE run_id = ? ORDER BY generation, ordinal",
+                (run_id,),
+            ).fetchall()
+        finally:
+            self._release(conn)
+        return [_theme_dict_from_row(dict(r)) for r in rows]
+
+    def put_test_line_values(self, run_id: str, rows: list[dict]) -> None:
+        # MERGE + prune (see write_flagged_rows above) -- overwrite semantics:
+        # `rows` becomes this run's entire test_line_values set.
+        new_keys = {(r["test_id"], r["source"], r["row_key"]) for r in rows}
+        with self._writer() as conn:
+            existing_keys = {
+                (r["test_id"], r["source"], r["row_key"])
+                for r in conn.execute(
+                    "SELECT test_id, source, row_key FROM test_line_values WHERE run_id = ?", (run_id,)
+                ).fetchall()
+            }
+            conn.executemany(
+                "INSERT INTO test_line_values (run_id, test_id, source, row_key, line_key, "
+                "spend_amount, excess_amount) VALUES (?,?,?,?,?,?,?) "
+                "ON CONFLICT(run_id, test_id, source, row_key) DO UPDATE SET "
+                "line_key = excluded.line_key, spend_amount = excluded.spend_amount, "
+                "excess_amount = excluded.excess_amount",
+                [
+                    (
+                        run_id, r["test_id"], r["source"], r["row_key"], r["line_key"],
+                        r["spend_amount"], r.get("excess_amount"),
+                    )
+                    for r in rows
+                ],
+            )
+            orphans = existing_keys - new_keys
+            if orphans:
+                conn.executemany(
+                    "DELETE FROM test_line_values WHERE run_id = ? AND test_id = ? AND source = ? "
+                    "AND row_key = ?",
+                    [(run_id, test_id, source, row_key) for test_id, source, row_key in orphans],
+                )
+
+    def list_test_line_values(self, run_id: str) -> list[dict]:
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM test_line_values WHERE run_id = ? ORDER BY test_id, source, row_key",
+                (run_id,),
             ).fetchall()
         finally:
             self._release(conn)
