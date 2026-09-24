@@ -44,6 +44,7 @@ owned by the Unity Catalog work) against Unity Catalog, surfaced as
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -459,6 +460,22 @@ def list_skill_versions(ctx: AppContext, skill_id: str) -> list[dict]:
     return ctx.persistence.list_skill_versions(skill_id)
 
 
+def get_skill_version_plan(ctx: AppContext, skill_id: str, version: str) -> dict | None:
+    """The `plan.yaml` content this SPECIFIC skill_id/version actually ran
+    with, read from its immutable `skill_versions` row (CLAUDE.md §4.6/§8:
+    the content-hashed snapshot register_skill recorded when this version
+    was first confirmed) -- never the live skills/<id>/plan.yaml on disk,
+    which may have moved on since this run executed (independent review
+    2026-09-24 item 7). Returns None only when no such version was ever
+    registered (an older run, or a Skill not yet promoted through the
+    registry) -- callers fall back to the live directory for THAT case
+    only, never to paper over a genuine read/parse failure."""
+    row = ctx.persistence.get_skill_version(skill_id, version)
+    if row is None:
+        return None
+    return row["content"].get("plan")
+
+
 # ── Governed data discovery ───────────────────────────────────────────────────
 
 
@@ -762,6 +779,7 @@ def list_runs(ctx: AppContext, filters: dict | None = None) -> list[dict]:
             {
                 "run_id": run_id,
                 "skill_id": r.get("skill_id"),
+                "engagement_id": r.get("engagement_id"),
                 "skill_name": skill_entry["name"] if skill_entry else r.get("skill_id"),
                 "audit_period": f"{r['audit_period_start']} – {r['audit_period_end']}",
                 "run_timestamp": r["created_at"],
@@ -993,6 +1011,26 @@ def get_upload_base_path(ctx: AppContext) -> str:
     return ctx.settings.volume
 
 
+# CLAUDE.md independent review 2026-09-24, item 4: an upload's filename is
+# person-supplied and untrusted. `Path(filename).name` alone strips any
+# directory component (so "../../etc/passwd" or "/etc/passwd" cannot walk
+# out of uploads/<upload_id>/), and this allow-list additionally rejects
+# anything that is not an ordinary filename character -- never silently
+# transliterated or truncated, since either could collide two different
+# uploaded filenames onto the same destination path.
+_SAFE_UPLOAD_FILENAME_CHARS = set(string.ascii_letters + string.digits + "._- ()")
+
+
+def _sanitise_upload_filename(filename: str) -> str:
+    name = Path(filename).name
+    if not name or name in (".", ".."):
+        raise ValueError(f"{filename!r} is not a valid upload filename")
+    if not set(name) <= _SAFE_UPLOAD_FILENAME_CHARS:
+        bad = sorted(set(name) - _SAFE_UPLOAD_FILENAME_CHARS)
+        raise ValueError(f"{filename!r} contains character(s) not allowed in an upload filename: {bad}")
+    return name
+
+
 def _profile_uploaded_bytes(filename: str, content: bytes) -> tuple[int, list[str]]:
     """Parses the file to get a row count and column list (CLAUDE.md build
     brief P5: 'profiling = parse CSV/XLSX/Parquet, row count + columns').
@@ -1021,10 +1059,11 @@ def upload_file(
     engagement_id: str = "ENG-DEFAULT",
 ) -> dict:
     """Writes `content` to the configured Volume/local export root at
-    uploads/<upload_id>/<filename>, records an `uploaded_files` row, and
-    profiles it inline (CSV/XLSX/Parquet -> row_count + columns_json).
-    Status moves Uploaded -> Profiling -> Ready|Failed; a profiling failure
-    never becomes a silent 0-row success (CLAUDE.md NN14)."""
+    uploads/<upload_id>/<sanitised filename>, records an `uploaded_files`
+    row, and profiles it inline (CSV/XLSX/Parquet -> row_count +
+    columns_json). Status moves Uploaded -> Profiling -> Ready|Failed; a
+    profiling failure never becomes a silent 0-row success (CLAUDE.md
+    NN14). `filename` is untrusted input -- see _sanitise_upload_filename."""
     import hashlib
     import json
     import uuid as _uuid
@@ -1039,7 +1078,14 @@ def upload_file(
 
     upload_id = f"UP-{_uuid.uuid4().hex[:12]}"
     sha256 = hashlib.sha256(content).hexdigest()
-    dest_path = f"uploads/{upload_id}/{filename}"
+    safe_filename = _sanitise_upload_filename(filename)
+    dest_path = f"uploads/{upload_id}/{safe_filename}"
+    if ctx.export_storage.exists(dest_path):
+        # upload_id is a fresh uuid4 per call, so a collision here would mean
+        # something else already wrote this exact path -- never silently
+        # overwrite whatever that is (CLAUDE.md NN14, independent review
+        # 2026-09-24 item 4).
+        raise ValueError(f"upload destination {dest_path!r} already exists -- refusing to overwrite it")
     volume_path = ctx.export_storage.write(dest_path, content)
     now = ctx.clock()
 
@@ -1123,6 +1169,20 @@ def get_export(ctx: AppContext, run_id: str, kind: str) -> tuple[str, bytes]:
     if match is None:
         raise FileNotFoundError(f"no {kind!r} export recorded for run {run_id!r}")
     content = ctx.export_storage.read(match["path"])
+    # Independent review 2026-09-24 item 4: verify against the sha256
+    # recorded at write time (record_export -- every export writer, incl.
+    # an upload-derived one, records this) before handing bytes back to a
+    # download callback -- a mismatch fails loudly rather than silently
+    # serving content that no longer matches this run's own evidence
+    # (CLAUDE.md NN14), same pattern as orchestrator.frames.read_frame_parquet.
+    expected_sha256 = match.get("sha256")
+    if expected_sha256:
+        actual_sha256 = hashlib.sha256(content).hexdigest()
+        if actual_sha256 != expected_sha256:
+            raise ValueError(
+                f"export {kind!r} for run {run_id!r} failed integrity check: recorded "
+                f"sha256={expected_sha256!r}, bytes read back hash to {actual_sha256!r}"
+            )
     filename = Path(match["path"]).name
     return filename, content
 
