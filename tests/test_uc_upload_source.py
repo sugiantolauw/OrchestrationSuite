@@ -319,3 +319,44 @@ def test_service_uc_factory_routes_an_uploaded_binding_through_the_volume_not_sq
     df = data_source.read_population("claims", version=version)
     assert list(df["Amount"]) == [100, 200]
     assert fake_files.download_calls == [UPLOAD_ROW["volume_path"]]
+
+
+# ── independent review 2026-09-24 item 7: filters + cell ceiling ────────────
+
+
+def test_read_population_rejects_non_empty_filters():
+    """A flat file cannot push a filter down (see the module's own
+    docstring) -- silently ignoring it would read and return the WHOLE
+    file when the caller asked for a filtered subset. Must raise, not
+    silently serve unfiltered data."""
+    ds = _ds()
+    with pytest.raises(ValueError, match="cannot push filters down"):
+        ds.read_population("claims", version=CSV_SHA256, filters={"Employee ID": 1})
+    assert ds.export_storage.read_calls == []  # never even fetched
+
+
+def test_read_population_allows_empty_or_no_filters():
+    ds = _ds()
+    df = ds.read_population("claims", version=CSV_SHA256, filters={})
+    assert len(df) == 2
+    ds2 = _ds()
+    df2 = ds2.read_population("claims", version=CSV_SHA256, filters=None)
+    assert len(df2) == 2
+
+
+def test_read_population_enforces_the_cell_ceiling():
+    """CLAUDE.md §2.3 rule 4: never silently sample or truncate -- a read
+    that would exceed the cell ceiling raises instead."""
+    ds = _ds()
+    ds.max_cells = 3  # 2 rows x 2 data columns (Employee ID, Amount) = 4 > 3
+    ds.__post_init__()
+    with pytest.raises(ValueError, match="DBX_MAX_CELLS"):
+        ds.read_population("claims", version=CSV_SHA256)
+
+
+def test_read_population_under_the_cell_ceiling_succeeds():
+    ds = _ds()
+    ds.max_cells = 100
+    ds.__post_init__()
+    df = ds.read_population("claims", version=CSV_SHA256)
+    assert len(df) == 2

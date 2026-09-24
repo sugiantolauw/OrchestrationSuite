@@ -13,6 +13,18 @@ run_fingerprints.uploaded_file_hashes pins, CLAUDE.md §4.1) is verified
 against the bytes actually read, on every read, before they are parsed: a
 mismatch fails the run loudly (SourceVersionMismatch), it is never silently
 accepted or defaulted around (CLAUDE.md NN14).
+
+Independent review 2026-09-24 item 7: `filters` cannot be pushed down into
+a flat CSV/XLSX read the way UCTableDataSource pushes one into a WHERE
+clause -- honouring it would mean silently reading the WHOLE file and
+filtering in pandas, which is not what a caller asking for server-side
+pushdown asked for, and pretending to push it down would be worse. A
+non-empty `filters` on an uploaded source raises rather than being
+silently ignored. The cell ceiling (CLAUDE.md §2.3 rule 4, the same
+DBX_MAX_CELLS knob datasource_uc.UCTableDataSource enforces) is checked
+after parsing -- a flat file has no queryable row count ahead of the read,
+so it cannot be checked before, but it is still checked before the frame
+is handed back to a caller, never silently truncated or sampled.
 """
 
 from __future__ import annotations
@@ -23,6 +35,7 @@ from typing import Any
 
 import pandas as pd
 
+from orchestrator.adapters.datasource_uc import _resolve_max_cells
 from orchestrator.contract import SourceVersionMismatch, parse_source_bytes
 
 
@@ -33,7 +46,11 @@ class VolumeUploadAwareDataSource:
     contract_sources: dict[str, dict]
     persistence: Any
     export_storage: Any
+    max_cells: int | None = None  # None resolves DBX_MAX_CELLS / the shared default, same as UCTableDataSource
     _uploaded_by_path: dict[str, dict] | None = field(default=None, init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        self._max_cells = _resolve_max_cells(self.max_cells)
 
     def _uploaded_files_by_path(self) -> dict[str, dict]:
         if self._uploaded_by_path is None:
@@ -75,6 +92,18 @@ class VolumeUploadAwareDataSource:
         if row is None:
             return self.table_source.read_population(source, version=version, columns=columns, filters=filters)
 
+        if filters:
+            # Independent review 2026-09-24 item 7: a flat file cannot push a
+            # filter down (see this module's own docstring) -- silently
+            # ignoring it would read and return the WHOLE file when the
+            # caller asked for a filtered subset, a silent wrong answer
+            # (CLAUDE.md NN14), never a case to guess through.
+            raise ValueError(
+                f"{source}: an uploaded source cannot push filters down (got {filters!r}) -- "
+                f"filter the returned DataFrame yourself, or bind this contract source to a "
+                f"governed table instead"
+            )
+
         volume_path = self.bindings[source]
         recorded_sha256 = row["sha256"]
         # Pinned-version check FIRST (CLAUDE.md §4.1 TOCTOU ordering): the
@@ -89,7 +118,21 @@ class VolumeUploadAwareDataSource:
             raise SourceVersionMismatch(source, recorded_sha256, actual_sha256)
 
         cfg = self._cfg_for(source, row)
-        return parse_source_bytes(data, source, version, cfg, columns)
+        df = parse_source_bytes(data, source, version, cfg, columns)
+
+        # Cell ceiling (CLAUDE.md §2.3 rule 4) -- checked after parsing since
+        # a flat file's row count is not knowable before reading it, but
+        # still enforced before this frame reaches a caller: never silently
+        # truncated or sampled.
+        n_data_cols = max(len(df.columns) - 2, 1)  # __source/__row_key are bookkeeping, not data columns
+        cells = len(df) * n_data_cols
+        if cells > self._max_cells:
+            raise ValueError(
+                f"{source}: {len(df):,} rows x {n_data_cols} columns = {cells:,} cells exceeds "
+                f"the DBX_MAX_CELLS ceiling ({self._max_cells:,}). Narrow `columns`; this adapter "
+                f"never silently samples (CLAUDE.md §2.3 rule 4)."
+            )
+        return df
 
     def row_count(self, source: str, *, version: str | None = None) -> int:
         row = self._uploaded_row(source)
