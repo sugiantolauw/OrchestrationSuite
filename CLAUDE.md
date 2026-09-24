@@ -1229,6 +1229,11 @@ validate the schema client-side with one retry — never strip markdown fences t
   (`gpt-oss-120b-080525`) is the served model version; `usage` is present, and there is no
   `system_fingerprint`.
 - AI Gateway: usage tracking only on both endpoints; inference tables are **not** enabled.
+- **Development-workspace override (user decision, 2026-09-24):** while the Claude endpoints are
+  disabled here, the Sonnet role (`MODEL_SONNET`) points at `databricks-gpt-oss-120b`. This is a
+  config change only, with parameters taken from the GPT-OSS matrix above. The UI and `llm_calls`
+  show the actual served model. At the Optus port `MODEL_SONNET` goes back to a Claude endpoint, and
+  its parameter matrix must be re-run there.
 
 **Enable AI Gateway with inference tables on both endpoints.** Inference tables are a
 platform-written copy of every request/response — the audit trail a reviewer trusts because the
