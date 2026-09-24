@@ -1,0 +1,609 @@
+"""The `narrate` node's per-item generate/validate/repair/fallback loop (P6
+WP N7, docs/specs/P6_narration_design.md §3.5, §4.1, §6.1). One
+`narrate_<task>` function per narration task (§4.1's table, minus
+`find_candidates` -- N8's task; this WP leaves a clean hook, never calling
+it): each builds its own payload+table(s) via `orchestrator.narration.
+payloads`, runs the shared `_generate_item` loop below, and persists every
+resulting field through `upsert_narrative` (idempotent by `narrative_id`,
+CLAUDE.md §2.3 rule 1 -- a re-executed `narrate` for the same generation
+overwrites its own rows, never appends).
+
+The shared loop (§3.5):
+
+    generate (seq 2k+1) -- gateway.call() with this task's schema
+      -> status "unavailable" -> fallback_unavailable, no repair, and this
+         task's ROLE is marked broken for the rest of this narrate()
+         execution (the circuit breaker: every later item whose task
+         resolves to that same primary role skips calling altogether --
+         "there is no llm_calls row, because no call was made")
+      -> status "ok" but the caller's own `validate_fn` rejects it (or
+         status "invalid_output", the gateway's own JSON-Schema failure)
+         -> repair (seq 2k+2), same task/schema, `repair_user.md` listing
+            what broke
+           -> valid -> model_repaired
+           -> invalid/unavailable -> fallback_invalid (unavailable on the
+              repair attempt also breaks the circuit for later items)
+      -> status "ok" and valid -> model
+
+Budget per item: at most 2 logical calls (`seq`) x the gateway's own 2
+transport attempts each (§3.5's own arithmetic; the transport retries are
+`LLMGateway`'s concern, WP N6, not this module's).
+
+Every field's `narratives.template_text` keeps the model's TYPED placeholder
+form (`{class:name}`), never a rendered value (§6.1's own DDL comment:
+"validated text WITH typed placeholders ... null for fallbacks") -- a
+fallback row is persisted with `template_text=None` for EVERY task,
+including exec_summary; the deterministic fallback content itself is a
+resolver-time concern (`orchestrator.narration.resolve.effective_prose`,
+WP N10), not something this module stores. `render()` is still called once
+on every accepted (`model`/`model_repaired`) field before it is persisted --
+not because the rendered form is stored, but because CLAUDE.md non-
+negotiable 14 says a validator/renderer disagreement must fail loudly rather
+than silently persist text nothing can actually render later; `validate_
+prose` is supposed to guarantee `render()` succeeds, so this is a defensive
+check, not a formatting step.
+"""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass, field as dataclass_field
+from typing import Any, Callable, Iterable
+
+from orchestrator.config import NODE_MODELS
+from orchestrator.llm.gateway import CallContext
+from orchestrator.llm.tasks import FALLBACK_ROLE, TASK_PROFILES
+from orchestrator.narration.payloads import (
+    build_caption_payload,
+    build_exec_summary_payload,
+    build_finding_payload,
+    build_finding_table,
+    build_priority_payload,
+    build_profile_payload,
+    build_remediation_payload,
+    build_synthesis_payload,
+    finding_key,
+)
+from orchestrator.narration.placeholders import PlaceholderEntry, render, scan_placeholders
+from orchestrator.narration.schemas import (
+    chart_captions_schema,
+    exec_summary_schema,
+    finding_narration_schema,
+    finding_synthesis_schema,
+    priority_rationale_schema,
+    profile_narrative_schema,
+    remediation_schema,
+)
+from orchestrator.narration.validate import validate_prose, validate_themes
+
+__all__ = [
+    "RunnerContext",
+    "NarrationOutcome",
+    "narrative_id",
+    "effective_remediation_text",
+    "narrate_profile",
+    "narrate_finding",
+    "narrate_synthesis",
+    "narrate_priority",
+    "narrate_remediation",
+    "narrate_exec_summary",
+    "narrate_captions",
+]
+
+
+def _canonical_json(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def narrative_id(run_id: str, target_kind: str, target_id: str, field: str) -> str:
+    """§6.1: `narrative_id = sha256(run_id|target_kind|target_id|field)[:32]`
+    -- deliberately NOT keyed on `generation`, so a later generation's
+    `upsert_narrative` for the same (run, target, field) overwrites the SAME
+    row (`narratives` holds the CURRENT version per narrated field; history
+    lives in `narrative_edits`, not here)."""
+    import hashlib
+
+    return hashlib.sha256(f"{run_id}|{target_kind}|{target_id}|{field}".encode("utf-8")).hexdigest()[:32]
+
+
+@dataclass
+class RunnerContext:
+    gateway: Any
+    prompts: Any  # orchestrator.narration.prompts.NarrationPromptRepository
+    persistence: Any
+    clock: Callable[[], str]
+    run_id: str
+    engagement_id: str | None
+    actor: str
+    generation: int
+    pii_columns_masked: list[str]
+    node_name: str = "narrate"
+    execution_key: str | None = None
+    # Circuit breaker (§3.5), keyed on (primary_role, fallback_role_or_None)
+    # -- NOT on the primary role alone. Two tasks sharing a primary role but
+    # NOT a fallback role (e.g. `find`, pair (model_sonnet, None), vs
+    # `prioritise`, pair (model_sonnet, model_gpt_oss)) must be judged
+    # independently: `find`'s primary going down proves nothing about
+    # whether `prioritise`'s FALLBACK would also fail, so marking every
+    # model_sonnet-primary task broken off `find` alone would silently skip
+    # a `prioritise`/`act` call that GPT-OSS could still have answered
+    # (defeating CLAUDE.md §6's fallback rule for those three tasks). A pair
+    # is added only once GATEWAY.CALL() itself -- which tries the fallback
+    # internally when one is configured -- has exhausted it and returned
+    # "unavailable" for that exact pair.
+    dead_role_pairs: set[tuple[str, str | None]] = dataclass_field(default_factory=set)
+    origin_counts: dict[str, int] = dataclass_field(default_factory=dict)
+    _seq_counters: dict[str, int] = dataclass_field(default_factory=dict)
+
+    def next_seq(self, task: str) -> tuple[int, int]:
+        k = self._seq_counters.get(task, 0)
+        self._seq_counters[task] = k + 1
+        return 2 * k + 1, 2 * k + 2
+
+    def call_ctx(self) -> CallContext:
+        return CallContext(
+            run_id=self.run_id, engagement_id=self.engagement_id, node_name=self.node_name,
+            execution_key=self.execution_key, actor=self.actor,
+            pii_columns_masked=self.pii_columns_masked, pii_whitelist=[],
+        )
+
+
+@dataclass(frozen=True)
+class NarrationOutcome:
+    origin: str  # model | model_repaired | fallback_invalid | fallback_unavailable
+    parsed: dict | None
+    call_ids: list[str]
+    served_model_version: str | None
+    violations_payload: list[dict] | None
+
+
+def _generation_line(generation: int) -> str:
+    if not generation:
+        return ""
+    return f"Regeneration request: write a fresh version. Generation {generation}."
+
+
+def _validate_field(
+    text: str, table: dict[str, PlaceholderEntry], *, field: str, allowed_identifiers: Iterable[str] = (),
+    require_coverage: bool = False, required_placeholders: Iterable[str] | None = None,
+) -> list[dict]:
+    result = validate_prose(
+        text, table, field=field, origin="model", allowed_identifiers=allowed_identifiers,
+        require_coverage=require_coverage, required_placeholders=required_placeholders,
+    )
+    return [
+        {"rule_id": v.rule_id, "field": field, "excerpt": (v.text or v.message)[:80]}
+        for v in result.violations
+    ]
+
+
+def _generate_item(
+    rc: RunnerContext, *, task: str, payload: dict, schema: dict, extra_params: dict,
+    validate_fn: Callable[[dict], tuple[bool, list[dict]]],
+) -> NarrationOutcome:
+    role = NODE_MODELS[task]
+    pair = (role, FALLBACK_ROLE.get(task))
+    if pair in rc.dead_role_pairs:
+        # Circuit breaker (§3.5): this exact primary/fallback pair already
+        # returned "unavailable" once this narrate() execution -- no call,
+        # no llm_calls row.
+        return NarrationOutcome("fallback_unavailable", None, [], None, None)
+
+    seq_gen, seq_repair = rc.next_seq(task)
+    ptver = rc.prompts.template_set_version()
+    messages = rc.prompts.render_task(
+        task, payload_json=_canonical_json(payload), generation_line=_generation_line(rc.generation),
+        **extra_params,
+    )
+    result = rc.gateway.call(
+        task=task, seq=seq_gen, messages=messages, desired_params=TASK_PROFILES[task].desired_params,
+        schema=schema, ctx=rc.call_ctx(), prompt_template_id=f"narration/{task}", prompt_template_version=ptver,
+    )
+    if result.status == "unavailable":
+        rc.dead_role_pairs.add(pair)
+        return NarrationOutcome("fallback_unavailable", None, [result.call_id], None, None)
+
+    call_ids = [result.call_id]
+    if result.status == "ok":
+        is_valid, violations = validate_fn(result.parsed)
+        if is_valid:
+            return NarrationOutcome("model", result.parsed, call_ids, result.served_model_version, None)
+    else:
+        violations = [{"rule_id": "N-SCHEMA", "field": None, "excerpt": (result.error or "")[:80]}]
+
+    repair_messages = rc.prompts.render_repair(
+        task, violations_json=_canonical_json(violations), previous_output=result.text or "",
+    )
+    repair_result = rc.gateway.call(
+        task=task, seq=seq_repair, messages=repair_messages, desired_params=TASK_PROFILES[task].desired_params,
+        schema=schema, ctx=rc.call_ctx(), prompt_template_id=f"narration/{task}/repair",
+        prompt_template_version=ptver,
+    )
+    call_ids.append(repair_result.call_id)
+    if repair_result.status == "unavailable":
+        rc.dead_role_pairs.add(pair)
+        return NarrationOutcome("fallback_unavailable", None, call_ids, None, None)
+    if repair_result.status == "ok":
+        is_valid2, violations2 = validate_fn(repair_result.parsed)
+        if is_valid2:
+            return NarrationOutcome(
+                "model_repaired", repair_result.parsed, call_ids, repair_result.served_model_version, None,
+            )
+        violations = violations2
+    else:
+        violations = [{"rule_id": "N-SCHEMA", "field": None, "excerpt": (repair_result.error or "")[:80]}]
+
+    return NarrationOutcome("fallback_invalid", None, call_ids, None, violations)
+
+
+def _used_placeholder_names(texts: list[str], table: dict[str, PlaceholderEntry]) -> set[str]:
+    used: set[str] = set()
+    for t in texts:
+        for span in scan_placeholders(t or ""):
+            if span.valid_syntax and span.name in table:
+                used.add(span.name)
+    return used
+
+
+def _persist(
+    rc: RunnerContext, *, target_kind: str, target_id: str, field: str, origin: str,
+    table: dict[str, PlaceholderEntry], text: str | None = None, list_text: list[str] | None = None,
+    call_ids: list[str], served_model_version: str | None, violations_payload: list[dict] | None,
+) -> str:
+    now = rc.clock()
+    nid = narrative_id(rc.run_id, target_kind, target_id, field)
+    if origin in ("model", "model_repaired"):
+        texts = list_text if list_text is not None else [text]
+        for t in texts:
+            render(t, table)  # defensive: validate_prose must guarantee this succeeds (CLAUDE.md NN14)
+        used = _used_placeholder_names(texts, table)
+        sources = [
+            {"placeholder": f"{{{table[n].cls}:{n}}}", "source_field": table[n].source_field, "unit": table[n].unit}
+            for n in sorted(used)
+        ]
+        template_text = _canonical_json(list_text) if list_text is not None else text
+    else:
+        sources = []
+        template_text = None
+    row = {
+        "narrative_id": nid, "run_id": rc.run_id, "engagement_id": rc.engagement_id,
+        "target_kind": target_kind, "target_id": target_id, "field": field,
+        "version": rc.generation + 1, "generation": rc.generation, "origin": origin,
+        "template_text": template_text, "sources": sources, "call_ids": call_ids,
+        "served_model_version": served_model_version, "violations": violations_payload,
+        "updated_by": "model" if origin in ("model", "model_repaired") else "system",
+        "updated_at": now,
+    }
+    rc.persistence.upsert_narrative(row)
+    rc.origin_counts[origin] = rc.origin_counts.get(origin, 0) + 1
+    return nid
+
+
+# ── task-specific narrate_* functions ───────────────────────────────────────
+
+
+def narrate_profile(rc: RunnerContext, state, skill) -> str | None:
+    if not getattr(state, "profile_result", None):
+        return None
+    payload, table = build_profile_payload(state)
+    schema = profile_narrative_schema()
+
+    def validate_fn(parsed: dict) -> tuple[bool, list[dict]]:
+        violations: list[dict] = []
+        for p in parsed.get("paragraphs", []):
+            violations += _validate_field(p, table, field="profile_paragraph")
+        return not violations, violations
+
+    outcome = _generate_item(rc, task="profile", payload=payload, schema=schema, extra_params={}, validate_fn=validate_fn)
+    paragraphs = outcome.parsed.get("paragraphs") if outcome.parsed else None
+    return _persist(
+        rc, target_kind="profile", target_id="run", field="profile", origin=outcome.origin, table=table,
+        list_text=paragraphs, call_ids=outcome.call_ids, served_model_version=outcome.served_model_version,
+        violations_payload=outcome.violations_payload,
+    )
+
+
+def _allowed_identifiers(finding: dict) -> set[str]:
+    ids = set()
+    for key in ("test_id", "control_id", "risk_id"):
+        value = finding.get(key)
+        if value:
+            ids.add(value)
+    return ids
+
+
+def narrate_finding(rc: RunnerContext, finding: dict, *, skill, period: tuple[str, str] | None) -> str:
+    payload, table = build_finding_payload(finding, skill=skill, period=period)
+    key = finding_key(finding)
+    schema = finding_narration_schema(key)
+    allowed = _allowed_identifiers(finding)
+    # §3.2's own coverage rule: "observation must use every non-null cited
+    # metric" -- `metrics_cited` only, never the threshold refs, exposure
+    # amount or period dates `table` also carries (those exist so the model
+    # MAY use them, not so it MUST); `validate_prose`'s own default (every
+    # non-null table entry) would over-require coverage of all of those too.
+    cited_names = frozenset(name for name in (finding.get("metrics_cited") or {}) if name in table)
+
+    def validate_fn(parsed: dict) -> tuple[bool, list[dict]]:
+        violations = _validate_field(
+            parsed.get("observation", ""), table, field="observation", allowed_identifiers=allowed,
+            require_coverage=True, required_placeholders=cited_names,
+        )
+        violations += _validate_field(parsed.get("recommendation", ""), table, field="recommendation", allowed_identifiers=allowed)
+        for q in parsed.get("management_questions", []):
+            violations += _validate_field(q, table, field="question", allowed_identifiers=allowed)
+        return not violations, violations
+
+    outcome = _generate_item(rc, task="find", payload=payload, schema=schema, extra_params={}, validate_fn=validate_fn)
+    finding_id = finding.get("finding_id") or finding.get("candidate_id") or key
+    parsed = outcome.parsed or {}
+    observation_id = _persist(
+        rc, target_kind="finding", target_id=finding_id, field="observation", origin=outcome.origin, table=table,
+        text=parsed.get("observation"), call_ids=outcome.call_ids, served_model_version=outcome.served_model_version,
+        violations_payload=outcome.violations_payload,
+    )
+    _persist(
+        rc, target_kind="finding", target_id=finding_id, field="recommendation", origin=outcome.origin, table=table,
+        text=parsed.get("recommendation"), call_ids=outcome.call_ids, served_model_version=outcome.served_model_version,
+        violations_payload=outcome.violations_payload,
+    )
+    _persist(
+        rc, target_kind="finding", target_id=finding_id, field="management_questions", origin=outcome.origin,
+        table=table, list_text=parsed.get("management_questions"), call_ids=outcome.call_ids,
+        served_model_version=outcome.served_model_version, violations_payload=outcome.violations_payload,
+    )
+    return observation_id
+
+
+def narrate_synthesis(rc: RunnerContext, findings: list[dict], *, skill) -> tuple[list[dict], dict[str, dict]]:
+    if not findings:
+        return [], {}
+    payload, tables = build_synthesis_payload(findings, skill=skill)
+    keys = [finding_key(f) for f in findings]
+    schema = finding_synthesis_schema(keys)
+    findings_by_key = {finding_key(f): f for f in findings}
+    allowed = {f.get("test_id") for f in findings if f.get("test_id")}
+
+    def validate_fn(parsed: dict) -> tuple[bool, list[dict]]:
+        violations: list[dict] = []
+        struct = validate_themes(parsed.get("themes", []), valid_finding_keys=keys)
+        violations += [{"rule_id": v.rule_id, "field": "themes", "excerpt": v.message[:80]} for v in struct]
+        for theme in parsed.get("themes", []):
+            member_keys = theme.get("finding_keys", [])
+            theme_table: dict[str, PlaceholderEntry] = {}
+            for k in member_keys:
+                theme_table.update(tables.get(k, {}))
+            violations += _validate_field(theme.get("title", ""), theme_table, field="theme_title", allowed_identifiers=allowed)
+            violations += _validate_field(theme.get("summary", ""), theme_table, field="theme_summary", allowed_identifiers=allowed)
+            violations += _validate_field(
+                theme.get("root_cause_hypothesis", ""), theme_table, field="root_cause", allowed_identifiers=allowed,
+            )
+            for robs in theme.get("review_observations", []):
+                violations += _validate_field(robs, theme_table, field="review_observation", allowed_identifiers=allowed)
+        for prop in parsed.get("severity_proposals", []):
+            table = tables.get(prop.get("finding_key"), {})
+            violations += _validate_field(prop.get("reason", ""), table, field="rationale", allowed_identifiers=allowed)
+        return not violations, violations
+
+    outcome = _generate_item(
+        rc, task="find_synthesis", payload=payload, schema=schema, extra_params={}, validate_fn=validate_fn,
+    )
+
+    themes_out: list[dict] = []
+    severity_proposals: dict[str, dict] = {}
+    if outcome.origin in ("model", "model_repaired"):
+        parsed = outcome.parsed
+        for ordinal, theme in enumerate(parsed.get("themes", []), start=1):
+            theme_id = f"{rc.run_id}:G{rc.generation}:TH{ordinal}"
+            member_keys = theme.get("finding_keys", [])
+            finding_ids = [findings_by_key[k]["finding_id"] for k in member_keys if k in findings_by_key]
+            theme_table: dict[str, PlaceholderEntry] = {}
+            for k in member_keys:
+                theme_table.update(tables.get(k, {}))
+            _persist(
+                rc, target_kind="theme", target_id=theme_id, field="title", origin=outcome.origin, table=theme_table,
+                text=theme.get("title", ""), call_ids=outcome.call_ids, served_model_version=outcome.served_model_version,
+                violations_payload=None,
+            )
+            _persist(
+                rc, target_kind="theme", target_id=theme_id, field="summary", origin=outcome.origin, table=theme_table,
+                text=theme.get("summary", ""), call_ids=outcome.call_ids, served_model_version=outcome.served_model_version,
+                violations_payload=None,
+            )
+            _persist(
+                rc, target_kind="theme", target_id=theme_id, field="root_cause", origin=outcome.origin, table=theme_table,
+                text=theme.get("root_cause_hypothesis", ""), call_ids=outcome.call_ids,
+                served_model_version=outcome.served_model_version, violations_payload=None,
+            )
+            review_observations = theme.get("review_observations", [])
+            if review_observations:
+                _persist(
+                    rc, target_kind="theme", target_id=theme_id, field="review_observations", origin=outcome.origin,
+                    table=theme_table, list_text=review_observations, call_ids=outcome.call_ids,
+                    served_model_version=outcome.served_model_version, violations_payload=None,
+                )
+            themes_out.append(
+                {"theme_id": theme_id, "generation": rc.generation, "ordinal": ordinal, "finding_ids": finding_ids}
+            )
+        for prop in parsed.get("severity_proposals", []):
+            fk = prop.get("finding_key")
+            finding = findings_by_key.get(fk)
+            if finding is not None and prop.get("proposed_severity") != finding.get("severity"):
+                severity_proposals[fk] = {
+                    "proposed_severity": prop.get("proposed_severity"),
+                    "proposed_severity_reason": prop.get("reason"),
+                }
+    else:
+        # §3.5: "synthesis -> no themes" on fallback -- one narrative row
+        # records why, at run scope (no theme_id yet exists to attach it to).
+        _persist(
+            rc, target_kind="theme", target_id="run", field="summary", origin=outcome.origin, table={},
+            call_ids=outcome.call_ids, served_model_version=None, violations_payload=outcome.violations_payload,
+        )
+
+    return themes_out, severity_proposals
+
+
+def _keyed_ids_by_target(items: list[dict]) -> dict[str, str]:
+    return {finding_key(it): (it.get("finding_id") or it.get("candidate_id") or finding_key(it)) for it in items}
+
+
+def narrate_priority(rc: RunnerContext, items: list[dict], *, skill, period: tuple[str, str] | None) -> dict[str, str]:
+    if not items:
+        return {}
+    payload, tables = build_priority_payload(items, skill=skill, period=period)
+    keys = [finding_key(it) for it in items]
+    schema = priority_rationale_schema(keys)
+
+    def validate_fn(parsed: dict) -> tuple[bool, list[dict]]:
+        violations: list[dict] = []
+        seen: set[str] = set()
+        for entry in parsed.get("items", []):
+            k = entry.get("key")
+            if k in seen:
+                violations.append({"rule_id": "N-X1", "field": "items", "excerpt": f"duplicate key {k}"[:80]})
+                continue
+            seen.add(k)
+            violations += _validate_field(entry.get("rationale", ""), tables.get(k, {}), field="rationale")
+        missing = set(keys) - seen
+        if missing:
+            violations.append({"rule_id": "N-X1", "field": "items", "excerpt": f"missing key(s) {sorted(missing)}"[:80]})
+        return not violations, violations
+
+    outcome = _generate_item(rc, task="prioritise", payload=payload, schema=schema, extra_params={}, validate_fn=validate_fn)
+    by_key = {e["key"]: e.get("rationale") for e in (outcome.parsed or {}).get("items", [])} if outcome.parsed else {}
+    out: dict[str, str] = {}
+    for key, target_id in _keyed_ids_by_target(items).items():
+        out[target_id] = _persist(
+            rc, target_kind="finding", target_id=target_id, field="rationale", origin=outcome.origin,
+            table=tables.get(key, {}), text=by_key.get(key), call_ids=outcome.call_ids,
+            served_model_version=outcome.served_model_version, violations_payload=outcome.violations_payload,
+        )
+    return out
+
+
+def narrate_remediation(rc: RunnerContext, items: list[dict], *, skill, period: tuple[str, str] | None) -> dict[str, str]:
+    if not items:
+        return {}
+    payload, tables = build_remediation_payload(items, skill=skill, period=period)
+    keys = [finding_key(it) for it in items]
+    schema = remediation_schema(keys)
+
+    def validate_fn(parsed: dict) -> tuple[bool, list[dict]]:
+        violations: list[dict] = []
+        seen: set[str] = set()
+        for entry in parsed.get("items", []):
+            k = entry.get("key")
+            if k in seen:
+                violations.append({"rule_id": "N-X1", "field": "items", "excerpt": f"duplicate key {k}"[:80]})
+                continue
+            seen.add(k)
+            # No dedicated "remediation" FIELD_LENGTH_CAPS entry -- reuses
+            # the "recommendation" field's rules (same 600-char cap, same
+            # observation-type language rules do NOT apply, matching how a
+            # management action reads: an instruction, not a finding).
+            violations += _validate_field(entry.get("remediation", ""), tables.get(k, {}), field="recommendation")
+        missing = set(keys) - seen
+        if missing:
+            violations.append({"rule_id": "N-X1", "field": "items", "excerpt": f"missing key(s) {sorted(missing)}"[:80]})
+        return not violations, violations
+
+    outcome = _generate_item(rc, task="act", payload=payload, schema=schema, extra_params={}, validate_fn=validate_fn)
+    by_key = {e["key"]: e.get("remediation") for e in (outcome.parsed or {}).get("items", [])} if outcome.parsed else {}
+    out: dict[str, str] = {}
+    for key, target_id in _keyed_ids_by_target(items).items():
+        out[target_id] = _persist(
+            rc, target_kind="finding", target_id=target_id, field="remediation", origin=outcome.origin,
+            table=tables.get(key, {}), text=by_key.get(key), call_ids=outcome.call_ids,
+            served_model_version=outcome.served_model_version, violations_payload=outcome.violations_payload,
+        )
+    return out
+
+
+def narrate_exec_summary(rc: RunnerContext, state, findings: list[dict], metrics: dict[str, dict], *, themes: list[dict] = ()) -> str | None:
+    built = build_exec_summary_payload(state, findings, metrics, themes=themes)
+    if built is None:  # G10: zero rule findings -- no call, the deterministic clean-run text is used at export
+        return None
+    payload, table = built
+    schema = exec_summary_schema()
+
+    def validate_fn(parsed: dict) -> tuple[bool, list[dict]]:
+        violations: list[dict] = []
+        paragraphs = parsed.get("paragraphs", [])
+        for p in paragraphs:
+            violations += _validate_field(p, table, field="exec_paragraph")
+        used = _used_placeholder_names(paragraphs, table)
+        required = {"run_finding_count"}
+        headline = table.get("run_exposure_headline")
+        if headline is not None and headline.value is not None:
+            required.add("run_exposure_headline")
+        missing = required - used
+        if missing:
+            violations.append({"rule_id": "N-C1", "field": "paragraphs", "excerpt": f"missing {sorted(missing)}"[:80]})
+        return not violations, violations
+
+    outcome = _generate_item(rc, task="export_summary", payload=payload, schema=schema, extra_params={}, validate_fn=validate_fn)
+    paragraphs = outcome.parsed.get("paragraphs") if outcome.parsed else None
+    return _persist(
+        rc, target_kind="run", target_id="run", field="exec_summary", origin=outcome.origin, table=table,
+        list_text=paragraphs, call_ids=outcome.call_ids, served_model_version=outcome.served_model_version,
+        violations_payload=outcome.violations_payload,
+    )
+
+
+def narrate_captions(rc: RunnerContext, charts: list[dict], metrics: dict[str, dict]) -> dict[str, str]:
+    if not charts:
+        return {}
+    payload, tables = build_caption_payload(charts, metrics)
+    chart_ids = [c["chart_id"] for c in charts]
+    schema = chart_captions_schema(chart_ids)
+
+    def validate_fn(parsed: dict) -> tuple[bool, list[dict]]:
+        violations: list[dict] = []
+        seen: set[str] = set()
+        for entry in parsed.get("captions", []):
+            cid = entry.get("chart_id")
+            if cid in seen:
+                violations.append({"rule_id": "N-X1", "field": "captions", "excerpt": f"duplicate chart_id {cid}"[:80]})
+                continue
+            seen.add(cid)
+            violations += _validate_field(entry.get("caption", ""), tables.get(cid, {}), field="caption")
+        missing = set(chart_ids) - seen
+        if missing:
+            violations.append({"rule_id": "N-X1", "field": "captions", "excerpt": f"missing chart id(s) {sorted(missing)}"[:80]})
+        return not violations, violations
+
+    outcome = _generate_item(rc, task="export_caption", payload=payload, schema=schema, extra_params={}, validate_fn=validate_fn)
+    by_id = {e["chart_id"]: e.get("caption") for e in (outcome.parsed or {}).get("captions", [])} if outcome.parsed else {}
+    out: dict[str, str] = {}
+    for cid in chart_ids:
+        out[cid] = _persist(
+            rc, target_kind="chart", target_id=cid, field="caption", origin=outcome.origin, table=tables.get(cid, {}),
+            text=by_id.get(cid), call_ids=outcome.call_ids, served_model_version=outcome.served_model_version,
+            violations_payload=outcome.violations_payload,
+        )
+    return out
+
+
+# ── the one resolution `act` needs today (§4.6/§6.4's full cross-target
+# `effective_prose` resolver is WP N10's job; this is a narrow, local
+# stand-in for the single case this WP's `act` change requires) ────────────
+
+
+def effective_remediation_text(
+    finding: dict, narratives_by_target: dict[tuple, dict], *, skill, period: tuple[str, str] | None,
+) -> str | None:
+    """§2's `act` change: "An action's description is the effective
+    remediation draft, not the raw recommendation". `narratives_by_target`
+    is `{(target_kind, target_id, field): row}` for this run's own
+    `get_narratives()` -- built once by the caller, not re-queried per
+    finding. Falls back to the finding's own persisted recommendation
+    (narration off, or this item's remediation draft never validated) --
+    the same fallback `narrate_remediation` itself falls back to when there
+    is nothing else to show."""
+    finding_id = finding.get("finding_id")
+    row = narratives_by_target.get(("finding", finding_id, "remediation")) if finding_id else None
+    if row is not None and row.get("origin") in ("model", "model_repaired") and row.get("template_text"):
+        table = build_finding_table(finding, skill=skill, period=period)
+        return render(row["template_text"], table)
+    return finding.get("recommendation")

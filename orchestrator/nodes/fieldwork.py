@@ -43,7 +43,9 @@ from orchestrator.explorer.profile import load_repo_pii_flags, profile_source
 from orchestrator import exposure
 from orchestrator.findings import build_findings
 from orchestrator.frames import build_row_snapshots, frame_parquet_bytes, sha256_bytes
+from orchestrator.narration.runner import effective_remediation_text
 from orchestrator.nodes.context import NodeContext
+from orchestrator.nodes.narration import narrate
 from orchestrator.populations import PopulationContext, build_populations
 from orchestrator.pptx_export import generate_pptx, load_catalogue_rows
 from orchestrator.signoff_policy import SELF_APPROVED_LABEL
@@ -758,7 +760,14 @@ def prioritise(ctx: NodeContext, state: RunState) -> RunState:
 
 def act(ctx: NodeContext, state: RunState) -> RunState:
     """One draft management action per finding (CLAUDE.md build brief P3 §2).
-    priority_rationale stays empty -- narration is a P6 deliverable.
+    An action's `description` is the EFFECTIVE remediation draft (P6 WP N7,
+    docs/specs/P6_narration_design.md §2/§4.6): `narrate` (now running just
+    before this node, CLAUDE.md §4.2's amended fieldwork order) already
+    wrote one `narratives` row per finding for field `remediation`; this
+    node reads it back rather than the raw rule-authored `recommendation` --
+    falling back to that same `recommendation` when narration is off, or
+    this finding's own remediation draft never validated
+    (`effective_remediation_text`'s own fallback).
 
     "Generate management actions after review" (CLAUDE.md §5 UI item 4,
     NN13): unchecked at run setup means state.options["generate_management_
@@ -776,6 +785,9 @@ def act(ctx: NodeContext, state: RunState) -> RunState:
         )
 
     findings = ctx.persistence.list_findings(state.run_id)
+    narratives_by_target = {
+        (r["target_kind"], r["target_id"], r["field"]): r for r in ctx.persistence.get_narratives(state.run_id)
+    }
 
     actions = [
         {
@@ -785,7 +797,9 @@ def act(ctx: NodeContext, state: RunState) -> RunState:
             "engagement_id": state.engagement_id,
             "skill_id": state.skill_id,
             "title": f["title"],
-            "description": f.get("recommendation"),
+            "description": effective_remediation_text(
+                f, narratives_by_target, skill=ctx.skill, period=state.audit_period
+            ),
             "owner": None,
             "risk": f["severity"],
             "status": "draft",
@@ -1111,6 +1125,10 @@ NODES_FOR: dict[str, dict[str, list[tuple[str, object]]]] = {
             ("classify", classify),
             ("find", find),
             ("prioritise", prioritise),
+            # P6 WP N7 (docs/specs/P6_narration_design.md §2): `narrate` runs
+            # after `prioritise` and before `act` so `act` can read back the
+            # remediation draft `narrate` just wrote (above).
+            ("narrate", narrate),
             ("act", act),
         ],
         "export": [("export", export)],

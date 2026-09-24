@@ -226,6 +226,17 @@ class LLMGateway:
         )
         if cache_matches:
             cached = cache_matches[0]
+            # A cache hit must hand the caller a PARSED object exactly like a
+            # live "ok" response does (WP N7's narration runner validates and
+            # renders from `result.parsed`, never re-parsing `result.text`
+            # itself) -- a row only ever reaches `llm_cache` after passing
+            # this same schema check once already (`_call_live`'s `put_cache`
+            # only fires on the success path), so re-parsing it here should
+            # never fail; if it somehow did, that is a genuine cache
+            # corruption bug worth surfacing as `parsed=None`, not masking.
+            parsed = None
+            if schema is not None and cached["response_text"]:
+                parsed, _err = _parse_and_validate(cached["response_text"], schema)
             return self._log_and_return(
                 task=task, seq=seq, role=role, endpoint=endpoint, messages=final_messages,
                 params_sent=sent, params_dropped=dropped, ctx=ctx, transport_attempt=1,
@@ -233,7 +244,7 @@ class LLMGateway:
                 served_model_version=cached["served_model_version"], response_text=cached["response_text"],
                 finish_reason=cached["finish_reason"], cache_hit=True, cache_key=cached["cache_key"],
                 cached_from_call_id=cached["source_call_id"], prompt_sha256=prompt_sha256, params_json=params_json,
-                schema=schema, prompt_template_id=prompt_template_id,
+                schema=schema, parsed=parsed, prompt_template_id=prompt_template_id,
                 prompt_template_version=prompt_template_version,
             )
 
