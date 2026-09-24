@@ -10,7 +10,10 @@ from typing import Any, Literal
 from orchestrator.errors import NodeContractViolation, NotJsonSafe
 from orchestrator.timeutil import is_canonical_date, is_canonical_ts
 
-RunKind = Literal["fieldwork", "sensing", "assessment", "planning"]
+RunKind = Literal[
+    "fieldwork", "sensing", "assessment", "planning",
+    "design_assessment", "reporting", "evidence",
+]
 Mode = Literal["playbook", "explorer"]
 Phase = Literal["plan", "execute", "export"]
 Status = Literal[
@@ -23,7 +26,10 @@ Status = Literal[
     "interrupted",
 ]
 
-RUN_KINDS: tuple[str, ...] = ("fieldwork", "sensing", "assessment", "planning")
+RUN_KINDS: tuple[str, ...] = (
+    "fieldwork", "sensing", "assessment", "planning",
+    "design_assessment", "reporting", "evidence",
+)
 MODES: tuple[str, ...] = ("playbook", "explorer")
 PHASES: tuple[str, ...] = ("plan", "execute", "export")
 STATUSES: tuple[str, ...] = (
@@ -35,7 +41,13 @@ STATUSES: tuple[str, ...] = (
     "failed",
     "interrupted",
 )
-ENGAGEMENT_SCOPED_KINDS: tuple[str, ...] = ("fieldwork", "assessment", "planning")
+# Every run_kind is engagement-scoped except `sensing`, which is
+# corpus-scoped and continuous rather than tied to one engagement
+# (LIFECYCLE_design.md §2.2; CLAUDE.md §4.8/§4.10 item 2).
+ENGAGEMENT_SCOPED_KINDS: tuple[str, ...] = (
+    "fieldwork", "assessment", "planning",
+    "design_assessment", "reporting", "evidence",
+)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -84,6 +96,12 @@ class RunState:
     findings: list[dict] = field(default_factory=list)
     management_actions: list[dict] = field(default_factory=list)
     exports: dict = field(default_factory=dict)
+    # Refs/scalars a lifecycle run_kind's own nodes write, e.g. {"kind":
+    # "sensing", "snapshot_id": ..., "candidate_risk_ids": [...], "coverage":
+    # {...}, "stop_reason": ...} (LIFECYCLE_design.md §2.3). Large content
+    # lives in the module's own tables, keyed by run_id, not here. Unused by
+    # fieldwork.
+    module_output: dict = field(default_factory=dict)
     signoff: dict | None = None  # approver, timestamp, self_approved, sod_enforced (orchestrator/signoff_policy.py)
     status_reason: str | None = None
 
@@ -120,6 +138,7 @@ NODE_OWNED: frozenset[str] = frozenset(
         "findings",
         "management_actions",
         "exports",
+        "module_output",
         "profile_narrative",
         "classification_reasoning",
         "finding_narratives",

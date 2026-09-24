@@ -1752,6 +1752,22 @@ class DeltaPersistence:
             )
             return _fetchall_dicts(cur)
 
+    def sum_llm_call_tokens_since(self, since_iso: str) -> int:
+        # LIFECYCLE_design.md §2.6 monthly admission: one query, never
+        # polled, at the start of a lifecycle run that calls a model.
+        # created_at is a canonical ISO-8601 UTC string (fixed-width,
+        # zero-padded), so a lexicographic >= comparison is a correct time
+        # comparison without parsing.
+        with self._cursor_ctx() as conn:
+            cur = self._execute(
+                conn,
+                f"SELECT COALESCE(SUM(total_tokens), 0) AS total FROM {self._table('llm_calls')} "
+                "WHERE created_at >= :since",
+                {"since": since_iso},
+            )
+            row = _fetchone_dict(cur)
+        return int(row["total"]) if row else 0
+
     # ── row-level LLM classification (independent review item 4) ───────────
 
     def write_classification_results(self, run_id: str, rows: list[dict]) -> None:

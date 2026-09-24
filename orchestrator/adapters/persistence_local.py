@@ -1337,6 +1337,22 @@ class LocalPersistence:
             self._release(conn)
         return [_llm_call_row_from_db(dict(r)) for r in rows]
 
+    def sum_llm_call_tokens_since(self, since_iso: str) -> int:
+        # LIFECYCLE_design.md §2.6 monthly admission: one query, never
+        # polled, at the start of a lifecycle run that calls a model.
+        # created_at is a canonical ISO-8601 UTC string (fixed-width,
+        # zero-padded), so a lexicographic >= comparison is a correct time
+        # comparison without parsing.
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT COALESCE(SUM(total_tokens), 0) AS total FROM llm_calls WHERE created_at >= ?",
+                (since_iso,),
+            ).fetchone()
+        finally:
+            self._release(conn)
+        return int(row["total"])
+
     # ── row-level LLM classification (independent review item 4) ───────────
 
     def write_classification_results(self, run_id: str, rows: list[dict]) -> None:
