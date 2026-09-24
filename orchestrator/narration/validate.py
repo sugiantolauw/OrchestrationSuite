@@ -84,7 +84,13 @@ _TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 _NUMBER_TOKEN_RE = re.compile(
     r"(?<![A-Za-z0-9_.])\$?\d[\d,]*(?:\.\d+)?%?(?![A-Za-z0-9_])"
 )
-_PCT_ZERO_OR_100_RE = re.compile(r"\b(?:0(?:\.0+)?|100(?:\.0+)?)%")
+# The leading `(?<![\d.])` is load-bearing: without it, "42.0%" contains the
+# substring "0%" (the trailing digit of "42.0" immediately before the "%"),
+# which `\b0%` matches even though the rendered percentage is 42.0, not 0.
+# The lookbehind refuses to start a match on a digit that is itself preceded
+# by another digit or a decimal point, so only a genuine 0/100-valued
+# percentage (e.g. "0%", "0.0%", "100%", "100.00%") can match.
+_PCT_ZERO_OR_100_RE = re.compile(r"(?<![\d.])(?:0(?:\.0+)?|100(?:\.0+)?)%")
 
 
 @dataclass(frozen=True)

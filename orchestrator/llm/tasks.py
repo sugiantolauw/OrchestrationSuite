@@ -6,10 +6,11 @@ filter_params` is what actually decides which of them are sent for the task's
 resolved role (orchestrator.config.NODE_MODELS) -- this module never talks to
 capabilities.yaml itself.
 
-Only the two Explorer plan-node tasks are populated in this step; the
-narration tasks (`find`, `profile`, `prioritise`, `act`, `export_summary`,
-`export_caption`, `classify`, the judges) get profiles when their narration
-is built (§10 "Deferred")."""
+The two Explorer plan-node tasks, plus the eight narration tasks (P6 WP N5,
+docs/specs/P6_narration_design.md §4.1's routing/parameter table) are
+populated here. `classify` and the judges are not: `classify` builds its own
+`ai_query()`-shaped params inline (orchestrator.nodes.fieldwork), and the
+judge tasks are a later work package (§10 "Deferred")."""
 
 from __future__ import annotations
 
@@ -34,6 +35,62 @@ TASK_PROFILES: dict[str, TaskProfile] = {
     "plan_repair": TaskProfile(
         role="model_gpt_oss",
         desired_params={"max_tokens": 16000, "temperature": 0, "reasoning_effort": "medium"},
+        structured_output=True,
+        fallback=None,
+    ),
+
+    # ── narration tasks (P6 WP N5, docs/specs/P6_narration_design.md §4.1's
+    # own table). Every one returns a structured JSON object (one of the
+    # orchestrator.narration.schemas builders); `fallback` mirrors
+    # FALLBACK_ROLE below exactly -- profile/prioritise/act are
+    # auditor-edited prose in a consistent voice and may degrade to
+    # GPT-OSS (CLAUDE.md §6), everything else has none (never silently
+    # degrade what a CAO/executive reads verbatim, NN13). ─────────────────
+    "profile": TaskProfile(
+        role="model_sonnet",
+        desired_params={"max_tokens": 800, "temperature": 0},
+        structured_output=True,
+        fallback="model_gpt_oss",
+    ),
+    "find": TaskProfile(
+        role="model_sonnet",
+        desired_params={"max_tokens": 1500, "temperature": 0},
+        structured_output=True,
+        fallback=None,
+    ),
+    "find_synthesis": TaskProfile(
+        role="model_sonnet",
+        desired_params={"max_tokens": 3000, "temperature": 0},
+        structured_output=True,
+        fallback=None,
+    ),
+    "find_candidates": TaskProfile(
+        role="model_sonnet",
+        desired_params={"max_tokens": 4000, "temperature": 0},
+        structured_output=True,
+        fallback=None,
+    ),
+    "prioritise": TaskProfile(
+        role="model_sonnet",
+        desired_params={"max_tokens": 2000, "temperature": 0},
+        structured_output=True,
+        fallback="model_gpt_oss",
+    ),
+    "act": TaskProfile(
+        role="model_sonnet",
+        desired_params={"max_tokens": 3000, "temperature": 0},
+        structured_output=True,
+        fallback="model_gpt_oss",
+    ),
+    "export_summary": TaskProfile(
+        role="model_sonnet",
+        desired_params={"max_tokens": 1500, "temperature": 0},
+        structured_output=True,
+        fallback=None,
+    ),
+    "export_caption": TaskProfile(
+        role="model_gpt_oss",
+        desired_params={"max_tokens": 600, "temperature": 0, "reasoning_effort": "low"},
         structured_output=True,
         fallback=None,
     ),

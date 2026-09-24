@@ -254,6 +254,20 @@ def test_n_q2_negative_all_with_non_boundary_pct_in_sentence_is_flagged():
     assert "N-Q2" in _rule_ids(r)
 
 
+def test_n_q2_negative_42_0_pct_does_not_satisfy_the_0_or_100_exception():
+    # Regression: "42.0%" contains the substring "0%" (the trailing digit of
+    # "42.0" immediately before "%"), which an unanchored 0/100 regex would
+    # match even though the rendered value is 42.0, not 0. A trailing-zero
+    # non-boundary percentage must not silently excuse a universal
+    # quantifier.
+    table = dict(TABLE)
+    table["other_pct"] = PlaceholderEntry("other_pct", "%", 42.0)
+    r = validate_prose(
+        "All claims were reviewed, at {pct:other_pct} exception rate.", table, field="observation"
+    )
+    assert "N-Q2" in _rule_ids(r)
+
+
 # ---------------------------------------------------------------------------
 # N-S1: intent/causation language.
 # ---------------------------------------------------------------------------
