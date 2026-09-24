@@ -827,6 +827,20 @@ New dependencies: **none**.
 | Q9 | Should root-cause hypotheses appear in the PPTX (labelled "for discussion")? | Yes |
 | Q10 | Should rejected candidates be excluded from all exports (kept in Delta and on `/run/<id>` only)? | Yes |
 
+**Answers (2026-09-24).** The user decided the four questions that change the UI or how auditors work:
+- **Q2 (UI-1 to UI-4 on `/run/<id>`): approved, all four.**
+- **Q7 (`/workspace/tne` UI-5 to UI-7): approved.** That is the accepted-label chip, number sources in a hover tooltip, and the degraded label at run level only.
+- **Q4 (candidate severity): changed from the default. The auditor picks.**
+  - The model's proposed severity and its reason are shown.
+  - The auditor confirms or changes the severity with a `dcc.Dropdown` when accepting.
+  - Both the proposed and the decided severity are stored.
+- **Q3 (human edits): changed from the default. Auditors type numbers normally, and every number is checked.**
+  - Every number typed must equal the displayed rendering of a metric that the finding cites.
+  - If a number doesn't match, the edit is refused with a message naming the mismatched number.
+  - Every edit is recorded in `narrative_edits` with who, when and before/after.
+
+The coordinator adopted the stated defaults for Q1, Q5, Q6, Q8, Q9 and Q10. The user may revise them.
+
 **Risks**
 
 | # | Risk | Mitigation |

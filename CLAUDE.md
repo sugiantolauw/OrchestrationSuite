@@ -1954,6 +1954,18 @@ Asked how much the model should decide about findings at run time, the user chos
   an auditor accepts or rejects each at sign-off. Numbers are never written by the model.
 - NN2 is amended accordingly (§3). A purely rules-based finding set, with the model only writing
   prose, was declined as defeating the product's purpose.
+- **UI for review (user, 2026-09-24):**
+  - The run page `/run/<id>` gains four things, built from existing components only:
+    - a panel of model-written text with its number sources;
+    - an AI-proposed findings panel with Accept/Reject and a reason;
+    - sign-off blocked until every proposal is decided;
+    - a Regenerate button with a confirmation dialog.
+  - `/workspace/tne` gains two things:
+    - one "AI-proposed, accepted by <name>" chip on accepted findings;
+    - number sources as a hover tooltip.
+  - The "LLM unavailable" label appears once, at run level.
+- **The auditor sets the severity of an accepted proposal** with a dropdown. The model's proposed severity and reason are shown and stored alongside the decision.
+- **Auditors edit model text freely, but every typed number must equal a figure the finding cites**, or the edit is refused. Every edit is recorded (who, when, before/after).
 
 ### Further decisions from the user (2026-09-23)
 
