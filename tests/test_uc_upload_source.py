@@ -188,6 +188,32 @@ def test_non_upload_source_delegates_to_table_source_unchanged():
     assert [c[0] for c in calls] == ["resolve_version", "read_population", "row_count", "column_stats"]
 
 
+def test_catalogue_discovery_methods_delegate_to_table_source():
+    """list_tables/get_row_count/get_classification (orchestrator/service.py's
+    list_governed_tables/list_data_asset_cards, CLAUDE.md §5 UI item 3) are not
+    part of the DataSourceAdapter protocol this wrapper implements above --
+    they are UCTableDataSource-only catalogue calls that never touch
+    `bindings`. Regression test: service._uc_factory wraps every UC data
+    source in this class, so without __getattr__ delegation these three
+    silently vanished (getattr(..., None) -> "not available") the moment the
+    wrapper was introduced, breaking the data-asset cards on the UC backend."""
+
+    class _CatalogueTableSource:
+        def list_tables(self, catalog=None, schema=None):
+            return [{"fqn": "cat.sch.t1"}]
+
+        def get_row_count(self, fqn):
+            return 123
+
+        def get_classification(self, fqn):
+            return "PII"
+
+    ds = _ds(table_source=_CatalogueTableSource())
+    assert ds.list_tables() == [{"fqn": "cat.sch.t1"}]
+    assert ds.get_row_count("cat.sch.t1") == 123
+    assert ds.get_classification("cat.sch.t1") == "PII"
+
+
 def test_mixed_bindings_route_each_source_independently():
     """One Skill run can bind SOME sources to UC tables and others to
     uploaded files at once -- each must go to the right place."""

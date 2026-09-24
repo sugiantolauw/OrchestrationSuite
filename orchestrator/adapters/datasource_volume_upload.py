@@ -126,3 +126,16 @@ class VolumeUploadAwareDataSource:
         close = getattr(self.table_source, "close", None)
         if close is not None:
             close()
+
+    # ── Pass-through for UC-only extension methods ──────────────────────────
+    # list_tables/get_row_count/get_classification (orchestrator/service.py's
+    # list_governed_tables/list_data_asset_cards, CLAUDE.md §5 UI item 3) are
+    # not part of the DataSourceAdapter Protocol this class implements above
+    # -- they are UCTableDataSource-specific catalogue-discovery calls that
+    # never touch `bindings`, so there is nothing upload-aware to do for
+    # them. Without this, every UC-backend caller of the table_source built
+    # by service._uc_factory silently lost these methods the moment this
+    # wrapper was introduced (they are looked up with getattr(..., None) and
+    # treated as "not available"), which is the bug this delegates around.
+    def __getattr__(self, name: str):
+        return getattr(self.table_source, name)
