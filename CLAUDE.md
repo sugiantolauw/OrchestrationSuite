@@ -1270,6 +1270,27 @@ behind `KnowledgeSourceAdapter`; if an MCP-reached source such as Glean is appro
 becomes one implementation of that Protocol and nothing else in the codebase changes. Databricks Apps cannot compile C extensions at deploy time; if a dependency fails
 to install, vendor a `manylinux2014_x86_64` wheel and reference it explicitly.
 
+**Glean (user decision, 2026-09-23).** Glean is the organisation's knowledge platform: the source of
+company context on processes, policies and guidelines. The MCP connection to Glean is planned but
+still being organised, so plan for it now without depending on it:
+- `GleanKnowledgeSource` implements `KnowledgeSourceAdapter` (`search`, `fetch`). Its transport is
+  pluggable — an MCP transport once approved, and Glean's REST API if that is permitted sooner. MCP
+  client dependencies live only inside that adapter's package, are added only when approved, and
+  nothing else imports them. The UC Volume document drop remains the prototype implementation, and a
+  recorded-fixture fake is used in CI. Nothing here can reach Glean.
+- **Identity:** Glean enforces per-user document permissions, so calls must run as the requesting
+  auditor (on-behalf-of-user), never as a broad service identity that bypasses them (§9A.1).
+- **Provenance:** every retrieved passage is stored with document id, URL, version or last-modified
+  time and retrieval time. Citations are mandatory and G17-checked. Extractions are cached per
+  document version (§4.10 item 4).
+- **Consumers:** Risk Sensing and Risk Assessment (cited risks and impact), Audit Planning (process
+  and policy context for scope memos, RCMs and test steps), Explorer (policy context for the
+  objective), and threshold provenance — Glean can *propose* the policy reference for an analyst-set
+  threshold, but it becomes policy only when an auditor confirms it. Fieldwork `execute` never calls
+  Glean (NN2).
+- **Egress:** policy text enters prompts under the same aggregates-and-citations rules. Anything
+  classified as personal is excluded unless a Skill whitelists it (G15).
+
 ---
 
 ## 8. Phases
