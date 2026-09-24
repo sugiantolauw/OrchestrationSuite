@@ -309,6 +309,18 @@ class LLMGateway:
                 **common, transport_attempt=transport_attempt, outcome="unavailable", status="unavailable",
                 error_type="ModelUnavailable", error_message=str(exc),
             )
+        except LLMConfigError as exc:
+            # NN7: a 400 (a request this code built incorrectly) is a
+            # configuration bug, not a transient failure -- no retry, but
+            # the failed attempt must still leave a row before the same
+            # exception propagates to the node (independent review
+            # 2026-09-24 item 3; migration 008's outcome CHECK includes
+            # 'bad_request' precisely for this path).
+            self._log_and_return(
+                **common, transport_attempt=transport_attempt, outcome="bad_request", status="unavailable",
+                error_type="LLMConfigError", error_message=str(exc), _return=False,
+            )
+            raise
         except (RateLimited, TransientModelError) as exc:
             if transport_attempt >= 2:
                 # Give up: one row for this final attempt, outcome
