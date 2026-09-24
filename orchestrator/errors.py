@@ -157,6 +157,20 @@ class NonDraftFindingWouldBeDeleted(Exception):
         )
 
 
+class RunNotReady(Exception):
+    """Independent review 2026-09-24 item 5: start_audit_run refuses to
+    start a run while a required readiness check (Volume, warehouse,
+    configured source bindings, model endpoints) is failing. `failing_checks`
+    names each one, sanitized (never a raw internal exception) -- the same
+    discipline /ready itself uses."""
+
+    def __init__(self, failing_checks: list[str]):
+        self.failing_checks = list(failing_checks)
+        super().__init__(
+            "cannot start a run: the platform is not ready ({})".format(", ".join(self.failing_checks))
+        )
+
+
 class ConfiguredSourceUnavailable(Exception):
     """Independent review 2026-09-24 item 1: a contract source bound (via
     SOURCE_BINDINGS, orchestrator.source_bindings) to an exact Volume file

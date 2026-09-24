@@ -33,6 +33,7 @@ Public API (signatures kept stable for the UI to import against):
     propose_plan(ctx, *, skill_id, mode='playbook') -> dict
     health(ctx) -> dict
     ready(ctx) -> dict
+    readiness_report(ctx, force=False) -> dict
 
 `ORCH_BACKEND=local` (env) selects LocalPersistence + a local-file
 DataSourceAdapter for local/E2E runs (against synthetic_data/ by default) --
@@ -64,6 +65,7 @@ from orchestrator.adapters.persistence_delta import DeltaPersistence
 from orchestrator.adapters.persistence_local import LocalPersistence
 from orchestrator.config import Settings, load_settings
 from orchestrator.contract import ContractViolation, LocalFileDataSource
+from orchestrator.errors import RunNotReady
 from orchestrator.executor import ThreadExecutor
 from orchestrator.fingerprint import compute_fingerprint
 from orchestrator.frames import not_testable_flags, read_frame_parquet
@@ -121,6 +123,16 @@ class AppContext:
     # Defaults to NullTracing (a documented no-op) so every existing caller
     # that never passed one keeps behaving exactly as before this feature.
     tracing: Any = None
+    # Independent review 2026-09-24 items 3/5: the ModelClient a node's LLM
+    # calls, and /ready's model-endpoint checks, use. None on the local
+    # backend (never a real WorkspaceClient in local/test runs); a real
+    # DatabricksModelClient on the uc backend, built lazily.
+    model_client: Any = None
+    # Cached readiness prober (item 5) -- None until build_app_context wires
+    # it; service.ready() falls back to the un-cached, warehouse-only check
+    # when this is unset (keeps every existing direct AppContext(...)
+    # construction, e.g. in tests, working unchanged).
+    readiness: Any = None
 
 
 # ── construction ──────────────────────────────────────────────────────────────
@@ -217,6 +229,7 @@ def build_node_context(ctx: AppContext, state: RunState) -> NodeContext:
         clock=ctx.clock,
         export_storage=ctx.export_storage,
         backend=ctx.backend,
+        model_client=ctx.model_client,
     )
 
 
@@ -320,11 +333,30 @@ def build_app_context(env: dict | None = None) -> AppContext:
             )
 
         export_storage = VolumeExportStorage(volume_root=settings.volume) if settings.volume else None
+
+        # Independent review 2026-09-24 item 3/5: built once, lazily
+        # (DatabricksModelClient's own __init__ does no network I/O -- the
+        # WorkspaceClient is only constructed on the first real call), and
+        # shared by every node's LLMGateway and by /ready's model-endpoint
+        # checks.
+        from orchestrator.adapters.model_databricks import DatabricksModelClient
+
+        model_client = DatabricksModelClient()
+
         ctx = AppContext(
             settings=settings, persistence=persistence, skills_dir=skills_dir,
             data_source_factory=_uc_factory, export_storage=export_storage,
-            clock=clock, backend="uc", tracing=tracing,
+            clock=clock, backend="uc", tracing=tracing, model_client=model_client,
         )
+
+    source_bindings_config = _load_source_bindings_cached(settings.source_bindings_path) if settings.source_bindings_path else {}
+    from orchestrator.readiness import CachedReadiness
+
+    ctx.readiness = CachedReadiness(
+        persistence=ctx.persistence, export_storage=ctx.export_storage, settings=ctx.settings,
+        source_bindings_config=source_bindings_config, model_client=ctx.model_client, clock=clock,
+        ttl_s=getattr(settings, "readiness_cache_ttl_s", 120.0),
+    )
 
     worker_id = env.get("ORCH_WORKER_ID") or f"worker-{uuid.uuid4().hex[:8]}"
     executor = ThreadExecutor(
@@ -675,6 +707,18 @@ def start_audit_run(
     generate_management_actions: bool = True,
     jira_preview_requested: bool = False,
 ) -> str:
+    # Independent review 2026-09-24 item 5: a run refuses to start while a
+    # required readiness check is failing -- the same cached report /ready
+    # exposes, not a fresh probe on every click (cost -- CLAUDE.md §11 idle-
+    # cost incident). RunNotReady's message names only the sanitized check
+    # names, never raw internal exception text; app/src/run_setup.py's
+    # existing generic "Could not start the run: {exc}" handler in the
+    # run-summary-preview panel already shows it.
+    if ctx.readiness is not None:
+        report = ctx.readiness.get()
+        if not report.ready:
+            raise RunNotReady([c.name for c in report.failing()])
+
     skill_dir = _skill_dir_for(ctx, skill_id)
     skill = load_skill(skill_dir)
     skill.validate()
@@ -1289,7 +1333,20 @@ def ready(ctx: AppContext) -> dict:
     # the exception's own text (which can carry a connection string, a table
     # name, or other internal detail) is logged server-side only -- the
     # caller gets a generic status, never repr(exc) (CLAUDE.md P2/P3 gate
-    # review item 7).
+    # review item 7). Independent review 2026-09-24 item 5: when a cached
+    # readiness prober is wired (every real deployment), it also checks the
+    # Volume, configured source bindings and model endpoints, and the whole
+    # report is cached for readiness_cache_ttl_s -- re-probing the
+    # warehouse/Volume/model endpoints on every poll is exactly the shape of
+    # the §11 idle-cost incident. A caller with no `ctx.readiness` (an older
+    # direct AppContext(...) construction, e.g. in tests) falls back to the
+    # original warehouse-only check so nothing that worked before regresses.
+    if ctx.readiness is not None:
+        report = ctx.readiness.get()
+        payload = report.as_dict()
+        payload["backend"] = ctx.backend
+        return payload
+
     try:
         ctx.persistence.find_runs(["queued"])
         db_ok = True
@@ -1299,3 +1356,14 @@ def ready(ctx: AppContext) -> dict:
         detail = "database connectivity check failed"
         _LOG.exception("service.ready(): database connectivity check failed")
     return {"ready": db_ok, "backend": ctx.backend, "detail": detail}
+
+
+def readiness_report(ctx: AppContext, *, force: bool = False) -> dict:
+    """Independent review 2026-09-24 item 5: the same readiness report
+    `ready()` returns, but explicitly forceable (bypassing the cache) --
+    used by start_audit_run's pre-flight check, and callable directly by an
+    operator/test that wants a fresh read rather than whatever the cache
+    happens to hold."""
+    if ctx.readiness is None:
+        return {"ready": True, "checks": [], "checked_at": None}
+    return ctx.readiness.get(force=force).as_dict()

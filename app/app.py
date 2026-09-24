@@ -9,8 +9,11 @@ what it needs per request.
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
+
+_LOG = logging.getLogger(__name__)
 
 # Make both `app/` (for `import src...`, mirroring reference_app's layout)
 # and the repo root (for `import orchestrator...`) importable regardless of
@@ -152,6 +155,23 @@ def _start_executor_once() -> None:
     from orchestrator.executor import reap_orphaned_runs_with_leases
 
     reap_orphaned_runs_with_leases(ctx.persistence, now=ctx.clock())
+
+    # Independent review 2026-09-24 item 5: warm the readiness cache at App
+    # start and log (never raise on) anything that isn't ready -- a platform
+    # outage at deploy time must not prevent the App itself from coming up
+    # and serving /health; start_audit_run's own gate is what actually
+    # blocks a run.
+    if ctx.readiness is not None:
+        try:
+            report = ctx.readiness.get()
+            if not report.ready:
+                _LOG.warning(
+                    "App start: readiness check failing: %s",
+                    [c.name for c in report.failing()],
+                )
+        except Exception:
+            _LOG.exception("App start: readiness check raised")
+
     ctx.executor.start()
     _STARTED = True
 

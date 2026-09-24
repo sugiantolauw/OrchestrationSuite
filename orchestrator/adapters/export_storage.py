@@ -30,6 +30,17 @@ class LocalExportStorage:
     def exists(self, path: str) -> bool:
         return self._path(path).is_file()
 
+    def stat_root(self) -> dict:
+        """Independent review 2026-09-24 item 5: the cheap "is this storage
+        reachable" probe /ready uses. Local disk is never a real readiness
+        concern the way a mounted cloud Volume is (write() already creates
+        this directory lazily on first use) -- this creates it if it does
+        not exist yet rather than failing a run-start gate over an empty
+        exports directory nobody has written to yet."""
+        p = Path(self.root_dir)
+        p.mkdir(parents=True, exist_ok=True)
+        return {"path": str(p)}
+
 
 @dataclass
 class VolumeExportStorage:
@@ -82,3 +93,13 @@ class VolumeExportStorage:
             return True
         except Exception:
             return False
+
+    def stat_root(self) -> dict:
+        """Independent review 2026-09-24 item 5: the cheap "is the Volume
+        reachable" probe /ready uses -- a list of the Volume's own root
+        directory (never a read of a file's content). Raises on any
+        failure (no such Volume, no permission, network) -- the caller
+        (orchestrator.readiness) is responsible for catching and
+        sanitizing it, never this adapter."""
+        entries = list(self._client().files.list_directory_contents(self.volume_root))
+        return {"entry_count": len(entries)}
