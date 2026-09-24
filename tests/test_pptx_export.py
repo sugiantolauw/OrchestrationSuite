@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import hashlib
 import math
-import re
 
 import pytest
 from pptx import Presentation
@@ -196,57 +195,115 @@ def test_long_observation_text_is_measured_truncated_not_silently_overflowed(rea
 
 # ── G13-PPTX: every number on a slide equals a persisted value ─────────────
 
-_MONEY_RE = re.compile(r"\$[\d,]+(?:\.\d+)?")
 
+def test_g13_pptx_money_figures_match_the_specific_value_for_their_own_slide(real_deck):
+    """Independent review 2026-09-24 item 8 (D6): a set-membership check --
+    is this $ token equal to SOME persisted AUD value anywhere in the run --
+    cannot catch a figure that is real but placed on the WRONG slide (e.g.
+    finding A's exposure chip showing finding B's real, persisted amount).
+    Replaces that check with PLACEMENT: the exec summary and risk/exposure
+    callouts must equal the run's own headline; each Top Matters slide's
+    own chip and METRICS CITED table rows must equal THAT finding's own
+    values; each All Findings appendix row's Exposure cell must equal THAT
+    finding's own exposure_amount (matched by rule_id, never by position).
+    Slide indices are read off generate_pptx's own deterministic sequence,
+    the same one test_deck_slide_count_matches_the_stated_rule asserts."""
+    from orchestrator.pptx_export import _metric_value
 
-def _parse_money(token: str) -> float:
-    return float(token.replace("$", "").replace(",", ""))
-
-
-def test_g13_every_pptx_money_figure_equals_a_persisted_value(real_deck):
-    """Extracts every "$..." token from every text frame and every table
-    cell across the whole deck (CLAUDE.md §5 G13) and asserts each one, once
-    parsed, equals a persisted figure at the SAME rounding it was displayed
-    with (whole-dollar tokens against the 0dp KPI rounding, tokens with
-    cents against orchestrator.findings.format_metric_value's 2dp rounding)
-    -- never a number the export step invented. Scoped to money figures
-    (the audit-evidence numbers CLAUDE.md §4.7/§5 are about), not every
-    incidental digit on a slide (a test_id like "T3.1a", a date, a run_id) --
-    the same scoping G13's own XLSX sibling test uses (specific sheets/
-    columns, not a blind character scan)."""
     prs = real_deck["prs"]
     findings = real_deck["findings"]
     metrics = real_deck["metrics"]
+    slides = list(prs.slides)
 
-    aud_metric_values = [m.get("value") for m in metrics.values() if m.get("unit") == "AUD"]
-    finding_exposures = [f.get("exposure_amount") for f in findings]
-    allowed_0dp = {round(v) for v in [*aud_metric_values, *finding_exposures] if isinstance(v, (int, float))}
-    allowed_2dp = {round(v, 2) for v in [*aud_metric_values, *finding_exposures] if isinstance(v, (int, float))}
+    headline_metric = metrics.get("run_exposure_headline")
+    headline_text = _money0(headline_metric["value"] if headline_metric else None)
 
-    def _cell_texts(table):
-        for row in table.rows:
-            for cell in row.cells:
-                yield cell.text_frame.text
+    def _callout_shapes(slide, text):
+        # Exact-text match, never a "$"-prefix filter: the callout must
+        # read "—" (NN14 / the "—" decision, §11), never a fabricated $0,
+        # on a run whose headline was never computed at all.
+        return [s for s in slide.shapes if s.has_text_frame and s.text_frame.text == text]
 
-    checked = 0
-    offenders = []
-    for slide in prs.slides:
-        for shape in slide.shapes:
-            texts = []
-            if shape.has_text_frame:
-                texts.append(shape.text_frame.text)
-            if getattr(shape, "has_table", False):
-                texts.extend(_cell_texts(shape.table))
-            for text in texts:
-                for token in _MONEY_RE.findall(text):
-                    value = _parse_money(token)
-                    checked += 1
-                    has_cents = "." in token
-                    ok = (value in allowed_2dp) if has_cents else (round(value) in allowed_0dp)
-                    if not ok:
-                        offenders.append((token, value, text[:80]))
-    assert checked > 0, "no money figures found on the deck -- test is not exercising anything"
-    assert not offenders, offenders
+    exec_money = _callout_shapes(slides[1], headline_text)  # Executive Summary
+    assert exec_money, f"no callout showing {headline_text!r} found on the Executive Summary slide"
+
+    top = findings[:TOP_MATTERS_MAX]
+    n_top = len(top)
+    top_slides = slides[3: 3 + n_top]
+    assert len(top_slides) == n_top
+    for finding, slide in zip(top, top_slides):
+        chip_texts = [s.text_frame.text for s in slide.shapes if s.has_text_frame and "Exposure:" in s.text_frame.text]
+        assert chip_texts, f"{finding['finding_id']}: no Exposure chip found on its own Top Matters slide"
+        exposure = finding.get("exposure_amount")
+        if exposure is None:
+            assert "Exposure: —" in chip_texts[0], (finding["finding_id"], chip_texts[0])
+        else:
+            assert f"Exposure: {_money0(exposure)}" in chip_texts[0], (finding["finding_id"], chip_texts[0])
+
+        metrics_cited = finding.get("metrics_cited") or {}
+        if metrics_cited:
+            table = next((s.table for s in slide.shapes if getattr(s, "has_table", False)), None)
+            assert table is not None, f"{finding['finding_id']}: METRICS CITED table missing from its own slide"
+            for row in list(table.rows)[1:]:
+                name = row.cells[0].text_frame.text
+                value_text = row.cells[1].text_frame.text
+                m = metrics_cited.get(name)
+                assert m is not None, f"{finding['finding_id']}: unexpected metric row {name!r} on its own slide"
+                assert value_text == _metric_value(m), (finding["finding_id"], name, value_text, m)
+
+    risk_slide = slides[3 + n_top]  # Risk and Exposure
+    risk_money = _callout_shapes(risk_slide, headline_text)
+    assert risk_money, f"no callout showing {headline_text!r} found on the Risk and Exposure slide"
+
+    n_all_slides = max(1, math.ceil(len(findings) / ALL_FINDINGS_ROWS_PER_SLIDE))
+    appendix_start = 3 + n_top + 1
+    checked_appendix_rows = 0
+    for slide in slides[appendix_start: appendix_start + n_all_slides]:
+        table = next((s.table for s in slide.shapes if getattr(s, "has_table", False)), None)
+        assert table is not None, "All Findings appendix slide has no table"
+        for row in list(table.rows)[1:]:
+            exposure_text = row.cells[3].text_frame.text
+            rule_id = row.cells[4].text_frame.text
+            matches = [f for f in findings if f.get("rule_id") == rule_id]
+            assert matches, f"appendix row rule_id={rule_id!r} matches no persisted finding"
+            finding = matches[0]
+            exposure = finding.get("exposure_amount")
+            if exposure is None:
+                assert exposure_text == "—", (rule_id, exposure_text)
+            else:
+                assert exposure_text == _money0(exposure), (rule_id, exposure_text, exposure)
+            checked_appendix_rows += 1
+    assert checked_appendix_rows == len(findings)
+
+
+def test_g13_exec_summary_counts_equal_persisted_counts(real_deck):
+    """Independent review 2026-09-24 item 8 (D9): the exec summary's own
+    non-money counts -- tests assessed, findings raised, High/Medium/Low --
+    equal this run's own persisted counts. Before this task the live deck
+    read "assessed 21 deterministic test(s)" against a 14-test catalogue,
+    because generate_pptx counted plan.yaml's own primitive INSTANCES
+    (several sub-tests per catalogue test on this Skill, e.g. T3.2a_air_dom/
+    _air_int/... under the one catalogue test T3.2a) rather than the
+    catalogue's own tests -- the same count the Test Coverage and
+    Methodology slides already state."""
+    state = real_deck["state"]
+    prs = real_deck["prs"]
+    findings = real_deck["findings"]
+    catalogue_rows = load_catalogue_rows(SKILL_DIR)
+
+    exec_slide = list(prs.slides)[1]
+    paragraph_text = next(
+        s.text_frame.text for s in exec_slide.shapes
+        if s.has_text_frame and s.text_frame.text.startswith("This run assessed")
+    )
+    n_high = sum(1 for f in findings if f.get("severity") == "High")
+    n_med = sum(1 for f in findings if f.get("severity") == "Medium")
+    n_low = sum(1 for f in findings if f.get("severity") == "Low")
+    assert f"assessed {len(catalogue_rows)} deterministic test(s)" in paragraph_text, paragraph_text
+    assert (
+        f"{len(findings)} finding(s): {n_high} High, {n_med} Medium, {n_low} Low" in paragraph_text
+    ), paragraph_text
+    assert state.audit_period[0] in paragraph_text and state.audit_period[1] in paragraph_text
 
 
 def test_g13_risk_chart_series_values_equal_severity_counts(real_deck):
@@ -395,6 +452,50 @@ def test_zero_findings_deck_says_no_control_exceptions_found_not_a_blank_section
         if shape.has_text_frame
     ]
     assert any("No control exceptions found" in t for t in all_text)
+
+
+def test_zero_findings_deck_exec_summary_and_risk_exposure_are_accurate(zero_findings_deck):
+    """D9/D6 for the zero-findings case specifically (independent review
+    2026-09-24 item 8): the audit found the zero-findings deck 'never
+    rendered' at all, so neither its counts nor its callouts had ever been
+    checked against real values -- this run's own catalogue count and its
+    own (real, not fabricated) exposure headline, on both the Executive
+    Summary and Risk and Exposure slides."""
+    state = zero_findings_deck["state"]
+    metrics = zero_findings_deck["metrics"]
+    catalogue_rows = load_catalogue_rows(SKILL_DIR)
+    prs = zero_findings_deck["prs"]
+    slides = list(prs.slides)
+
+    exec_slide = slides[1]
+    paragraph_text = next(
+        s.text_frame.text for s in exec_slide.shapes
+        if s.has_text_frame and s.text_frame.text.startswith("This run assessed")
+    )
+    assert f"assessed the {state.audit_period[0]} to {state.audit_period[1]} audit" in paragraph_text
+    assert "raised no findings" in paragraph_text
+    assert f"assessed {len(catalogue_rows)} deterministic" not in paragraph_text  # the zero-findings p1 wording
+
+    headline_metric = metrics.get("run_exposure_headline")
+    headline_text = _money0(headline_metric["value"] if headline_metric else None)
+
+    def _callout_shapes(slide, text):
+        # Exact-text match, never a "$"-prefix filter: a clean run may
+        # never compute run_exposure_headline at all, in which case the
+        # callout must read "—" (NN14 / the "—" decision, §11), not a
+        # fabricated $0 -- exactly what this asserts either way.
+        return [s for s in slide.shapes if s.has_text_frame and s.text_frame.text == text]
+
+    exec_money = _callout_shapes(exec_slide, headline_text)
+    assert exec_money, f"no callout showing {headline_text!r} found on the Executive Summary slide"
+
+    # slide 3 is the single "no exceptions" Top Matters slide (n_top == 0),
+    # so Risk and Exposure is slide 4 -- the same "3 + n_top" arithmetic
+    # test_g13_pptx_money_figures_match_the_specific_value_for_their_own_slide
+    # uses on the real (non-zero) deck above.
+    risk_slide = slides[4]
+    risk_money = _callout_shapes(risk_slide, headline_text)
+    assert risk_money, f"no callout showing {headline_text!r} found on the Risk and Exposure slide"
 
 
 def test_g13_test_coverage_exception_counts_equal_test_results(real_deck):

@@ -349,7 +349,7 @@ def _build_cover(prs, state: RunState, skill_manifest: dict, data_mode: str, now
 def _build_exec_summary(prs, state: RunState, findings: list[dict], metrics: dict, n_tests: int, now: str):
     slide = _new_slide(prs, LY_TITLE_ONLY, "Executive Summary")
     _textbox(slide, CONTENT_LEFT, 0.85, CONTENT_W, 0.3,
-             "Automated summary — narrative generation not yet enabled (CLAUDE.md P6)",
+             "Automated summary — narrative generation not yet enabled",
              size=10, bold=True, color=GREY)
 
     n_high = sum(1 for f in findings if f.get("severity") == "High")
@@ -370,9 +370,9 @@ def _build_exec_summary(prs, state: RunState, findings: list[dict], metrics: dic
             f"period and raised no findings — every deterministic test passed or was not testable."
         )
     p2 = (
-        f"Potential exposure — the amount at risk across every distinct flagged transaction line "
-        f"(CLAUDE.md independent review 2026-09-24 item 1) — is {_money0(headline_value)}. "
-        f"This figure never sums individual findings' own exposure_amount, which by design overlap."
+        f"Potential exposure — the amount at risk across every distinct flagged transaction line, "
+        f"counted once — is {_money0(headline_value)}. This figure never sums individual findings' "
+        f"own cited exposure amounts, which by design overlap."
     )
     p3 = (
         "Every number in this deck comes from this run's own persisted results — none is "
@@ -401,7 +401,8 @@ def _build_exec_summary(prs, state: RunState, findings: list[dict], metrics: dic
 def _build_what_we_found(prs, findings: list[dict], catalogue_rows: list[dict], state: RunState, now: str):
     slide = _new_slide(prs, LY_TITLE_ONLY, "What We Found")
     _textbox(slide, CONTENT_LEFT, 0.85, CONTENT_W, 0.3,
-             "Findings grouped by test category / control area (catalogue.yaml) — not an LLM theme.",
+             "Findings grouped by test category / control area — a fixed categorisation, not a "
+             "generated theme.",
              size=10, color=GREY)
 
     catalogue_ids = {t["test_id"] for t in catalogue_rows if t.get("test_id")}
@@ -677,7 +678,7 @@ def _build_methodology(prs, state: RunState, metrics: dict, skill, catalogue_row
     reconciliation = state.reconciliation or {}
     recon_ok = sum(1 for rec in reconciliation.values() if _reconciliation_ok(rec))
     recon_line = (
-        f"{recon_ok}/{len(reconciliation)} source(s) reconciled with zero variance (G6)."
+        f"{recon_ok}/{len(reconciliation)} source(s) reconciled with zero variance."
         if reconciliation else "No reconciliation recorded for this run."
     )
     if recon_ok != len(reconciliation):
@@ -689,8 +690,8 @@ def _build_methodology(prs, state: RunState, metrics: dict, skill, catalogue_row
         1 for spec in thresholds.values() if (spec.get("provenance") or {}).get("pending_policy_confirmation")
     )
     threshold_line = (
-        f"{len(thresholds)} threshold(s) in this Skill's thresholds.yaml; {n_analyst_set} are analyst-set and "
-        f"pending policy confirmation (CLAUDE.md §0.4) — labelled wherever they drive a finding's severity."
+        f"{len(thresholds)} threshold(s) configured for this Skill; {n_analyst_set} are analyst-set and "
+        f"pending policy confirmation — labelled wherever they drive a finding's severity."
     )
 
     not_testable = [t for t in state.test_results if t.get("status") == "not_testable"]
@@ -713,13 +714,13 @@ def _build_methodology(prs, state: RunState, metrics: dict, skill, catalogue_row
 
     content = [
         ("Data sources", f"{len(state.data_assets)} bound source(s) at pinned table version / file hash. "
-                          f"See run_fingerprints for the full provenance snapshot."),
+                          f"The full source-version and file-hash provenance is recorded with this run."),
         ("Population reconciliation", recon_line),
         ("Threshold provenance", threshold_line),
         ("Test coverage", f"{len(catalogue_rows)} catalogue test(s). {not_testable_line}"),
         ("Population scope", namesake_line),
         ("Computation", "Every number is computed deterministically in Python from the bound sources — "
-                         "no LLM inference is used for metric calculation or finding selection (CLAUDE.md §3)."),
+                         "no LLM inference is used for metric calculation or finding selection."),
         ("Sign-off", _signoff_line(state)),
     ]
     tf = None
@@ -781,10 +782,18 @@ def generate_pptx(
         f"template (scripts/strip_pptx_template.py), never the source deck"
     )
 
-    n_plan_tests = len({t.get("test_id") for t in skill.plan.get("tests", [])})
+    # Independent review 2026-09-24 item 8 (D9): the CATALOGUE's own test
+    # count, the same number the Test Coverage and Methodology slides
+    # already state -- never a count of plan.yaml's own primitive
+    # INSTANCES, which is a different, larger number for a Skill (like
+    # SKILL-001) whose plan runs several sub-tests per catalogue test
+    # (T3.2a_air_dom/_air_int/_car_dom/... under the one catalogue test
+    # T3.2a). "This run assessed 21 deterministic test(s)" against a
+    # 14-test catalogue was exactly that miscount.
+    n_catalogue_tests = len(catalogue_rows)
 
     _build_cover(prs, state, skill.manifest, data_mode, now)
-    _build_exec_summary(prs, state, findings, metrics, n_plan_tests, now)
+    _build_exec_summary(prs, state, findings, metrics, n_catalogue_tests, now)
     _build_what_we_found(prs, findings, catalogue_rows, state, now)
 
     if not findings:
