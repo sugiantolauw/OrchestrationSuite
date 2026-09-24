@@ -34,7 +34,7 @@ from typing import Callable
 from orchestrator.adapters.protocols import NullTracing
 from orchestrator.config import runtime_config_hash
 from orchestrator.errors import InvalidTransition, StaleStateError
-from orchestrator.nodes.fieldwork import NODES_FOR
+from orchestrator.nodes.registry import NODES_FOR
 from orchestrator.pipeline import run_phase
 from orchestrator.reaper import _trace_event_id
 from orchestrator.status import transition

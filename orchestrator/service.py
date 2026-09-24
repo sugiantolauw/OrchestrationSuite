@@ -70,7 +70,7 @@ from orchestrator.executor import ThreadExecutor
 from orchestrator.fingerprint import compute_fingerprint
 from orchestrator.frames import not_testable_flags, read_frame_parquet
 from orchestrator.nodes.context import NodeContext
-from orchestrator.nodes.fieldwork import NODES_FOR
+from orchestrator.nodes.registry import NODES_FOR
 from orchestrator.pipeline import NODE_STAGE_LABELS
 from orchestrator.signoff_policy import SOD_ENFORCED, evaluate_signoff
 from orchestrator.skill_registry import register_skill
