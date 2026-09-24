@@ -57,6 +57,7 @@ FULL_STATE_KWARGS = dict(
     findings=[{"id": "T4_1", "severity": "High"}],
     management_actions=[{"owner": "Finance", "due": "2026-03-01"}],
     exports={"pptx": "/Volumes/x/run.pptx"},
+    module_output={"kind": "sensing", "stop_reason": None},
     signoff={"approver": "alice", "timestamp": "2026-02-01T00:00:00+00:00"},
     status_reason="node 'execute' failed: simulated",
     profile_narrative="4,200 expense rows profiled.",
@@ -167,7 +168,7 @@ def test_validate_ok():
     validate(_full_state())
 
 
-@pytest.mark.parametrize("run_kind", ["fieldwork", "assessment", "planning"])
+@pytest.mark.parametrize("run_kind", ["fieldwork", "assessment", "planning", "design_assessment", "reporting", "evidence"])
 def test_validate_requires_engagement_id_for_scoped_kinds(run_kind):
     state = RunState(
         run_id="R",
@@ -201,6 +202,25 @@ def test_validate_allows_none_engagement_id_for_sensing():
         last_state_change_at=canonical_ts(0),
         status="queued",
         engagement_id=None,
+    )
+    validate(state)
+
+
+@pytest.mark.parametrize("run_kind", ["design_assessment", "reporting", "evidence"])
+def test_validate_accepts_new_lifecycle_run_kinds_with_engagement_id(run_kind):
+    state = RunState(
+        run_id="R",
+        run_kind=run_kind,
+        mode="playbook",
+        phase="plan",
+        audit_period=("2026-01-01", "2026-01-31"),
+        objective="o",
+        run_owner="alice",
+        fingerprint_id="F",
+        created_at=canonical_ts(0),
+        last_state_change_at=canonical_ts(0),
+        status="queued",
+        engagement_id="E1",
     )
     validate(state)
 
@@ -368,3 +388,36 @@ def test_node_owned_json_rejects_non_json_safe_owned_value():
     state = _minimal_state(profile_result={"x": {1, 2, 3}})
     with pytest.raises(NotJsonSafe):
         node_owned_json(state)
+
+
+# ── module_output (L0.1) ─────────────────────────────────────────────────────
+
+
+def test_module_output_is_node_owned():
+    assert "module_output" in NODE_OWNED
+    assert "module_output" not in LIFECYCLE
+
+
+def test_module_output_defaults_to_empty_dict():
+    state = _minimal_state()
+    assert state.module_output == {}
+
+
+def test_module_output_round_trips():
+    state = _full_state()
+    restored = from_json(to_json(state))
+    assert restored.module_output == state.module_output == {"kind": "sensing", "stop_reason": None}
+
+
+def test_apply_node_output_takes_module_output_from_result():
+    current = _minimal_state(module_output={})
+    result = dataclasses_replace_findings(current, module_output={"kind": "sensing", "coverage": {"docs": 3}})
+    merged = apply_node_output(current, result)
+    assert merged.module_output == {"kind": "sensing", "coverage": {"docs": 3}}
+
+
+def test_node_owned_json_includes_module_output():
+    state = _minimal_state(module_output={"kind": "planning", "stop_reason": "ceiling:max_llm_calls"})
+    payload = node_owned_json(state)
+    data = json.loads(payload)
+    assert data["module_output"] == {"kind": "planning", "stop_reason": "ceiling:max_llm_calls"}
