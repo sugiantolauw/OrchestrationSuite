@@ -58,6 +58,12 @@ def serve_layout():
         dcc.Location(id="url", refresh=False),
         platform_header(),
         platform_nav(),
+        # Home page selection state (src/run_setup.py): kept here, outside
+        # page-content, so home_layout()'s own returned tree stays an exact
+        # match of the prototype's landing_page() for
+        # tests/test_layout_parity.py -- see that module's docstring.
+        dcc.Store(id="selected-mode-store", data="playbook"),
+        dcc.Store(id="selected-skill-store", data=None),
         html.Div(id="page-content"),
     ], className="app-shell")
 

@@ -12,21 +12,34 @@ change's report: the Start button's destination, and the upload panel's
 literal destination-path template. Nothing else in this file's DOM differs
 from the prototype's landing_page().
 
-The mode cards, skill cards and Explorer section are exactly as
-reference_app renders them: no selection callback exists there in the
-prototype (mode_card/skill_card's `selected` state is a hardcoded render-time
-flag, not wired to any Input), so none is added here either -- the run this
-page starts is always Playbook / SKILL-001, matching the run-summary-preview
-panel's own hardcoded "Mode: Playbook" / "Skill: ExCo T&E Executive
-Diligence" text, exactly as the prototype displays it regardless of which
-card looks selected.
+The mode cards and skill cards are the prototype's own components
+(skill_card/mode_card in src/platform/components.py) rendered with their
+existing `selected` styling and, for skill_card, the same
+{"type": "skill-select-card", "index": ...} pattern-matching id the
+prototype ships but never wires to a callback. This module adds the
+selection behaviour those ids were built for: clicking a card toggles its
+`selected` look (no new classes, no new elements) and the run started below
+uses whichever skill is selected. Selecting the "Explore a new audit" mode
+card toggles the mode cards' own selected look and shows the prototype's
+existing (still-inert) `explorer-section` panel in place of the skill grid;
+its two buttons stay unwired, exactly as in the prototype -- Explorer Mode
+itself is out of scope here.
+
+The two dcc.Store components holding the current selection
+(selected-skill-store/selected-mode-store) live in app/app.py's serve_layout()
+shell, not in home_layout()'s own return value: home_layout() is covered by
+tests/test_layout_parity.py's strict, zero-diff structural comparison
+against the prototype's landing_page(), and a Store the prototype does not
+render at all would fail that check even though it draws no DOM. Putting it
+in the shell (present on every page, like platform_header()/platform_nav())
+keeps home_layout() itself pixel-for-pixel the prototype's tree.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from dash import Input, Output, State, dcc, html, no_update
+from dash import ALL, Input, Output, State, callback_context, dcc, html, no_update
 from dash.exceptions import PreventUpdate
 from flask import request
 
@@ -41,6 +54,27 @@ from src.platform.components import (
 )
 
 _DEFAULT_SKILL_ID = "SKILL-001"
+
+_MODE_CARD_SPECS = [
+    ("playbook", "Use a proven Skill",
+     "Run an established audit using a governed, versioned methodology. "
+     "The Skill defines data sources, cleaning rules, tests, metrics, "
+     "visualisations, evidence requirements, and recommended actions."),
+    ("explorer", "Explore a new audit",
+     "Start with an audit objective when no proven Skill exists. "
+     "The agent profiles the data, proposes an approach, asks for "
+     "auditor confirmation, and can save the approved methodology "
+     "as a new Skill after the run."),
+]
+
+
+def _mode_cards(selected_mode: str) -> list:
+    return [mode_card(mode_id, title, desc, selected=(mode_id == selected_mode))
+            for mode_id, title, desc in _MODE_CARD_SPECS]
+
+
+def _skill_cards(skills: list[dict], selected_skill_id: str | None) -> list:
+    return [skill_card(s, selected=(s["skill_id"] == selected_skill_id)) for s in skills]
 
 
 def _request_owner() -> str:
@@ -156,23 +190,15 @@ def home_layout() -> html.Div:
             html.P("Choose a proven Skill or explore a new audit objective", className="sub"),
         ], style={"marginTop": 24}),
 
-        html.Div([
-            mode_card("playbook", "Use a proven Skill",
-                      "Run an established audit using a governed, versioned methodology. "
-                      "The Skill defines data sources, cleaning rules, tests, metrics, "
-                      "visualisations, evidence requirements, and recommended actions.",
-                      selected=True),
-            mode_card("explorer", "Explore a new audit",
-                      "Start with an audit objective when no proven Skill exists. "
-                      "The agent profiles the data, proposes an approach, asks for "
-                      "auditor confirmation, and can save the approved methodology "
-                      "as a new Skill after the run."),
-        ], className="plat-two-col", id="mode-selector-row"),
+        html.Div(
+            _mode_cards("playbook"),
+            className="plat-two-col", id="mode-selector-row",
+        ),
 
         # Playbook skill cards
         html.Div([
             html.Div(
-                [skill_card(s) for s in skills],
+                _skill_cards(skills, None),
                 className="plat-skill-grid",
                 id="skill-cards-container",
             ),
@@ -332,6 +358,50 @@ def _auto_bind(skill_id: str) -> tuple[dict[str, str], list[str]]:
 def register_callbacks(app) -> None:
 
     @app.callback(
+        Output("skill-cards-container", "children"),
+        Output("selected-skill-store", "data"),
+        Input({"type": "skill-select-card", "index": ALL}, "n_clicks"),
+        State({"type": "skill-select-card", "index": ALL}, "id"),
+        prevent_initial_call=True,
+    )
+    def select_skill_card(n_clicks_list, ids):
+        """Wires the prototype's own skill_card `selected` styling and its
+        {"type": "skill-select-card", ...} id (reference_app/src/platform/
+        components.py) to a click -- the prototype never adds this callback,
+        it just ships the id and the styling parameter unused."""
+        if not any(n_clicks_list):
+            raise PreventUpdate
+        triggered = callback_context.triggered_id
+        if not isinstance(triggered, dict):
+            raise PreventUpdate
+        selected_skill_id = triggered["index"]
+        skills = adapters.list_skills()
+        return _skill_cards(skills, selected_skill_id), selected_skill_id
+
+    @app.callback(
+        Output("mode-selector-row", "children"),
+        Output("selected-mode-store", "data"),
+        Output("playbook-skills-section", "style"),
+        Output("explorer-section", "style"),
+        Input({"type": "mode-select-card", "index": ALL}, "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def select_mode_card(n_clicks_list):
+        """Same idea as select_skill_card, for mode_card's own id/selected
+        pair. Selecting "explorer" swaps the skill grid for the prototype's
+        existing (still-inert) explorer-section panel; its two buttons are
+        not wired here -- Explorer Mode is out of scope for this change."""
+        if not any(n_clicks_list):
+            raise PreventUpdate
+        triggered = callback_context.triggered_id
+        if not isinstance(triggered, dict):
+            raise PreventUpdate
+        selected_mode = triggered["index"]
+        playbook_style = {} if selected_mode == "playbook" else {"display": "none"}
+        explorer_style = {"display": "none"} if selected_mode == "playbook" else {}
+        return _mode_cards(selected_mode), selected_mode, playbook_style, explorer_style
+
+    @app.callback(
         Output("data-search-results", "children"),
         Input("data-search-input", "value"),
         prevent_initial_call=True,
@@ -443,9 +513,11 @@ def register_callbacks(app) -> None:
         State("audit-bu", "value"),
         State("audit-materiality", "value"),
         State("audit-options", "value"),
+        State("selected-skill-store", "data"),
         prevent_initial_call=True,
     )
-    def start_run(n_clicks, objective, start_date, end_date, business_unit, materiality, options):
+    def start_run(n_clicks, objective, start_date, end_date, business_unit, materiality, options,
+                   selected_skill_id):
         """Starts a real audit run (CLAUDE.md §2.1: start_audit_run only
         inserts the `runs` row and hands off to the executor).
 
@@ -460,7 +532,8 @@ def register_callbacks(app) -> None:
             raise PreventUpdate
 
         options = options or []
-        bindings, missing = _auto_bind(_DEFAULT_SKILL_ID)
+        skill_id = selected_skill_id or _DEFAULT_SKILL_ID
+        bindings, missing = _auto_bind(skill_id)
         if missing:
             return no_update, html.Div([
                 html.Div([
@@ -477,7 +550,7 @@ def register_callbacks(app) -> None:
         try:
             run_owner = _request_owner()
             run_id = adapters.start_audit_run(
-                skill_id=_DEFAULT_SKILL_ID,
+                skill_id=skill_id,
                 bindings=bindings,
                 audit_period=(start_date, end_date),
                 objective=(objective or "").strip(),
