@@ -407,6 +407,46 @@ class NarrativeEditRejected(Exception):
         super().__init__(f"narrative {narrative_id!r}: edit rejected -- {detail}")
 
 
+class NarrativeEditConflict(Exception):
+    """P6 WP N10 (docs/specs/P6_narration_design.md §6.1's persistence
+    contract, `upsert_narrative(row, expected_version=...)`): a real CAS on
+    `narratives.version` -- `edit_narrative` read the row at one version and
+    the conditional write found a different version already stored (another
+    edit, or a `narrate()` re-execution, landed first). Refused, never
+    silently overwritten (CLAUDE.md NN14); the caller re-reads the current
+    narrative and retries with the new expected version."""
+
+    def __init__(self, narrative_id: str, expected_version: int, actual_version: int | None):
+        self.narrative_id = narrative_id
+        self.expected_version = expected_version
+        self.actual_version = actual_version
+        super().__init__(
+            f"narrative {narrative_id!r}: expected version {expected_version}, "
+            f"found {actual_version!r} -- edit refused, re-read and retry"
+        )
+
+
+class NarrativeVersionMismatch(Exception):
+    """P6 WP N10 (§6.4's `versions=` argument to `effective_prose`): an
+    export/resolver read asked for a specific signed-off `narratives.version`
+    (`RunState.signoff.narration.narrative_versions`) and the CURRENTLY
+    stored row is a different version. Because edits and regeneration are
+    both blocked once a run leaves `awaiting_signoff` (§6.4: "After sign-off,
+    no edits are possible"), this should never actually happen against a
+    genuinely frozen run -- surfaced as a loud failure rather than silently
+    rendering a version nobody signed off on (CLAUDE.md NN14)."""
+
+    def __init__(self, narrative_id: str, expected_version: int, actual_version: int):
+        self.narrative_id = narrative_id
+        self.expected_version = expected_version
+        self.actual_version = actual_version
+        super().__init__(
+            f"narrative {narrative_id!r}: the signed-off version is {expected_version}, "
+            f"but the stored row is version {actual_version!r} -- refusing to render a "
+            f"version nobody signed off on"
+        )
+
+
 class NarrationDisabled(Exception):
     def __init__(self, run_id: str):
         self.run_id = run_id

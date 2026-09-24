@@ -93,6 +93,7 @@ from orchestrator.errors import (
     ExplorerPlanNotConfirmable,
     NarrationDisabled,
     NarrationNodeUnavailable,
+    NarrativeEditConflict,
     NarrativeEditNotAllowed,
     NarrativeEditRejected,
     NarrativeNotFound,
@@ -2260,6 +2261,26 @@ def edit_narrative(ctx: AppContext, run_id: str, narrative_id: str, new_text, *,
             lineterm="",
         )
     )
+    new_row = {
+        "narrative_id": narrative_id, "run_id": run_id, "engagement_id": row.get("engagement_id"),
+        "target_kind": row["target_kind"], "target_id": row["target_id"], "field": field,
+        "version": new_version, "generation": row.get("generation", 0), "origin": "human_edit",
+        "template_text": template_text, "sources": sources, "call_ids": [],
+        "served_model_version": None, "violations": None, "updated_by": actor, "updated_at": now,
+    }
+    # P6 WP N10 (§6.4): a real CAS -- the conditional write applies only if
+    # `narratives.version` still equals the version this call READ at the top
+    # (`row["version"]`); a racing edit or a `narrate()` regenerate that
+    # landed first makes this return False, refused rather than silently
+    # overwritten (CLAUDE.md NN14). Applied BEFORE the `narrative_edits` row
+    # below (the reverse of this function's earlier ordering, which wrote the
+    # edit record first): recording a G14 edit whose `before_text` no longer
+    # matches what was actually there would be a WRONG audit trail on every
+    # conflict, not merely an occasionally-missing one on a rare crash
+    # between the two writes -- the worse failure mode of the two.
+    if not ctx.persistence.upsert_narrative(new_row, expected_version=row["version"]):
+        raise NarrativeEditConflict(narrative_id, row["version"], None)
+
     edit_id = hashlib.sha256(f"{narrative_id}|{new_version}".encode("utf-8")).hexdigest()[:32]
     ctx.persistence.append_narrative_edit(
         {
@@ -2269,14 +2290,6 @@ def edit_narrative(ctx: AppContext, run_id: str, narrative_id: str, new_text, *,
             "reason": None, "call_id": None,
         }
     )
-    new_row = {
-        "narrative_id": narrative_id, "run_id": run_id, "engagement_id": row.get("engagement_id"),
-        "target_kind": row["target_kind"], "target_id": row["target_id"], "field": field,
-        "version": new_version, "generation": row.get("generation", 0), "origin": "human_edit",
-        "template_text": template_text, "sources": sources, "call_ids": [],
-        "served_model_version": None, "violations": None, "updated_by": actor, "updated_at": now,
-    }
-    ctx.persistence.upsert_narrative(new_row)
 
     _emit_service_event(
         ctx.persistence, state,

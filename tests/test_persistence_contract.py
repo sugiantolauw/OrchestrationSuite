@@ -644,6 +644,59 @@ def test_upsert_narrative_is_idempotent_by_narrative_id(persistence, uid):
     assert rows[0]["call_ids"] == ["CALL-1"]
 
 
+def test_upsert_narrative_cas_rejects_a_stale_expected_version(persistence, uid):
+    # P6 WP N10 (§6.4, CLAUDE.md NN14): `expected_version` turns
+    # `upsert_narrative` from an unconditional overwrite into a real
+    # compare-and-swap -- the same "zero rows affected = rejected" contract
+    # `save_state`/`decide_candidate_cas` already enforce, now for
+    # narratives.version. Runs on both backends via the `persistence`
+    # fixture, per CLAUDE.md §4.1 non-negotiable 6.
+    run_id = f"RUN-NARR-CAS-{uid}"
+    narrative_id = f"NARR-CAS-{uid}"
+    persistence.upsert_narrative(_narrative_row(narrative_id, run_id=run_id, template_text="v1", version=1))
+
+    # A correctly-guarded write (expected_version matches the stored row)
+    # applies and returns True.
+    applied = persistence.upsert_narrative(
+        _narrative_row(narrative_id, run_id=run_id, template_text="v2", version=2, origin="human_edit"),
+        expected_version=1,
+    )
+    assert applied is True
+    row = next(r for r in persistence.get_narratives(run_id) if r["narrative_id"] == narrative_id)
+    assert row["template_text"] == "v2"
+    assert row["version"] == 2
+    assert row["origin"] == "human_edit"
+
+    # A STALE write -- expected_version=1 again, but the stored row is now
+    # at version 2 (another writer, e.g. a racing edit or a narrate()
+    # re-execution, landed first) -- is refused: returns False and writes
+    # NOTHING, never silently overwriting the version-2 row above.
+    rejected = persistence.upsert_narrative(
+        _narrative_row(narrative_id, run_id=run_id, template_text="v3 (stale, must be refused)", version=3),
+        expected_version=1,
+    )
+    assert rejected is False
+    still_row = next(r for r in persistence.get_narratives(run_id) if r["narrative_id"] == narrative_id)
+    assert still_row["template_text"] == "v2"
+    assert still_row["version"] == 2
+    assert still_row["origin"] == "human_edit"
+
+
+def test_upsert_narrative_without_expected_version_is_unconditional(persistence, uid):
+    # The default (`expected_version=None`, every narrate-node caller) is
+    # UNCHANGED by the CAS addition: an unconditional upsert that always
+    # applies and returns True, regardless of the stored version.
+    run_id = f"RUN-NARR-UNCOND-{uid}"
+    narrative_id = f"NARR-UNCOND-{uid}"
+    first = persistence.upsert_narrative(_narrative_row(narrative_id, run_id=run_id, template_text="first", version=1))
+    assert first is True
+    second = persistence.upsert_narrative(_narrative_row(narrative_id, run_id=run_id, template_text="second", version=5))
+    assert second is True
+    row = next(r for r in persistence.get_narratives(run_id) if r["narrative_id"] == narrative_id)
+    assert row["template_text"] == "second"
+    assert row["version"] == 5
+
+
 def test_get_narratives_scoped_to_run_id(persistence, uid):
     run_a = f"RUN-NARR-A-{uid}"
     run_b = f"RUN-NARR-B-{uid}"

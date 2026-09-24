@@ -9,7 +9,7 @@ from __future__ import annotations
 import pytest
 
 from orchestrator import service
-from orchestrator.errors import NarrativeEditNotAllowed, NarrativeEditRejected, NarrativeNotFound
+from orchestrator.errors import NarrativeEditConflict, NarrativeEditNotAllowed, NarrativeEditRejected, NarrativeNotFound
 from orchestrator.findings import format_metric_value
 from tests.n9_test_support import harness_at_awaiting_signoff
 
@@ -87,6 +87,54 @@ def test_edit_unknown_narrative_id_raises(local_persistence, tmp_path, clock):
     h, ctx_app, state = harness_at_awaiting_signoff(local_persistence, tmp_path, clock)
     with pytest.raises(NarrativeNotFound):
         service.edit_narrative(ctx_app, state.run_id, "NOPE", "some text", actor="alice")
+
+
+def test_concurrent_stale_edit_is_refused_never_silently_overwritten(local_persistence, tmp_path, clock, monkeypatch):
+    # P6 WP N10 (§6.4's real CAS on narratives.version, CLAUDE.md NN14): a
+    # caller (e.g. a second browser tab) that built its edit against a
+    # snapshot of the row taken BEFORE another edit landed must be refused,
+    # never silently overwrite the edit that landed first.
+    h, ctx_app, state = harness_at_awaiting_signoff(local_persistence, tmp_path, clock)
+    run_id = state.run_id
+    stale_row = _t1_observation_row(h.persistence, run_id)
+    metrics = h.persistence.get_run_metrics(run_id)
+    hv_count = format_metric_value(metrics["hv_count"]["value"], metrics["hv_count"]["unit"])
+    hv_amount = format_metric_value(metrics["hv_amount"]["value"], metrics["hv_amount"]["unit"])
+
+    # carol's edit lands first for real -- the stored row moves to version + 1.
+    landed_first_text = f"Carol's edit landed first: {hv_count} high-value claim(s), {hv_amount} total."
+    service.edit_narrative(ctx_app, run_id, stale_row["narrative_id"], landed_first_text, actor="carol")
+    landed_row = next(
+        r for r in h.persistence.get_narratives(run_id) if r["narrative_id"] == stale_row["narrative_id"]
+    )
+    assert landed_row["version"] == stale_row["version"] + 1
+
+    # bob's edit was composed against the ORIGINAL (now stale) `stale_row` --
+    # simulated by handing edit_narrative that stale snapshot for its own
+    # internal read, exactly as if bob's browser tab still held it.
+    real_get_narratives = h.persistence.get_narratives
+
+    def _stale_get_narratives(rid):
+        rows = real_get_narratives(rid)
+        return [stale_row if r["narrative_id"] == stale_row["narrative_id"] else r for r in rows]
+
+    monkeypatch.setattr(h.persistence, "get_narratives", _stale_get_narratives)
+    bobs_text = f"Bob's edit, built on stale data: {hv_count} high-value claim(s)."
+    with pytest.raises(NarrativeEditConflict) as exc:
+        service.edit_narrative(ctx_app, run_id, stale_row["narrative_id"], bobs_text, actor="bob")
+    assert exc.value.narrative_id == stale_row["narrative_id"]
+    assert exc.value.expected_version == stale_row["version"]
+    monkeypatch.undo()
+
+    # Refused: carol's edit (the one that genuinely landed) is untouched --
+    # bob's stale attempt wrote nothing, recorded no edit.
+    current = next(
+        r for r in h.persistence.get_narratives(run_id) if r["narrative_id"] == stale_row["narrative_id"]
+    )
+    assert current["template_text"] == landed_first_text
+    assert current["version"] == landed_row["version"]
+    edits = h.persistence.list_narrative_edits(run_id)
+    assert all(e["actor"] != "bob" for e in edits)
 
 
 def test_edit_refused_before_and_after_signoff_window(local_persistence, tmp_path, clock):

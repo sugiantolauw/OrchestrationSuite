@@ -182,6 +182,52 @@ def test_regenerate_supersedes_undecided_candidates_but_keeps_decided_ones(local
     assert by_id["C-UNDECIDED"]["decided_by"] is None
 
 
+def test_regenerate_then_real_narrate_rerun_keeps_a_human_edit(local_persistence, tmp_path, clock, with_complete_node_registry):
+    # P6 WP N10 (§5.5 point 2, `runner.py`'s `existing_human_edited`): unlike
+    # the two tests above (which only cover WP N9's OWN transition, never
+    # touching `narratives`), this one runs the SAME regenerate through a
+    # REAL `narrate()` re-execution and asserts the human edit is NOT
+    # overwritten by the fresh model output that call produces for every
+    # other field.
+    h, ctx_app, state = harness_at_awaiting_signoff(local_persistence, tmp_path, clock)
+    run_id = state.run_id
+
+    findings_by_test = {f["rule_id"].split(".")[-1]: f for f in h.persistence.list_findings(run_id)}
+    t1_finding_id = findings_by_test["T1"]["finding_id"]
+    t1_observation_row = next(
+        r for r in h.persistence.get_narratives(run_id)
+        if r["target_kind"] == "finding" and r["target_id"] == t1_finding_id and r["field"] == "observation"
+    )
+    edited_text = "An auditor's own wording: {count:hv_count} high-value claim(s), {money:hv_amount} total."
+    edited = service.edit_narrative(ctx_app, run_id, t1_observation_row["narrative_id"], edited_text, actor="alice")
+    assert edited["origin"] == "human_edit"
+
+    service.regenerate_narration(ctx_app, run_id, "bob")
+    fingerprint = h.persistence.get_fingerprint(state.fingerprint_id)
+    final_state = run_phase(
+        h.persistence, run_id, nodes_for=FIELDWORK_NODES_FOR, skill=h.ctx, clock=clock, current_fingerprint=fingerprint,
+    )
+    assert final_state.status == "awaiting_signoff"
+
+    after = next(
+        r for r in h.persistence.get_narratives(run_id) if r["narrative_id"] == t1_observation_row["narrative_id"]
+    )
+    assert after["origin"] == "human_edit"
+    assert after["template_text"] == edited_text
+    assert after["version"] == edited["version"]
+
+    # A DIFFERENT field (T2's observation, never edited) genuinely was
+    # re-narrated by the second `narrate()` pass -- proving the skip is
+    # per-narrative, not a blanket "regenerate did nothing".
+    t2_finding_id = findings_by_test["T2"]["finding_id"]
+    t2_row = next(
+        r for r in h.persistence.get_narratives(run_id)
+        if r["target_kind"] == "finding" and r["target_id"] == t2_finding_id and r["field"] == "observation"
+    )
+    assert t2_row["origin"] in ("model", "model_repaired")
+    assert t2_row["generation"] == 1
+
+
 def test_regenerate_call_itself_never_touches_narratives_a_human_edit_survives_the_call(local_persistence, tmp_path, clock, with_complete_node_registry):
     # See this file's module docstring: end-to-end survival through a real
     # narrate() re-execution is nodes/narration.py's concern (WP N7/N8,
