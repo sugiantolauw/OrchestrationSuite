@@ -438,12 +438,19 @@ def _fmt_currency(value) -> str:
     return f"${value:,.0f}" if isinstance(value, (int, float)) else "n/a"
 
 
+# CLAUDE.md §11 "—" decision: the same em dash format_money_or_dash
+# (components.py) already renders for a missing figure, reused here for
+# every non-money count/percentage this module cannot compute -- never a
+# second, independently-typed dash literal, and never "n/a".
+_NO_VALUE = '—'
+
+
 def _high_value_limit(skill: dict) -> float | None:
     """CLAUDE.md §0.4/G8: no threshold literal in UI code -- reads
     'high_value_limit' from the run's own Skill (bundle["skill"], already
     loaded via adapters.get_skill() in _load_bundle, which carries the full
     thresholds.yaml dict), never a hardcoded number. None when the Skill
-    has no such threshold on record -- callers must degrade to "n/a"/"—",
+    has no such threshold on record -- callers must degrade to _NO_VALUE,
     never silently fall back to a guessed value (NN14)."""
     entry = (skill.get("thresholds") or {}).get("high_value_limit")
     if not entry or entry.get("value") is None:
@@ -1158,8 +1165,8 @@ def _p1_update(bundle: dict, start_date, end_date, members, meta: dict[str, dict
     # default every row's flag to 0 when the column itself was absent,
     # silently rendering "0 missing receipts" instead of surfacing that the
     # figure could not be computed. `miss_mask` is None in that case, and
-    # the KPI below shows "n/a", matching this file's own convention for an
-    # uncomputable count (e.g. "Unique employees" above).
+    # the KPI below shows _NO_VALUE -- CLAUDE.md §11 "—" decision: never a
+    # fabricated "0" (or "n/a") where no figure exists.
     miss_mask = (
         pd.to_numeric(df[missing_col], errors="coerce").fillna(0).astype(int) == 1
         if missing_col in df.columns else None
@@ -1169,7 +1176,7 @@ def _p1_update(bundle: dict, start_date, end_date, members, meta: dict[str, dict
         kpi_card("Total T&E spend", _fmt_currency(amount_sum) if amount_sum is not None else "n/a"),
         kpi_card("Total breach count", f"{int(breach_mask.sum()):,}"),
         kpi_card("Breach amount ($)", _fmt_currency(breach_amount) if breach_amount is not None else "n/a"),
-        kpi_card("Missing receipts", f"{int(miss_mask.sum()):,}" if miss_mask is not None else "n/a"),
+        kpi_card("Missing receipts", f"{int(miss_mask.sum()):,}" if miss_mask is not None else _NO_VALUE),
     ]
 
     f1 = charts.monthly_volume_chart(df, title="Monthly trend")
@@ -1283,7 +1290,7 @@ def _p2_update(bundle: dict, start_date, end_date, members, expense_types, meta:
         kpi_card("Total claims", f"{len(df):,}"),
         kpi_card("Unique employees", f"{df['Employee'].nunique():,}" if "Employee" in df.columns else "n/a"),
         kpi_card("Avg claim amount", _fmt_currency(avg_claim) if avg_claim is not None else "n/a"),
-        kpi_card(hv_label, f"{hv_count:,}" if hv_count is not None else "n/a"),
+        kpi_card(hv_label, f"{hv_count:,}" if hv_count is not None else _NO_VALUE),
     ]
 
     # Colour by P_EXP role (prepared/approved/both) when this run's snapshot
@@ -1355,9 +1362,9 @@ def _p2_update(bundle: dict, start_date, end_date, members, expense_types, meta:
             # CLAUDE.md NN14: RF_CS_MissingReceipt is absent from this run's
             # data entirely -- a contract/data gap, never "zero claims
             # missing a receipt" (the previous `else 0` fabricated exactly
-            # that). "n/a" per row, never a silent 0.
-            agg2["Claims_Missing_Receipt"] = "n/a"
-            agg2["Missing %"] = "n/a"
+            # that). _NO_VALUE per row, never a silent 0.
+            agg2["Claims_Missing_Receipt"] = _NO_VALUE
+            agg2["Missing %"] = _NO_VALUE
             miss = agg2.sort_values("Total_Claims", ascending=False)
     miss_style = [{"if": {"filter_query": "{Missing %} > 50"}, "backgroundColor": "#fdeaea", "color": "#9b1c1c"}]
 

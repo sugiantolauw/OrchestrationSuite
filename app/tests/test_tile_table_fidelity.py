@@ -11,10 +11,10 @@ from the fixture data, never by calling src/charts.py, the _pX_update
 helpers, or management_actions_page()'s own arithmetic.
 
 Also carries regression coverage for two of this task's other fixes: a
-missing RF_ flag column renders "n/a"/"—" on these same tiles/tables, never
-a fabricated 0 (gap #2), and the /actions "Open / Under review" KPI counts
-the real, title-cased "Under Review" status service.py actually produces
-(gap #3).
+missing RF_ flag column renders workspace_tne._NO_VALUE ("—", CLAUDE.md §11's
+"—" decision -- never "n/a") on these same tiles/tables, never a fabricated 0
+(gap #2), and the /actions "Open / Under review" KPI counts the real,
+title-cased "Under Review" status service.py actually produces (gap #3).
 """
 
 from __future__ import annotations
@@ -275,10 +275,12 @@ def test_p2_missing_receipt_table_filtered_matches_independent_groupby(bundle, m
         assert row["Missing %"] == exp["Missing %"]
 
 
-def test_p2_missing_receipt_table_shows_na_never_zero_when_flag_column_absent(bundle, meta):
+def test_p2_missing_receipt_table_shows_dash_never_zero_when_flag_column_absent(bundle, meta):
     """Gap #2 regression: RF_CS_MissingReceipt absent from the run's own
     data entirely (a contract/data gap) must never render as "0 claims
-    missing a receipt" for every employee -- CLAUDE.md NN14."""
+    missing a receipt" for every employee -- CLAUDE.md NN14, and the §11
+    "—" decision: the missing figure is workspace_tne._NO_VALUE, never a
+    fabricated 0 or the un-approved string "n/a"."""
     expense_df = bundle["frames"]["expense_report"]
     modified = _bundle_without_column(bundle, "expense_report", "RF_CS_MissingReceipt")
 
@@ -286,21 +288,21 @@ def test_p2_missing_receipt_table_shows_na_never_zero_when_flag_column_absent(bu
     data = result[11]
     assert len(data) == expense_df["Employee"].nunique()
     for row in data:
-        assert row["Claims_Missing_Receipt"] == "n/a"
-        assert row["Missing %"] == "n/a"
+        assert row["Claims_Missing_Receipt"] == workspace_tne._NO_VALUE
+        assert row["Missing %"] == workspace_tne._NO_VALUE
         assert row["Total_Claims"] == int((expense_df["Employee"] == row["Employee"]).sum())
 
 
 # ── Audit Detail / page 1 -- "Missing receipts" KPI, flag column absent ──
 
 
-def test_p1_missing_receipts_kpi_shows_na_never_zero_when_flag_column_absent(bundle, meta):
+def test_p1_missing_receipts_kpi_shows_dash_never_zero_when_flag_column_absent(bundle, meta):
     """Gap #2 regression, p1's own KPI tile version of the table test above."""
     modified = _bundle_without_column(bundle, "expense_report", "RF_CS_MissingReceipt")
 
     result = workspace_tne._p1_update(modified, None, None, None, meta)
     kpis = result[0]
-    assert "n/a" in str(kpis[3])
+    assert workspace_tne._NO_VALUE in str(kpis[3])
     assert "0" not in str(kpis[3])
 
 
@@ -332,16 +334,16 @@ def test_p2_high_value_kpi_filtered_matches_independent_threshold_comparison(bun
     assert f"{expected_hv:,}" in str(kpis[3])
 
 
-def test_p2_high_value_kpi_shows_na_never_zero_when_threshold_missing_from_skill(bundle, meta):
-    """CLAUDE.md NN14: an un-computable threshold-driven KPI must degrade to
-    "n/a", never a fabricated 0 that would misreport 'zero high-value
-    claims'."""
+def test_p2_high_value_kpi_shows_dash_never_zero_when_threshold_missing_from_skill(bundle, meta):
+    """CLAUDE.md NN14 + §11 "—" decision: an un-computable threshold-driven
+    KPI must degrade to workspace_tne._NO_VALUE ("—"), never a fabricated 0
+    that would misreport 'zero high-value claims', and never "n/a"."""
     modified = _bundle_without_threshold(bundle, "high_value_limit")
 
     result = workspace_tne._p2_update(modified, None, None, None, None, meta)
     kpis = result[0]
     assert "High-value claims" in str(kpis[3])
-    assert "n/a" in str(kpis[3])
+    assert workspace_tne._NO_VALUE in str(kpis[3])
 
 
 # ── Audit Detail / page 3 -- detail table ─────────────────────────────────
