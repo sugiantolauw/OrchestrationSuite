@@ -94,7 +94,13 @@ class AppContext:
     settings: Settings
     persistence: Any
     skills_dir: Path
-    data_source_factory: Callable[[dict[str, str]], Any]
+    # Second arg (contract_sources: the Skill's contract.yaml `sources`
+    # mapping) is optional -- callers with no Skill in scope (e.g.
+    # list_governed_tables's empty-bindings call) omit it. A UC-backend
+    # caller that DOES have a Skill passes it so a source bound to an
+    # uploaded file's Volume path can be parsed correctly (CLAUDE.md §5 UI
+    # item 5, orchestrator.adapters.datasource_volume_upload).
+    data_source_factory: Callable[[dict[str, str], dict[str, dict] | None], Any]
     export_storage: Any
     clock: Callable[[], str]
     executor: Any = None
@@ -128,7 +134,7 @@ def _all_skill_source_configs(skills_dir: Path) -> dict[str, dict]:
 def _local_data_source_factory(skills_dir: Path, data_root: Path) -> Callable[[dict[str, str]], Any]:
     configs = _all_skill_source_configs(skills_dir)
 
-    def factory(bindings: dict[str, str]):
+    def factory(bindings: dict[str, str], contract_sources: dict[str, dict] | None = None):
         sources: dict[str, dict] = {}
         for name in bindings:
             cfg = dict(configs.get(name) or {})
@@ -177,7 +183,7 @@ def build_node_context(ctx: AppContext, state: RunState) -> NodeContext:
     skill_dir = _skill_dir_for(ctx, state.skill_id)
     skill = load_skill(skill_dir)
     bindings = {b["source"]: b["table_fqn"] for b in state.data_assets}
-    data_source = ctx.data_source_factory(bindings)
+    data_source = ctx.data_source_factory(bindings, skill.contract.get("sources", {}))
     return NodeContext(
         settings=ctx.settings,
         persistence=ctx.persistence,
@@ -240,7 +246,8 @@ def build_app_context(env: dict | None = None) -> AppContext:
         persistence = DeltaPersistence(settings)
         persistence.migrate()
 
-        def _uc_factory(bindings: dict[str, str], _settings=settings):
+        def _uc_factory(bindings: dict[str, str], contract_sources: dict[str, dict] | None = None,
+                        _settings=settings, _persistence=persistence):
             try:
                 from orchestrator.adapters.datasource_uc import UCTableDataSource
             except ImportError as exc:  # pragma: no cover - depends on a sibling agent's file
@@ -250,7 +257,22 @@ def build_app_context(env: dict | None = None) -> AppContext:
                     "orchestrator.adapters.datasource_uc.UCTableDataSource is not available "
                     "yet -- the Unity Catalog source-data work has not landed in this checkout"
                 ) from exc
-            return UCTableDataSource(_settings, bindings)
+            table_source = UCTableDataSource(_settings, bindings)
+            # A source bound to an uploaded file's Volume path (rather than a
+            # UC table FQN) is read from the Volume via the Files API, not
+            # sent through the SQL path that a Volume path cannot satisfy
+            # (CLAUDE.md §5 UI item 5). Wrapping unconditionally costs
+            # nothing when no binding is actually an upload -- every call
+            # just falls through to `table_source` unchanged.
+            from orchestrator.adapters.datasource_volume_upload import VolumeUploadAwareDataSource
+
+            return VolumeUploadAwareDataSource(
+                table_source=table_source,
+                bindings=bindings,
+                contract_sources=contract_sources or {},
+                persistence=_persistence,
+                export_storage=export_storage,
+            )
 
         export_storage = VolumeExportStorage(volume_root=settings.volume) if settings.volume else None
         ctx = AppContext(
@@ -589,7 +611,7 @@ def start_audit_run(
     if missing:
         raise ContractViolation([f"no binding supplied for contract source {s!r}" for s in missing])
 
-    data_source = ctx.data_source_factory(bindings)
+    data_source = ctx.data_source_factory(bindings, contract_sources)
 
     # Resolve every source's version FIRST, before any read (CLAUDE.md §4.1
     # TOCTOU ordering) -- these become both this run's pinned data_assets
@@ -919,7 +941,7 @@ def _get_run_frames_from_sources(ctx: AppContext, state: RunState, skill) -> dic
     own docstring)."""
     bindings = {b["source"]: b["table_fqn"] for b in state.data_assets}
     versions = {b["source"]: b["version"] for b in state.data_assets}
-    data_source = ctx.data_source_factory(bindings)
+    data_source = ctx.data_source_factory(bindings, skill.contract.get("sources", {}))
 
     flagged_rows = ctx.persistence.list_flagged_rows(state.run_id)
     by_source: dict[str, list[dict]] = {}

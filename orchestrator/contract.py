@@ -188,6 +188,38 @@ def validate_contract(df: pd.DataFrame, source_contract: dict) -> None:
         raise ContractViolation(violations)
 
 
+def parse_source_bytes(
+    data: bytes, source: str, version: int | str, cfg: dict, columns: list[str] | None = None,
+) -> pd.DataFrame:
+    """Parses already-read, already-version-verified file bytes into a
+    population frame -- the contract-driven parsing (format/sheet/
+    header_trim, `__source`/`__row_key` columns, `columns` projection) both
+    LocalFileDataSource and orchestrator.adapters.datasource_volume_upload.
+    VolumeUploadAwareDataSource (CLAUDE.md §5 UI item 5: an uploaded file
+    read from the Volume via the Files API "applies the same contract
+    validation") apply -- one implementation, not two that could drift."""
+    fmt = cfg.get("format", "csv")
+    if fmt == "xlsx":
+        df = pd.read_excel(io.BytesIO(data), sheet_name=cfg.get("sheet", 0))
+    elif fmt == "csv":
+        df = pd.read_csv(io.BytesIO(data))
+    else:
+        raise ContractViolation([f"{source}: unsupported format {fmt!r}"])
+
+    if cfg.get("header_trim"):
+        df.columns = [c.strip() if isinstance(c, str) else c for c in df.columns]
+
+    df = df.reset_index(drop=True)
+    short = str(version)[:16]
+    df.insert(0, "__row_key", [f"{short}:{i + 1}" for i in range(len(df))])
+    df.insert(0, "__source", source)
+
+    if columns:
+        keep = ["__source", "__row_key"] + [c for c in columns if c in df.columns]
+        df = df[keep]
+    return df
+
+
 @dataclass
 class LocalFileDataSource:
     """DataSourceAdapter (orchestrator/adapters/protocols.py) backed by files on
@@ -235,29 +267,10 @@ class LocalFileDataSource:
         if actual_version != version:
             raise SourceVersionMismatch(source, str(version), actual_version)
 
-        fmt = cfg.get("format", "csv")
-        if fmt == "xlsx":
-            df = pd.read_excel(io.BytesIO(data), sheet_name=cfg.get("sheet", 0))
-        elif fmt == "csv":
-            df = pd.read_csv(io.BytesIO(data))
-        else:
-            raise ContractViolation([f"{source}: unsupported format {fmt!r}"])
-
-        if cfg.get("header_trim"):
-            df.columns = [c.strip() if isinstance(c, str) else c for c in df.columns]
-
-        df = df.reset_index(drop=True)
-        short = str(version)[:16]
-        df.insert(0, "__row_key", [f"{short}:{i + 1}" for i in range(len(df))])
-        df.insert(0, "__source", source)
-
-        if columns:
-            keep = ["__source", "__row_key"] + [c for c in columns if c in df.columns]
-            df = df[keep]
         # `filters` is accepted (matching the DataSourceAdapter Protocol so a SQL
         # implementation can push filtering down) but a local file read is cheap
         # enough that filtering is left to orchestrator.populations after read.
-        return df
+        return parse_source_bytes(data, source, version, cfg, columns)
 
     def row_count(self, source: str, *, version: str | None = None) -> int:
         v = version or self.resolve_version(source)
