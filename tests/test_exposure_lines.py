@@ -241,7 +241,7 @@ def test_finding_line_values_excess_basis_raises_when_no_producing_test_resolved
 def test_approved_not_spent_never_enters_line_maps(local_persistence, tmp_path):
     # Direct exposure.compute_run_exposure call (not through prioritise) --
     # an 'approved_not_spent' finding must never contribute to headline_exposure.
-    def read_population(source, *, version=None):
+    def read_population(source, *, version=None, **_):
         return pd.DataFrame({
             "__row_key": ["r1"], "Employee ID": [3], "Transaction Date": ["2026-01-20"],
             "Vendor": ["VendorZ"], "Amount": [2500.0],
@@ -304,7 +304,7 @@ def test_build_test_line_values_covers_a_test_no_finding_cites(local_persistence
     # (rule findings only, in this WP) never cites it -- build_test_line_values
     # iterates every TESTABLE plan test, not only the ones `prioritise`'s
     # finding loop happens to touch.
-    def read_population(source, *, version=None):
+    def read_population(source, *, version=None, **_):
         return pd.DataFrame({
             "__row_key": ["r1", "r2"],
             "Employee ID": [1, 2],
@@ -364,7 +364,7 @@ def test_build_test_line_values_raises_when_a_row_matches_no_sibling_sub_tests_g
     # is filtered out of BOTH siblings' own re-derived populations -- it
     # must raise ContractViolation at build time, never be silently dropped
     # (which would silently under-count the headline with no signal).
-    def read_population(source, *, version=None):
+    def read_population(source, *, version=None, **_):
         if source == "claims":
             # pop_dom filters to Employee ID == 1 below, so r3 (Employee ID
             # 99) is present in the raw source (row_amount sees it) but
