@@ -444,3 +444,83 @@ def test_g10_negative_control_zero_findings(local_persistence, tmp_path):
     findings = local_persistence.list_findings(state.run_id)
     assert findings == []
     assert state.findings == []
+
+
+# ── G13 ───────────────────────────────────────────────────────────────────────
+
+
+def test_g13_every_xlsx_number_equals_the_persisted_value(local_persistence, uid):
+    """G13 (CLAUDE.md §5): every number in the exported XLSX workpaper equals
+    the run's own persisted value, with the same rounding -- the exporter
+    reads state/persistence, never recomputes (orchestrator.nodes.fieldwork.
+    export's own docstring). Runs the real SKILL-001 Skill end to end
+    (execute -> classify -> find -> prioritise -> act -> export) against the
+    fast planted fixture and diffs every numeric cell in the Findings,
+    Metrics and Test Results sheets against orchestrator.persistence's own
+    rows for that run -- not a re-derivation of what the exporter should
+    have written, an independent read of the same source it read."""
+    import hashlib
+    import io
+
+    import openpyxl
+
+    from orchestrator.nodes.fieldwork import act, classify, export, prioritise
+
+    ctx, state = _make_ctx_and_state(local_persistence, DATA_DIR, run_id=f"RUN-G13-{uid}")
+    state = discover(ctx, state)
+    state = execute(ctx, state)
+    state = classify(ctx, state)
+    state = find(ctx, state)
+    state = prioritise(ctx, state)
+    state = act(ctx, state)
+    state = export(ctx, state)
+
+    findings_by_id = {f["finding_id"]: f for f in local_persistence.list_findings(state.run_id)}
+    assert findings_by_id, "no findings fired on this fixture -- test is not exercising anything"
+    metrics = local_persistence.get_run_metrics(state.run_id)
+    test_results_by_id = {t["test_id"]: t for t in state.test_results}
+
+    xlsx_meta = state.exports["xlsx"]
+    content = ctx.export_storage.read(xlsx_meta["path"])
+    assert hashlib.sha256(content).hexdigest() == xlsx_meta["sha256"]
+    wb = openpyxl.load_workbook(io.BytesIO(content), data_only=True)
+
+    findings_sheet = wb["Findings"]
+    header = [c.value for c in findings_sheet[1]]
+    exposure_col = header.index("exposure_amount") + 1
+    id_col = header.index("finding_id") + 1
+    checked_findings = 0
+    for row in findings_sheet.iter_rows(min_row=2):
+        finding_id = row[id_col - 1].value
+        if finding_id not in findings_by_id:
+            continue  # the footer row, or past the data rows
+        expected = findings_by_id[finding_id]["exposure_amount"]
+        actual = row[exposure_col - 1].value
+        if expected is None:
+            assert actual is None, f"{finding_id}: expected a blank cell (non-monetary), got {actual!r}"
+        else:
+            assert actual == pytest.approx(round(expected, 2)), f"{finding_id}: {actual!r} != {expected!r}"
+        checked_findings += 1
+    assert checked_findings == len(findings_by_id)
+
+    metrics_sheet = wb["Metrics"]
+    checked_metrics = 0
+    for row in metrics_sheet.iter_rows(min_row=2):
+        name = row[0].value
+        if name not in metrics:
+            continue  # the footer row
+        value = metrics[name]["value"]
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            assert row[1].value == pytest.approx(value), f"{name}: {row[1].value!r} != {value!r}"
+        checked_metrics += 1
+    assert checked_metrics == len(metrics)
+
+    test_results_sheet = wb["Test Results"]
+    checked_tests = 0
+    for row in test_results_sheet.iter_rows(min_row=2):
+        test_id = row[0].value
+        if test_id not in test_results_by_id:
+            continue  # the footer row
+        assert row[2].value == test_results_by_id[test_id]["exception_units"]
+        checked_tests += 1
+    assert checked_tests == len(test_results_by_id)
