@@ -58,6 +58,9 @@ ALLOWED_NODE_MODULES = {
     "orchestrator.nodes.fieldwork",
     "orchestrator.nodes.context",
     "orchestrator.nodes.registry",
+    # The fieldwork run's own `narrate` node (P6 WP N7): fieldwork, not a
+    # lifecycle module.
+    "orchestrator.nodes.narration",
 }
 
 
@@ -182,3 +185,17 @@ def test_registry_import_alone_is_lazy_and_resolving_fieldwork_stays_isolated(tm
     for prefix in FORBIDDEN_PREFIXES:
         offenders = [m for m in data["after"] if m == prefix or m.startswith(prefix + ".")]
         assert not offenders, f"resolving fieldwork nodes imported forbidden module(s): {offenders}"
+
+
+def test_registry_fieldwork_sequence_matches_fieldwork_nodes_for():
+    # The registry is what the executor and service actually run; the
+    # module-level NODES_FOR in nodes/fieldwork.py must never drift from it
+    # (found 2026-09-24: `narrate` was added to one and not the other, so it
+    # never ran through the real executor path).
+    from orchestrator.nodes.fieldwork import NODES_FOR as FIELDWORK_NODES_FOR
+    from orchestrator.nodes.registry import NODES_FOR as REGISTRY_NODES_FOR
+
+    for phase, nodes in FIELDWORK_NODES_FOR["fieldwork"].items():
+        registry_nodes = REGISTRY_NODES_FOR["fieldwork"][phase]
+        assert [n for n, _ in registry_nodes] == [n for n, _ in nodes], phase
+        assert [f for _, f in registry_nodes] == [f for _, f in nodes], phase

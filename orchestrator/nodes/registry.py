@@ -59,6 +59,7 @@ _NODE_SPECS: dict[str, dict[str, list[tuple[str, str]]]] = {
             ("classify", "orchestrator.nodes.fieldwork:classify"),
             ("find", "orchestrator.nodes.fieldwork:find"),
             ("prioritise", "orchestrator.nodes.fieldwork:prioritise"),
+            ("narrate", "orchestrator.nodes.narration:narrate"),
             ("act", "orchestrator.nodes.fieldwork:act"),
         ],
         "export": [
