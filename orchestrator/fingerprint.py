@@ -177,7 +177,23 @@ def _resolve_code_revision(explicit: str | None, settings_value: str | None) -> 
         check=True,
     ).stdout
     if status.strip():
-        rev += "+dirty"
+        # Independent review 2026-09-24 item 7: a bare "+dirty" suffix makes
+        # every dirty working tree at this HEAD look identical to the
+        # fingerprint, regardless of what actually changed -- two different
+        # uncommitted diffs would verify_fingerprint() as "the same setup".
+        # `git diff HEAD` covers tracked-file changes (staged and unstaged);
+        # untracked files are not part of a `git diff` and are deliberately
+        # excluded here, same as `code_revision`'s own git-rev-parse basis
+        # only ever describes tracked, committed content.
+        diff = subprocess.run(
+            ["git", "diff", "HEAD"],
+            cwd=_REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        diff_hash = hashlib.sha256(diff.encode("utf-8")).hexdigest()[:12]
+        rev += f"+dirty.{diff_hash}"
     return rev
 
 

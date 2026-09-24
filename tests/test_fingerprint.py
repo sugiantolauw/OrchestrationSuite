@@ -234,6 +234,53 @@ def test_explicit_code_revision_wins():
     assert fp["code_revision"] == "explicit-rev"
 
 
+def _init_git_repo(root, monkeypatch):
+    import subprocess
+
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=root, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=root, check=True)
+    (root / "tracked.txt").write_text("original\n")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "initial"], cwd=root, check=True)
+
+    import orchestrator.fingerprint as fp_mod
+
+    monkeypatch.setattr(fp_mod, "_REPO_ROOT", root)
+    return fp_mod
+
+
+def test_dirty_code_revision_includes_a_hash_of_the_actual_diff(tmp_path, monkeypatch):
+    """Independent review 2026-09-24 item 7: a bare "+dirty" suffix made
+    every dirty working tree at the same HEAD indistinguishable to the
+    fingerprint, regardless of what actually changed. Two DIFFERENT dirty
+    diffs at the SAME commit must resolve to two DIFFERENT code_revision
+    strings, both still prefixed by the same commit hash and "+dirty."."""
+    fp_mod = _init_git_repo(tmp_path, monkeypatch)
+    settings = fp_mod.Settings()
+
+    (tmp_path / "tracked.txt").write_text("changed one way\n")
+    rev_a = fp_mod._resolve_code_revision(None, settings.code_revision)
+
+    (tmp_path / "tracked.txt").write_text("changed a DIFFERENT way\n")
+    rev_b = fp_mod._resolve_code_revision(None, settings.code_revision)
+
+    assert rev_a != rev_b
+    commit_hash = rev_a.split("+dirty.")[0]
+    assert rev_b.startswith(commit_hash)
+    assert "+dirty." in rev_a and "+dirty." in rev_b
+
+
+def test_identical_dirty_diff_is_deterministic(tmp_path, monkeypatch):
+    fp_mod = _init_git_repo(tmp_path, monkeypatch)
+    settings = fp_mod.Settings()
+
+    (tmp_path / "tracked.txt").write_text("same change\n")
+    rev_1 = fp_mod._resolve_code_revision(None, settings.code_revision)
+    rev_2 = fp_mod._resolve_code_revision(None, settings.code_revision)
+    assert rev_1 == rev_2
+
+
 def test_settings_code_revision_used_when_no_explicit():
     fp = _fp(settings=_settings(code_revision="from-settings-rev"))
     assert fp["code_revision"] == "from-settings-rev"
