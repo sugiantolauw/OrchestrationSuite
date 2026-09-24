@@ -1387,7 +1387,7 @@ def _p2_update(bundle: dict, start_date, end_date, members, expense_types, meta:
 # fuzzy-joined in "Employee Name" / "Report Amount" via `_find_col` with a
 # silent default when absent (reference_app/app.py:171-226, the exact
 # NN14 behaviour this build removes). This tab reports what the real
-# contract supports and says "n/a" for the rest (see this task's report).
+# contract supports and shows "—" for the rest.
 
 _RECEIPT_VIEWED_COL = "Report Receipt Viewed"
 _ENTRY_VIEWED_COL = "All Entry Receipts Viewed"
