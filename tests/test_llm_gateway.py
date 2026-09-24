@@ -21,6 +21,7 @@ from orchestrator.llm.errors import (
     ModelUnavailable,
     RateLimited,
     TransientModelError,
+    TruncatedOutput,
 )
 from orchestrator.llm.gateway import CallContext, LLMGateway
 
@@ -279,6 +280,54 @@ def test_model_unavailable_never_retried():
     result = gw.call(task="classify", seq=1, messages=[], desired_params={}, ctx=_ctx())
     assert result.status == "unavailable"
     assert len(client.calls) == 1  # no retry -- the second canned response is never consumed
+
+
+# ── bad request (400) -- NN7 fix, independent review 2026-09-24 item 3:
+# migration 008's llm_calls outcome CHECK includes 'bad_request', but
+# LLMConfigError from the model client used to propagate out of
+# `_call_live` unlogged, leaving that outcome unreachable and the failed
+# call with no trace. Each exception path out of `_call_live` must log
+# before the exception (if any) propagates. ─────────────────────────────
+
+
+def test_bad_request_logs_outcome_and_reraises_llm_config_error():
+    persistence = _persistence()
+    client = FakeModelClient(responses={
+        "databricks-gpt-oss-120b": [
+            LLMConfigError("model endpoint 'databricks-gpt-oss-120b' rejected the request (400): bad schema"),
+        ]
+    })
+    gw = _gateway(client, persistence=persistence)
+    with pytest.raises(LLMConfigError):
+        gw.call(task="classify", seq=1, messages=[{"role": "user", "content": "hi"}],
+                 desired_params={"max_tokens": 10}, ctx=_ctx())
+    assert len(client.calls) == 1  # a config bug is never retried
+
+    rows = persistence.list_llm_calls("RUN-1")
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["outcome"] == "bad_request"
+    assert row["error_type"] == "LLMConfigError"
+    assert "bad schema" in row["error_message"]
+    assert row["endpoint"] == "databricks-gpt-oss-120b"
+    assert row["node_name"] == "classify"
+    assert row["run_id"] == "RUN-1"
+
+
+def test_truncated_output_already_logs_invalid_output_without_raising():
+    # Audit finding, not a fix: TruncatedOutput is caught in `_call_live`
+    # and turned into a normal (logged) LLMResult -- it never propagates as
+    # an exception, so it was already safe against NN7 before this change.
+    persistence = _persistence()
+    client = FakeModelClient(responses={"databricks-gpt-oss-120b": [TruncatedOutput("databricks-gpt-oss-120b")]})
+    gw = _gateway(client, persistence=persistence)
+    result = gw.call(task="classify", seq=1, messages=[], desired_params={}, ctx=_ctx())
+    assert result.status == "invalid_output"
+
+    rows = persistence.list_llm_calls("RUN-1")
+    assert len(rows) == 1
+    assert rows[0]["outcome"] == "invalid_output"
+    assert rows[0]["error_type"] == "TruncatedOutput"
 
 
 # ── logging failure fails the call ───────────────────────────────────────
