@@ -109,6 +109,7 @@ def test_check_source_bindings_ok_when_file_readable():
     results = check_source_bindings(cfg, storage)
     assert len(results) == 1
     assert results[0].ok
+    assert results[0].name == "source_binding:SKILL-001.per_diem_rates"
 
 
 def test_check_source_bindings_missing_file_fails_sanitized():
@@ -117,7 +118,32 @@ def test_check_source_bindings_missing_file_fails_sanitized():
     results = check_source_bindings(cfg, storage)
     assert len(results) == 1
     assert not results[0].ok
-    assert results[0].detail == "file unreadable"
+    assert results[0].name == "source_binding:SKILL-001.per_diem_rates"
+    assert "file unreadable" in results[0].detail
+    assert "/Volumes/cat/sch/vol/tne/per_diem.xlsx" in results[0].detail
+
+
+def test_check_source_bindings_names_the_failing_source_not_just_the_skill():
+    # Independent review 2026-09-24 (CLAUDE.md §9B scenario 4): a Skill can
+    # bind several volume_file sources, so "source_binding:SKILL-001" alone
+    # does not tell an operator WHICH source is broken when only one of
+    # several is unreadable. The check name must identify the source, and
+    # the detail must carry the configured path -- the same information
+    # orchestrator.errors.ConfiguredSourceUnavailable already gives at
+    # discover-node read time; this pre-flight check must not be vaguer.
+    storage = _OkExportStorage()
+    storage.files["/Volumes/cat/sch/vol/tne/expense.xlsx"] = b"data"
+    cfg = {
+        "SKILL-001": {
+            "expense_report": {"kind": "volume_file", "path": "/Volumes/cat/sch/vol/tne/expense.xlsx"},
+            "per_diem_rates": {"kind": "volume_file", "path": "/Volumes/cat/sch/vol/tne/per_diem.xlsx"},
+        }
+    }
+    results = {r.name: r for r in check_source_bindings(cfg, storage)}
+    assert results["source_binding:SKILL-001.expense_report"].ok
+    broken = results["source_binding:SKILL-001.per_diem_rates"]
+    assert not broken.ok
+    assert "/Volumes/cat/sch/vol/tne/per_diem.xlsx" in broken.detail
 
 
 def test_check_source_bindings_empty_file_fails():
@@ -126,7 +152,8 @@ def test_check_source_bindings_empty_file_fails():
     cfg = {"SKILL-001": {"per_diem_rates": {"kind": "volume_file", "path": "/Volumes/cat/sch/vol/tne/per_diem.xlsx"}}}
     results = check_source_bindings(cfg, storage)
     assert not results[0].ok
-    assert results[0].detail == "file is empty"
+    assert "file is empty" in results[0].detail
+    assert "/Volumes/cat/sch/vol/tne/per_diem.xlsx" in results[0].detail
 
 
 def test_check_source_bindings_ignores_uc_table_entries():

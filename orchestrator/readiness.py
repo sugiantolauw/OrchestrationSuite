@@ -101,22 +101,32 @@ def check_volume(export_storage) -> CheckResult:
 
 
 def check_source_bindings(source_bindings_config: dict, export_storage) -> list[CheckResult]:
+    # Independent review 2026-09-24 (CLAUDE.md §9B scenario 4): the check
+    # name identifies the SOURCE, not just the Skill -- a Skill can bind
+    # several volume_file sources, and "source_binding:SKILL-001" alone
+    # does not say which one is broken. The detail carries the configured
+    # path, the same information orchestrator.errors.
+    # ConfiguredSourceUnavailable already gives at discover-node read time;
+    # this pre-flight check must not be vaguer than that.
     results: list[CheckResult] = []
     for skill_id, bindings in (source_bindings_config or {}).items():
-        for path, binding in volume_file_paths(bindings).items():
-            name = f"source_binding:{skill_id}"
+        for source_name, binding in (bindings or {}).items():
+            if binding.get("kind") != "volume_file":
+                continue
+            path = binding["path"]
+            name = f"source_binding:{skill_id}.{source_name}"
             if export_storage is None:
-                results.append(CheckResult(name, False, "no export storage configured to read it"))
+                results.append(CheckResult(name, False, f"{path!r}: no export storage configured to read it"))
                 continue
             try:
                 data = export_storage.read(path)
                 if not data:
-                    results.append(CheckResult(name, False, "file is empty"))
+                    results.append(CheckResult(name, False, f"{path!r}: file is empty"))
                 else:
                     results.append(CheckResult(name, True))
             except Exception:
                 _LOG.exception("readiness: source binding check failed for %s (%s)", name, path)
-                results.append(CheckResult(name, False, "file unreadable"))
+                results.append(CheckResult(name, False, f"{path!r}: file unreadable"))
     return results
 
 
