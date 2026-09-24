@@ -275,6 +275,128 @@ def test_g13_risk_chart_series_values_equal_severity_counts(real_deck):
     assert actual == expected
 
 
+def test_g13_exec_summary_and_risk_exposure_potential_exposure_callouts_agree(real_deck):
+    """Consistency across views (this task's requirement 2, bullet 4): the
+    same run_exposure_headline metric is shown twice in the deck -- once on
+    the Executive Summary slide's callout box, once on the Risk and
+    Exposure slide's callout box -- and both must read the same figure,
+    independently computed here from the run's own persisted metrics
+    (never by calling _money0/_build_exec_summary/_build_risk_and_exposure,
+    the code under test)."""
+    from orchestrator.pptx_export import _money0
+
+    metrics = real_deck["metrics"]
+    headline_metric = metrics.get("run_exposure_headline")
+    expected_text = _money0(headline_metric["value"] if headline_metric else None)
+
+    prs = real_deck["prs"]
+    slide_titles = {}
+    for slide in prs.slides:
+        for shape in slide.shapes:
+            if shape.has_text_frame and shape.text_frame.text in ("Executive Summary", "Risk and Exposure"):
+                slide_titles[shape.text_frame.text] = slide
+
+    callouts = {}
+    for title, slide in slide_titles.items():
+        for shape in slide.shapes:
+            if shape.has_text_frame and shape.text_frame.text.startswith("$"):
+                callouts[title] = shape.text_frame.text
+                break
+
+    assert set(callouts) == {"Executive Summary", "Risk and Exposure"}
+    assert callouts["Executive Summary"] == expected_text
+    assert callouts["Risk and Exposure"] == expected_text
+
+
+# ── zero-findings deck: an honest empty state, not a broken or fabricated
+# one (CLAUDE.md §4.7 defect 5) ──────────────────────────────────────────
+
+
+@pytest.fixture(scope="module")
+def zero_findings_deck(tmp_path_factory):
+    """A real deck rendered from a genuinely clean population -- every
+    planted exception AND near-miss negative removed from plants.yaml
+    (the same construction tests/test_g10_skill001_no_plants.py's G10 gate
+    uses), run through the full pipeline including act/export so this file
+    can assert on the RENDERED PPTX, not just on state.findings == []."""
+    import yaml as _yaml
+
+    from orchestrator.adapters.persistence_local import LocalPersistence
+    from tests.fixtures.tne_planted.generate import generate
+
+    plants_path = DATA_DIR.parent / "plants.yaml"
+    doc = _yaml.safe_load(plants_path.read_text())
+    no_plants_doc = {"seed": doc.get("seed"), "background": doc.get("background", {})}
+    tmp_dir = tmp_path_factory.mktemp("pptx-zero-findings")
+    no_plants_path = tmp_dir / "plants_no_exceptions.yaml"
+    no_plants_path.write_text(_yaml.safe_dump(no_plants_doc))
+    data_dir = tmp_dir / "data"
+    generate(no_plants_path, data_dir)
+
+    persistence = LocalPersistence(":memory:")
+    persistence.migrate()
+    ctx, state = _make_ctx_and_state(persistence, data_dir, run_id="RUN-PPTX-ZERO-FINDINGS")
+    state = discover(ctx, state)
+    state = execute(ctx, state)
+    state = classify(ctx, state)
+    state = find(ctx, state)
+    state = prioritise(ctx, state)
+    state = act(ctx, state)
+    state = export(ctx, state)
+
+    findings = persistence.list_findings(state.run_id)
+    assert findings == [], "the no-plants fixture produced findings -- test is not exercising the zero case"
+    metrics = persistence.get_run_metrics(state.run_id)
+
+    pptx_meta = state.exports["pptx"]
+    content = ctx.export_storage.read(pptx_meta["path"])
+    assert hashlib.sha256(content).hexdigest() == pptx_meta["sha256"]
+    import io
+
+    prs = Presentation(io.BytesIO(content))
+    return {"state": state, "findings": findings, "metrics": metrics, "prs": prs}
+
+
+def test_zero_findings_deck_slide_count_matches_the_stated_rule(zero_findings_deck):
+    prs = zero_findings_deck["prs"]
+    catalogue_rows = load_catalogue_rows(SKILL_DIR)
+    actual = len(prs.slides._sldIdLst)
+    assert actual == expected_slide_count(0, len(catalogue_rows))
+
+
+def test_zero_findings_deck_risk_chart_shows_all_zero_severity_counts(zero_findings_deck):
+    """The one native chart in the deck must show real, honestly-computed
+    zeros for a clean run -- never stale data from some other run, and
+    never omitted."""
+    prs = zero_findings_deck["prs"]
+    chart = None
+    for slide in prs.slides:
+        for shape in slide.shapes:
+            if getattr(shape, "has_chart", False):
+                chart = shape.chart
+                break
+        if chart is not None:
+            break
+    assert chart is not None, "no chart found on the zero-findings deck"
+    categories = list(chart.plots[0].categories)
+    values = list(chart.plots[0].series[0].values)
+    assert dict(zip(categories, values)) == {"High": 0, "Medium": 0, "Low": 0}
+
+
+def test_zero_findings_deck_says_no_control_exceptions_found_not_a_blank_section(zero_findings_deck):
+    """CLAUDE.md §4.7 defect 5: a clean audit is a legitimate, important
+    outcome and must say so explicitly -- never an empty 'Top Matters'
+    section or a fabricated finding."""
+    prs = zero_findings_deck["prs"]
+    all_text = [
+        shape.text_frame.text
+        for slide in prs.slides
+        for shape in slide.shapes
+        if shape.has_text_frame
+    ]
+    assert any("No control exceptions found" in t for t in all_text)
+
+
 def test_g13_test_coverage_exception_counts_equal_test_results(real_deck):
     state = real_deck["state"]
     prs = real_deck["prs"]
