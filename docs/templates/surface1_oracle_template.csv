@@ -1,0 +1,3 @@
+record_type,test_id,exception_id,expected,identity_field,identity_value,metric_name,expected_value
+exception,T3.1b,EX-001,true,Booking ID,900001,,
+metric,T4.4,,,,,hv_count,3
