@@ -1772,6 +1772,23 @@ Source files are in `synthetic_data/`; row counts match `FILE_REGISTRY` exactly.
   runs; the auditor edits and approves before anything runs. Step (3)'s mockups include the impact
   analysis, RCM and planning screens. A **template library** (scope memo, test step and request
   list templates, versioned and owned like Skills) ships with this step.
+  **Porting kit (approved 2026-09-23; runs right after step 1, before Explorer).** Deployment
+  stays **Databricks SDK-based** (`scripts/deploy_app.py`, confirmed allowed at Optus); Asset
+  Bundles are optional and unconfirmed there. The kit covers:
+  - a pre-flight checker that fills the Optus column of `docs/CAPABILITY_MATRIX.md`;
+  - an idempotent bootstrap (schema, Volume, grants to the App SP, secret scope, source-contract
+    check);
+  - a `dev`/`optus` environment profile layout with `.env.example` per target;
+  - post-deploy smoke checks and Layer 4 Delta checks (§9B);
+  - an offline wheelhouse option built from `requirements.lock` (whether Optus Apps can reach PyPI or
+    a mirror is unknown), vendoring `manylinux2014_x86_64` wheels;
+  - a `.gitlab-ci.yml` running Tier A against `LocalPersistence` (Optus code lives in **GitLab**;
+    no GitHub-specific tooling);
+  - `docs/PORTING.md`, the step-by-step runbook including the open governance items. It excludes
+    `.env`, tokens, dev-workspace runs and anything environment-specific; synthetic data is optional,
+    for demos.
+
+  Every later feature is deployed through this path.
   Further steps (approved 2026-09-23), each mocked up for approval before build:
   (7) **Reporting & ServiceNow integration** — the audit team is moving to ServiceNow and leadership
   will track issues and remediation there, so **this app does not build issue tracking or a
