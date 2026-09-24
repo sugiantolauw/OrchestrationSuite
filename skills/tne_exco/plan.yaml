@@ -894,7 +894,7 @@ tests:
     risk_id: RSK-TNE-07
     assertion: operating
     not_testable:
-      reason: "classification endpoint not yet wired (P6 classify node)"
+      reason: "classification of claim descriptions for personal-use indicators requires a model-serving endpoint that is not yet connected"
       flags: [RF_CS_PersonalExpense]
 
   - test_id: T4.4

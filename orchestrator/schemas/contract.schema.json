@@ -12,6 +12,7 @@
           "file": {"type": "string"},
           "header_trim": {"type": "boolean"},
           "entry_key": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+          "entry_key_repeats": {"type": "boolean"},
           "columns": {
             "type": "object",
             "additionalProperties": {

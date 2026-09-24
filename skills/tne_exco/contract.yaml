@@ -5,18 +5,17 @@ sources:
     sheet: data
     file: Expense_Report_Combined.xlsx
     header_trim: false
-    # B2 (CLAUDE.md P2/P3 gate review): the transaction entry key for this
-    # source's run headline de-duplication (orchestrator.nodes.fieldwork.
-    # prioritise) -- real declared columns, never a positional row index.
-    # T4.1's own semi-join key to the missing_receipt register (spec T4.1,
-    # docs/specs/SKILL-001_test_specification.md), sharpened with the report
-    # key so two genuinely distinct lines that happen to share employee/date/
-    # type/amount (but belong to different reports) are never collapsed into
-    # one entry -- and, deliberately, so two T5.2 DUPLICATE lines (same
-    # employee/date/vendor/amount but DIFFERENT Report Legacy Key, since a
-    # duplicate is a second, separate submission) are never collapsed either:
-    # both are real, distinct reimbursement events.
-    entry_key: [Employee ID, Report Legacy Key, Transaction Date, Expense Type, Expense Amount (reimbursement currency)]
+    # Independent review (2026-09-24), item 1: this source is ROW-GRAIN (one
+    # row = one distinct transaction entry) -- 4,049 of its rows genuinely
+    # share the 5-column tuple this contract used to declare as `entry_key`
+    # (same employee/report/date/type/amount, e.g. recurring telco charges),
+    # so treating that tuple as unique silently collapsed real, distinct
+    # spend in the run headline (prioritise's own de-duplication assumed
+    # uniqueness it never checked). No entry_key is declared here: a
+    # row-grain source's line identity for headline de-duplication is its
+    # own row identity (source, row_key) -- see
+    # orchestrator.nodes.fieldwork.prioritise. `entry_key` is reserved for a
+    # source whose grain genuinely repeats (attendee_validity, below).
     columns:
       Employee:
         type: string
@@ -80,8 +79,14 @@ sources:
     # attendee-grain (one row per attendee of one entertainment entry), so
     # several flagged rows legitimately share one entry_key; the headline's
     # de-duplication collapses them to that single entry, never summing the
-    # same Entry Amount once per attendee.
+    # same Entry Amount once per attendee. `entry_key_repeats: true` records
+    # that this repetition is DECLARED and expected (independent review
+    # 2026-09-24, item 1) -- prioritise() treats a source with entry_key but
+    # no entry_key_repeats as a source that is supposed to be unique per row,
+    # and fails the run if it is not (the check expense_report's own
+    # mis-declared entry_key should have had).
     entry_key: [Employee ID, Report Name, Transaction Date, Vendor, Entry Amount]
+    entry_key_repeats: true
     columns:
       Employee ID:
         type: integer

@@ -139,6 +139,37 @@ def test_full_run_against_real_synthetic_data(tmp_path):
         assert len(frames["expense_report"]) < 92798  # the tested population, not the raw source
         assert "role" in frames["expense_report"].columns
 
+        # Independent review 2026-09-24 item 1: the headline (amount at
+        # risk) on the real 92,798-row synthetic_data/ population. Bounds,
+        # never an exact oracle value (a real primitive/threshold/rate
+        # change legitimately moves it): headline >= the largest single
+        # spend-basis finding's own exposure_amount (every spend-basis line
+        # is at LEAST that big, and de-duplication can only ever raise the
+        # headline toward, never below, that finding's own total) and
+        # headline <= the naive sum of every spend/excess finding's
+        # exposure_amount (line-level MAX de-duplication can only ever
+        # lower the total, never raise it above the sum of the parts). This
+        # is exactly the property the regression violated: the pre-fix
+        # headline ($315,936.10) was BELOW T4_4's own $318,785.60 spend-basis
+        # exposure_amount -- a de-duplicated total that is smaller than one
+        # of its own contributing findings is a contradiction, proof that
+        # real distinct spend was silently dropped, not de-duplicated.
+        headline = payload["exposure"]["headline"]
+        spend_findings = [f for f in payload["findings"] if f.get("monetary_basis") == "spend"]
+        monetary_findings = [f for f in payload["findings"] if f.get("monetary_basis") in ("spend", "excess")]
+        assert headline is not None
+        assert spend_findings, "no spend-basis finding fired on this data -- test is not exercising anything"
+        max_spend_exposure = max(f["exposure_amount"] for f in spend_findings)
+        sum_monetary_exposure = round(sum(f["exposure_amount"] for f in monetary_findings), 2)
+        assert headline >= max_spend_exposure, (
+            f"headline {headline} is below the largest spend-basis finding's own exposure_amount "
+            f"{max_spend_exposure} -- real distinct spend was silently dropped"
+        )
+        assert headline <= sum_monetary_exposure, (
+            f"headline {headline} exceeds the naive sum {sum_monetary_exposure} of every spend/excess "
+            f"finding's exposure_amount -- de-duplication cannot legitimately raise the total"
+        )
+
         service.sign_off(ctx, run_id, "approver")
         status, _ = _wait_for_status(ctx, run_id, {"completed", "failed"}, timeout=120)
         run = service.get_run(ctx, run_id)

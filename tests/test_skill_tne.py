@@ -60,7 +60,7 @@ def test_not_testable_only_where_the_spec_says(tne_result):
     not_testable = {t["test_id"]: t["reason"] for t in tne_result.test_results if t["status"] == "not_testable"}
     assert set(not_testable) == {"T3.2a_accom", "T4.3"}
     assert "hotel" in not_testable["T3.2a_accom"]
-    assert "classification endpoint" in not_testable["T4.3"]
+    assert "model-serving endpoint" in not_testable["T4.3"]
 
 
 def test_p_exp_population_counts(tne_result):

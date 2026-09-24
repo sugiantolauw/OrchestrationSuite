@@ -13,41 +13,49 @@ Two separate mechanisms, both covered here:
     plan test declares, CLAUDE.md P2/P3 gate review item B1) -- the same
     figure(s) already rendered into its observation text, never re-derived
     from raw rows;
-  * the run headline ("Gross value of flagged spend (de-duplicated)", B2) is
-    the sum, over 'spend'/'excess' findings only, of each source's own
-    declared entry_key (contract.yaml, real columns) identifying one
-    distinct transaction entry -- never a positional row index, never
-    inferred from a primitive's group_id or from whether a group's members
-    happen to agree on amount. This replaced an earlier, narrower mechanism
-    (_GROUP_COLLAPSE_PRIMITIVES, keyed on group_id and which primitive
-    produced it) that could not de-duplicate the same entry across two
-    DIFFERENT findings/sources and had no real column identity at all.
+  * the run headline ("Potential exposure", the amount at risk -- independent
+    review 2026-09-24 item 1) is the sum, over every DISTINCT flagged line
+    from 'spend'/'excess' findings, of the LARGEST amount at risk any finding
+    attributes to that line. Line identity is row identity for a row-grain
+    source, or a declared repeats-grain `entry_key` (contract.yaml,
+    `entry_key_repeats: true`) where a source's grain genuinely repeats
+    (attendee rows). A 'spend' finding attributes a line's own full amount;
+    an 'excess' finding attributes only the at-risk portion (the lines
+    beyond the first in a duplicate group, or a per-diem group's over-limit
+    amount allocated pro rata to that group's lines). This replaced an
+    earlier design that always used entry_key (even for row-grain sources)
+    and always used the FULL row amount even for 'excess' findings --
+    exactly the shape of bug that silently collapsed 4,049 genuinely
+    distinct expense_report rows sharing a mis-declared "unique" entry_key.
 
 Covers:
   * an attendee-grain population (T3.3b's shape: several rows sharing one
-    entry_key) collapses to one entry in the headline;
-  * two rows that a primitive's group_id ties together but whose entry_key
-    genuinely differs (T5.2's shape: duplicate_detection's grouping key
-    includes amount, so members always agree on amount by construction, but
-    are still distinct transaction entries) are NOT collapsed;
-  * a group of different-amount rows (T5.1's shape) is summed, not
-    collapsed;
+    repeats-grain entry_key) collapses to one line in the headline;
+  * a duplicate_detection 'excess' finding: only the line(s) beyond the
+    first (deterministic read order) are at risk, never the full group;
+  * a group_by threshold_exceedance 'excess' finding (T6.1d's shape): a
+    group's over-limit amount is allocated pro rata to that group's lines
+    by their own amount, never the full group total;
+  * a group of different-amount 'spend' lines (T5.1's shape) is summed in
+    full, not collapsed;
   * a finding whose test declares no additive AUD metric gets
     exposure_amount=None / exposure_basis="non-monetary finding", never 0.0;
-  * a finding with monetary_basis='none' never contributes to the headline
-    even if its rows share a source with a declared entry_key;
+  * a finding with monetary_basis='none' never contributes to the headline;
   * a finding with monetary_basis='approved_not_spent' contributes to
     run_approved_not_spent_total, never to the headline;
   * two 'spend'/'excess' findings citing overlapping flagged rows: the
-    headline is the union of distinct entries, never the naive sum of
-    per-finding totals;
+    headline is the union of distinct lines at their MAX attributed value,
+    never the naive sum of per-finding totals;
   * a null or unparseable amount, or a missing entry_key column, in a source
     a population declares `amount_column`/contract declares `entry_key` for
     raises ContractViolation, never a fabricated 0.0 or a silent skip;
-  * a 'spend'/'excess' finding whose source declares NO entry_key raises,
-    rather than silently entering an undeduplicated headline;
-  * two rows sharing one entry_key that disagree on amount raises (a
-    genuine data-integrity problem, never guessed).
+  * a 'spend'/'excess' finding whose source declares NO entry_key uses row
+    identity, never raises;
+  * a source that declares entry_key WITHOUT entry_key_repeats but whose
+    data is not actually unique per row raises -- the regression this fix
+    targets;
+  * two rows sharing a repeats-grain entry_key that disagree on amount
+    raises (a genuine data-integrity problem, never guessed).
 """
 
 from __future__ import annotations
@@ -92,7 +100,13 @@ def _rig(local_persistence, tmp_path, *, populations, tests, read_population, en
     h.ctx.skill.plan = {"populations": populations, "tests": tests}
     h.ctx.data_source.read_population = read_population
     for source, cols in (entry_keys or {}).items():
-        h.ctx.skill.contract["sources"].setdefault(source, {})["entry_key"] = cols
+        src_cfg = h.ctx.skill.contract["sources"].setdefault(source, {})
+        src_cfg["entry_key"] = cols
+        # Every existing caller of `entry_keys=` simulates a repeats-grain
+        # source (T3.3b's attendee-grain shape) -- a caller that wants to
+        # simulate a wrongly-declared, non-repeating entry_key sets
+        # entry_key_repeats=False directly on h.ctx.skill.contract itself.
+        src_cfg["entry_key_repeats"] = True
     return h
 
 
@@ -147,17 +161,16 @@ def test_attendee_grain_population_collapses_to_one_headline_entry(local_persist
 
     headline = h.persistence.get_run_metrics(state.run_id)["run_exposure_headline"]
     assert headline["value"] == 900.0, "three attendee rows of one $900 entry must collapse in the headline, not sum to $2700"
-    assert headline["source_ref"]["label"] == "Gross value of flagged spend (de-duplicated)"
+    assert headline["source_ref"]["label"] == "Potential exposure"
 
 
-def test_duplicate_lines_sharing_amount_by_construction_are_not_collapsed(local_persistence, tmp_path):
-    # THE REGRESSION THIS FIX TARGETS (RUN-AE7BB758A9B9): duplicate_detection's
-    # grouping key deliberately includes the amount column, so a duplicate
-    # group's members ALWAYS share one amount by construction -- but they are
-    # still two DISTINCT transaction entries (different Report Legacy Key in
-    # the real Skill; here, a different Vendor spelling simulates two
-    # separate submissions). entry_key-based de-duplication must not collapse
-    # them just because a primitive's group_id ties them together.
+def test_duplicate_lines_excess_only_counts_lines_beyond_the_first(local_persistence, tmp_path):
+    # Independent review 2026-09-24, item 1: two duplicate_detection rows are
+    # two DISTINCT row-grain lines (no entry_key on "claims" here -- line
+    # identity is row identity), but monetary_basis='excess' means only the
+    # at-risk PORTION counts: the line(s) beyond the first, deterministically
+    # ordered (read/row order -- "d1" before "d2"). d1 is not at risk (it is
+    # the original claim); d2 is the double payment.
     def read_population(source, *, version=None):
         assert source == "claims"
         return pd.DataFrame({
@@ -202,7 +215,7 @@ def test_duplicate_lines_sharing_amount_by_construction_are_not_collapsed(local_
     assert f["exposure_amount"] == 500.0, "exposure_amount must equal the finding's own cited metric, never a re-derived row/group sum"
 
     headline = h.persistence.get_run_metrics(state.run_id)["run_exposure_headline"]
-    assert headline["value"] == 1000.0, "both $500 lines are distinct entries in the headline even though duplicate_detection made them share one amount"
+    assert headline["value"] == 500.0, "only the line beyond the first (the double payment) is at risk, not both full lines"
 
 
 def test_split_detection_group_of_different_amounts_is_not_collapsed(local_persistence, tmp_path):
@@ -529,7 +542,11 @@ def test_finding_citing_a_sibling_sub_tests_metrics_is_not_dropped(local_persist
     finding = _finding(
         "F6", test_id="T6.1d_dom",
         metrics_cited={"daily_over_amount_dom": _metric(446.40), "daily_over_amount_int": _metric(998.53)},
-        monetary_basis="excess",
+        # This scenario has no group_by -- it exercises the sibling-metric
+        # mapping mechanism, not excess allocation shape, so monetary_basis
+        # is 'spend' (row-grain, full amount); T6.1d's real plan.yaml test
+        # is group_by + 'excess', covered separately below.
+        monetary_basis="spend",
     )
     h.persistence.write_findings(
         h.state.run_id, [finding],
@@ -591,10 +608,14 @@ def test_amount_column_not_in_read_data_raises(local_persistence, tmp_path):
         prioritise(h.ctx, h.state)
 
 
-def test_spend_finding_whose_source_declares_no_entry_key_raises(local_persistence, tmp_path):
-    """B2: a 'spend'/'excess' finding cannot be safely de-duplicated in the
-    headline without a declared entry_key -- must fail loudly rather than
-    silently enter an undeduplicated (or arbitrarily deduplicated) headline."""
+def test_spend_finding_whose_source_declares_no_entry_key_uses_row_identity(local_persistence, tmp_path):
+    """Independent review 2026-09-24, item 1: a row-grain source declares no
+    entry_key at all -- its line identity is its own row identity, so a
+    'spend' finding's headline contribution is simply that row's own full
+    amount, never a ContractViolation (this replaced the old requirement
+    that every monetary source declare an entry_key, which is exactly what
+    drove expense_report to declare one it didn't actually need and that
+    turned out non-unique)."""
     def read_population(source, *, version=None):
         return pd.DataFrame({"__row_key": ["r1"], "Amount": [123.0]})
 
@@ -624,5 +645,106 @@ def test_spend_finding_whose_source_declares_no_entry_key_raises(local_persisten
         skill_version=h.state.skill_version, now="2026-01-01T00:00:00.000000Z",
     )
 
-    with pytest.raises(ContractViolation):
+    state = prioritise(h.ctx, h.state)
+    assert state.findings[0]["exposure_amount"] == 123.0
+
+    headline = h.persistence.get_run_metrics(state.run_id)["run_exposure_headline"]
+    assert headline["value"] == 123.0
+
+
+def test_declared_entry_key_that_is_not_unique_raises(local_persistence, tmp_path):
+    """Independent review 2026-09-24, item 1 -- THE REGRESSION THIS FIX
+    TARGETS: a source declares entry_key WITHOUT entry_key_repeats (the
+    default -- asserting the key is unique per row), but two rows in the
+    data actually share it. This is exactly expense_report's old shape
+    (4,049 shared rows) that silently collapsed real, distinct spend. The
+    fix fails the run loudly instead of guessing."""
+    def read_population(source, *, version=None):
+        return pd.DataFrame({
+            "__row_key": ["r1", "r2"],
+            "Employee ID": [1, 1], "Transaction Date": ["2026-01-05", "2026-01-05"],
+            "Vendor": ["VendorX", "VendorX"], "Amount": [12.0, 12.0],
+        })
+
+    h = _rig(
+        local_persistence, tmp_path,
+        populations={"pop": {"source": "claims", "amount_column": "Amount"}},
+        tests=[{"test_id": "TA", "flag": "RF_A", "primitive": "threshold_exceedance",
+                 "params": {"flag": "RF_A", "metrics": {"a_amount": {"kind": "sum", "column": "Amount", "unit": "AUD"}}}}],
+        read_population=read_population,
+    )
+    # Declare entry_key WITHOUT entry_key_repeats -- asserts uniqueness.
+    h.ctx.skill.contract["sources"]["claims"]["entry_key"] = ["Employee ID", "Transaction Date", "Vendor"]
+    h.ctx.skill.contract["sources"]["claims"]["entry_key_repeats"] = False
+    h.persistence.write_flagged_rows(h.state.run_id, [_flagged_row("claims", "r1", "RF_A")])
+    h.persistence.write_run_metrics(h.state.run_id, [
+        {"metric_name": "a_amount", "value": 12.0, "unit": "AUD", "source_ref": {}, "test_id": "TA"},
+    ])
+    finding = _finding("FA", test_id="TA", metrics_cited={"a_amount": _metric(12.0)}, monetary_basis="spend")
+    h.persistence.write_findings(
+        h.state.run_id, [finding],
+        engagement_id=h.state.engagement_id, skill_id=h.state.skill_id,
+        skill_version=h.state.skill_version, now="2026-01-01T00:00:00.000000Z",
+    )
+
+    with pytest.raises(ContractViolation, match="not unique"):
         prioritise(h.ctx, h.state)
+
+
+def test_per_diem_group_excess_allocated_pro_rata_to_the_days_lines(local_persistence, tmp_path):
+    """Independent review 2026-09-24, item 1: a group_by threshold_exceedance
+    'excess' finding (T6.1d's shape) allocates its group's over-limit amount
+    PRO RATA to that group's lines by their own amount, never the full
+    group total. One employee-day: two $300/$100 lines (limit $200, so
+    total $400 is $200 over) -- the $300 line is at risk for $150, the $100
+    line for $50."""
+    def read_population(source, *, version=None):
+        return pd.DataFrame({
+            "__row_key": ["p1", "p2"],
+            "Employee ID": [7, 7],
+            "Transaction Date": ["2026-04-01", "2026-04-01"],
+            "Vendor": ["VendorQ", "VendorQ"],
+            "Amount": [300.0, 100.0],
+        })
+
+    h = _rig(
+        local_persistence, tmp_path,
+        populations={"perdiem_pop": {"source": "claims", "amount_column": "Amount"}},
+        tests=[{
+            "test_id": "T61D", "flag": "RF_PERDIEM", "primitive": "threshold_exceedance",
+            "params": {
+                "population": "perdiem_pop", "column": "Amount", "direction": "above",
+                "group_by": ["Employee ID", "Transaction Date"], "aggregate": "sum",
+                "limit": {"threshold": "perdiem_limit"},
+                "flag": "RF_PERDIEM",
+                "metrics": {"daily_over_amount": {"kind": "excess", "unit": "AUD"}},
+            },
+        }],
+        read_population=read_population,
+    )
+    # Row-grain source for this scenario -- no entry_key (the mini fixture's
+    # own default "claims" entry_key needs a Vendor column this scenario
+    # doesn't have).
+    h.ctx.skill.contract["sources"]["claims"].pop("entry_key", None)
+    h.ctx.skill.thresholds["perdiem_limit"] = {"value": 200.0}
+    h.persistence.write_flagged_rows(h.state.run_id, [
+        _flagged_row("claims", "p1", "RF_PERDIEM", group_id="G1"),
+        _flagged_row("claims", "p2", "RF_PERDIEM", group_id="G1"),
+    ])
+    h.persistence.write_run_metrics(h.state.run_id, [
+        {"metric_name": "daily_over_amount", "value": 200.0, "unit": "AUD", "source_ref": {}, "test_id": "T61D"},
+    ])
+    finding = _finding(
+        "FPD", test_id="T61D", metrics_cited={"daily_over_amount": _metric(200.0)}, monetary_basis="excess",
+    )
+    h.persistence.write_findings(
+        h.state.run_id, [finding],
+        engagement_id=h.state.engagement_id, skill_id=h.state.skill_id,
+        skill_version=h.state.skill_version, now="2026-01-01T00:00:00.000000Z",
+    )
+
+    state = prioritise(h.ctx, h.state)
+    assert state.findings[0]["exposure_amount"] == 200.0, "exposure_amount is still the test's own excess metric, unaffected by allocation"
+
+    headline = h.persistence.get_run_metrics(state.run_id)["run_exposure_headline"]
+    assert headline["value"] == 200.0, "the two lines' pro-rata shares (150 + 50) sum back to the group's own excess"
