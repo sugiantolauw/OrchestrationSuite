@@ -317,10 +317,21 @@ def build_metrics(
             v = int(frame[col].nunique()) if frame is not None and len(frame) else 0
             metric = Metric(value=v, unit=unit or "count", source_ref=_base_source_ref(population, [col], grain))
         elif kind == "max":
+            # Independent review 2026-09-24 item 7: the maximum of an EMPTY
+            # set is undefined, not 0 -- unlike sum/count, whose empty value
+            # genuinely is 0. A silent 0.0 here would read as "the worst
+            # instance was $0", which is a different, wrong claim from "there
+            # were no instances" (the same shape of bug pct_of_population's
+            # own empty-population case below already guards against).
             col = spec["column"]
             frame = group_df if (group_df is not None and col in group_df.columns) else row_df
-            v = float(frame[col].max()) if frame is not None and len(frame) else 0.0
-            metric = Metric(value=v, unit=unit or "AUD", source_ref=_base_source_ref(population, [col], grain))
+            source_ref = _base_source_ref(population, [col], grain)
+            if frame is not None and len(frame):
+                v = float(frame[col].max())
+            else:
+                v = None
+                source_ref = {**source_ref, "reason": "not_testable: no exceptions, maximum is undefined"}
+            metric = Metric(value=v, unit=unit or "AUD", source_ref=source_ref)
         elif kind == "pct_of_population":
             # CLAUDE.md P2/P3 gate review item 6 (G10): an empty population
             # (denom == 0) has no defined percentage -- 0.0 would silently
@@ -339,7 +350,21 @@ def build_metrics(
                 source_ref = {**source_ref, "reason": "not_testable: population is empty, percentage is undefined"}
             metric = Metric(value=v, unit=unit or "%", source_ref=source_ref)
         elif kind == "excess":
-            v = float(values.get("excess", 0.0))
+            # Independent review 2026-09-24 item 7: `kind: excess` names a
+            # value ONLY a primitive that actually computes an excess total
+            # supplies (`values["excess"]`, e.g. threshold_exceedance's
+            # group_by branch) -- a plan.yaml that declares this metric kind
+            # against a primitive that never computes one is a config
+            # mismatch, not a population that happens to have zero excess
+            # (that legitimately supplies `values["excess"] = 0.0`, a
+            # present key). `values.get(..., 0.0)` could not tell the two
+            # apart and silently reported a fabricated $0 for the former.
+            if "excess" not in values:
+                raise PrimitiveParamsError(
+                    f"metric {name!r}: kind 'excess' declared but this primitive never computed "
+                    f"an excess value -- check the primitive actually supports this metric kind"
+                )
+            v = float(values["excess"])
             metric = Metric(value=v, unit=unit or "AUD", source_ref=_base_source_ref(population, columns, grain))
         elif kind == "match_rate":
             v = values.get("match_rate")
