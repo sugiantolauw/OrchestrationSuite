@@ -86,6 +86,13 @@ class NodeContext:
     export_storage: Any = None
     tracer: Any = None
     backend: str = "uc"
+    # Independent review 2026-09-24 item 4: the ModelClient a node's LLM
+    # calls use. None means "build a real DatabricksModelClient lazily"
+    # (orchestrator.nodes.fieldwork._build_classify_gateway) -- a test
+    # passes a FakeModelClient/RaisingModelClient here instead. Currently
+    # only consulted by the T4.3 row-level classification capability, which
+    # itself only runs when Settings.enable_row_level_llm is true.
+    model_client: Any = None
 
     def __post_init__(self) -> None:
         if self.data_source is not None and not isinstance(self.data_source, _CachingDataSource):

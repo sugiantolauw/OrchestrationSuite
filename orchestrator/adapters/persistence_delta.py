@@ -1752,6 +1752,65 @@ class DeltaPersistence:
             )
             return _fetchall_dicts(cur)
 
+    # ── row-level LLM classification (independent review item 4) ───────────
+
+    def write_classification_results(self, run_id: str, rows: list[dict]) -> None:
+        new_keys = {r["row_key"] for r in rows}
+        with self._cursor_ctx() as conn:
+            cur = self._execute(
+                conn,
+                f"SELECT row_key FROM {self._table('t43_classifications')} WHERE run_id = :run_id",
+                {"run_id": run_id},
+            )
+            existing_keys = {r["row_key"] for r in _fetchall_dicts(cur)}
+
+            for batch in _batched(rows, _MERGE_BATCH_SIZE):
+                values_sql = ", ".join(f"(:run_id, :k{i}, :pe{i}, :c{i}, :r{i}, :ci{i}, :t{i})" for i in range(len(batch)))
+                params: dict = {"run_id": run_id}
+                for i, r in enumerate(batch):
+                    params[f"k{i}"] = r["row_key"]
+                    params[f"pe{i}"] = bool(r["personal_expense"])
+                    params[f"c{i}"] = float(r["confidence"])
+                    params[f"r{i}"] = r.get("rationale")
+                    params[f"ci{i}"] = r["call_id"]
+                    params[f"t{i}"] = r["created_at"]
+                self._execute(
+                    conn,
+                    f"MERGE INTO {self._table('t43_classifications')} t "
+                    "USING (SELECT col1 AS run_id, col2 AS row_key, col3 AS personal_expense, "
+                    "col4 AS confidence, col5 AS rationale, col6 AS call_id, col7 AS created_at "
+                    f"FROM (VALUES {values_sql})) s "
+                    "ON t.run_id = s.run_id AND t.row_key = s.row_key "
+                    "WHEN MATCHED THEN UPDATE SET personal_expense = s.personal_expense, "
+                    "confidence = s.confidence, rationale = s.rationale, call_id = s.call_id, "
+                    "created_at = s.created_at "
+                    "WHEN NOT MATCHED THEN INSERT (run_id, row_key, personal_expense, confidence, "
+                    "rationale, call_id, created_at) VALUES (s.run_id, s.row_key, s.personal_expense, "
+                    "s.confidence, s.rationale, s.call_id, s.created_at)",
+                    params,
+                )
+
+            orphans = existing_keys - new_keys
+            if orphans:
+                placeholders = ", ".join(f":k{i}" for i in range(len(orphans)))
+                params = {f"k{i}": key for i, key in enumerate(orphans)}
+                params["run_id"] = run_id
+                self._execute(
+                    conn,
+                    f"DELETE FROM {self._table('t43_classifications')} WHERE run_id = :run_id "
+                    f"AND row_key IN ({placeholders})",
+                    params,
+                )
+
+    def list_classification_results(self, run_id: str) -> list[dict]:
+        with self._cursor_ctx() as conn:
+            cur = self._execute(
+                conn,
+                f"SELECT * FROM {self._table('t43_classifications')} WHERE run_id = :run_id ORDER BY row_key",
+                {"run_id": run_id},
+            )
+            return _fetchall_dicts(cur)
+
     # ── leases (CLAUDE.md §9C P1A concurrency foundation, §2.3 rule 3) ──────
 
     def acquire_lease(self, run_id: str, worker_id: str, *, ttl_s: float, now: str) -> bool:

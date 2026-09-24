@@ -342,6 +342,18 @@ class PersistenceAdapter(Protocol):
     def list_llm_calls(self, run_id: str) -> list[dict]:
         ...
 
+    # ── row-level LLM classification (independent review item 4; built,
+    # switched off by ENABLE_ROW_LEVEL_LLM=false default) ───────────────────
+
+    def write_classification_results(self, run_id: str, rows: list[dict]) -> None:
+        """Idempotent replace-per-run, same shape as write_flagged_rows:
+        `rows` (each {row_key, personal_expense, confidence, rationale,
+        call_id}) becomes this run's entire t43_classifications set."""
+        ...
+
+    def list_classification_results(self, run_id: str) -> list[dict]:
+        ...
+
     def acquire_lease(self, run_id: str, worker_id: str, *, ttl_s: float, now: str) -> bool:
         ...
 

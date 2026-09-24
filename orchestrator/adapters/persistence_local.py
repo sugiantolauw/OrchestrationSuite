@@ -1337,6 +1337,51 @@ class LocalPersistence:
             self._release(conn)
         return [_llm_call_row_from_db(dict(r)) for r in rows]
 
+    # ── row-level LLM classification (independent review item 4) ───────────
+
+    def write_classification_results(self, run_id: str, rows: list[dict]) -> None:
+        new_keys = {r["row_key"] for r in rows}
+        with self._writer() as conn:
+            existing_keys = {
+                r["row_key"]
+                for r in conn.execute(
+                    "SELECT row_key FROM t43_classifications WHERE run_id = ?", (run_id,)
+                ).fetchall()
+            }
+            conn.executemany(
+                "INSERT INTO t43_classifications (run_id, row_key, personal_expense, confidence, "
+                "rationale, call_id, created_at) VALUES (?,?,?,?,?,?,?) "
+                "ON CONFLICT(run_id, row_key) DO UPDATE SET personal_expense = excluded.personal_expense, "
+                "confidence = excluded.confidence, rationale = excluded.rationale, "
+                "call_id = excluded.call_id, created_at = excluded.created_at",
+                [
+                    (
+                        run_id, r["row_key"], int(bool(r["personal_expense"])), r["confidence"],
+                        r.get("rationale"), r["call_id"], r["created_at"],
+                    )
+                    for r in rows
+                ],
+            )
+            orphans = existing_keys - new_keys
+            if orphans:
+                conn.executemany(
+                    "DELETE FROM t43_classifications WHERE run_id = ? AND row_key = ?",
+                    [(run_id, row_key) for row_key in orphans],
+                )
+
+    def list_classification_results(self, run_id: str) -> list[dict]:
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM t43_classifications WHERE run_id = ? ORDER BY row_key", (run_id,)
+            ).fetchall()
+        finally:
+            self._release(conn)
+        out = [dict(r) for r in rows]
+        for r in out:
+            r["personal_expense"] = bool(r["personal_expense"])
+        return out
+
     # ── leases (CLAUDE.md §9C P1A concurrency foundation, §2.3 rule 3) ──────
 
     def acquire_lease(self, run_id: str, worker_id: str, *, ttl_s: float, now: str) -> bool:

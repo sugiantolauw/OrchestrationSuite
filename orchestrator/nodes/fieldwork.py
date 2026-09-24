@@ -9,14 +9,19 @@ write_management_actions) or upserts by a deterministic id (write_findings,
 write_issues_for_findings), so a re-executed node overwrites, never
 duplicates (CLAUDE.md §2.3 rule 1).
 
-`execute` is the only node that reads source data and it NEVER calls an LLM
-(CLAUDE.md §3 non-negotiable 2); `classify`/`find`/`prioritise`/`act` work only
+`execute` is the only node that ALWAYS reads source data and it NEVER calls
+an LLM (CLAUDE.md §3 non-negotiable 2); `find`/`prioritise`/`act` work only
 from what `execute` already persisted (run_metrics, flagged_rows), so a
 re-execution of any later node is a pure re-derivation, not a re-read of raw
 data -- except `prioritise`, which re-reads bound sources once to look up each
 row's amount for exposure de-duplication (no primitive or population exposes a
 row_key -> amount map, so this is the one place outside `execute` that touches
-raw data; see the function's own docstring).
+raw data; see the function's own docstring), and `classify`, which -- ONLY
+when `Settings.enable_row_level_llm` is true AND the Skill's plan.yaml
+declares a `not_testable.llm_classification` block (the real SKILL-001 does
+not) -- reads a text column for T4.3's row-level LLM classification
+(independent review 2026-09-24 item 4). Off by default, this capability is
+never exercised by a real run today; see classify()'s own docstring.
 """
 
 from __future__ import annotations
@@ -379,11 +384,114 @@ def execute(ctx: NodeContext, state: RunState) -> RunState:
     )
 
 
+def _llm_classification_config(skill) -> tuple[str, dict] | None:
+    """The optional `not_testable.llm_classification` block on a plan.yaml
+    test entry (independent review 2026-09-24 item 4) -- `(test_id, cfg)`
+    for the first test that declares one, or None. The real SKILL-001
+    plan.yaml declares no such block, so this returns None for every real
+    run today regardless of `enable_row_level_llm` -- the capability is
+    built, but nothing in the shipped Skill opts into it."""
+    for test in skill.plan.get("tests", []):
+        nt = test.get("not_testable")
+        if nt and "llm_classification" in nt:
+            return test["test_id"], nt["llm_classification"]
+    return None
+
+
+def _build_classify_gateway(ctx: NodeContext):
+    from orchestrator.config import NODE_MODELS
+    from orchestrator.llm.gateway import LLMGateway
+
+    client = ctx.model_client
+    if client is None:  # pragma: no cover -- real client, exercised only with RUN_LIVE_LLM=1
+        from orchestrator.adapters.model_databricks import DatabricksModelClient
+
+        client = DatabricksModelClient()
+    return LLMGateway(
+        settings=ctx.settings, client=client, persistence=ctx.persistence, node_models=NODE_MODELS,
+        retry_backoff_s=getattr(ctx.settings, "llm_retry_backoff_s", 5.0),
+        timeout_s=getattr(ctx.settings, "llm_timeout_s", 180.0), clock=ctx.clock,
+        prompt_template_id="classify/t43", prompt_template_version="1",
+    )
+
+
+def _maybe_classify_rows(ctx: NodeContext, state: RunState, exceptions: list[dict], now: str) -> tuple[list[dict], str]:
+    """Independent review 2026-09-24 item 4: T4.3 row-level LLM
+    classification, PII-safe (only the declared row-key and text columns are
+    ever read) and off by default. Returns `(exceptions, message_suffix)` --
+    `exceptions` unchanged, `message_suffix` `""`, whenever the capability is
+    off or the Skill has not opted in, so a normal run is byte-for-byte what
+    it was before this capability existed."""
+    if not getattr(ctx.settings, "enable_row_level_llm", False):
+        return exceptions, ""
+    found = _llm_classification_config(ctx.skill)
+    if found is None:
+        return exceptions, ""
+    test_id, cfg = found
+
+    from orchestrator.llm.classify import DEFAULT_BATCH_SIZE, classify_rows, to_persisted_rows
+    from orchestrator.llm.gateway import CallContext
+
+    source = cfg["source"]
+    row_key_column = cfg.get("row_key_column", "__row_key")
+    text_column = cfg["text_column"]
+    binding = next((b for b in state.data_assets if b["source"] == source), None)
+    if binding is None:
+        return exceptions, ""
+
+    # __source/__row_key are always included by every DataSourceAdapter
+    # regardless of `columns` (orchestrator.contract.parse_source_bytes) --
+    # requesting row_key_column again when it IS "__row_key" would duplicate
+    # it in the projection. Only ask for genuinely extra columns.
+    extra_columns = [c for c in (row_key_column, text_column) if c not in ("__source", "__row_key")]
+    df = ctx.data_source.read_population(source, version=binding["version"], columns=extra_columns)
+    rows = df[[row_key_column, text_column]].dropna(subset=[text_column]).to_dict("records")
+    if not rows:
+        return exceptions, ""
+
+    gateway = _build_classify_gateway(ctx)
+    call_ctx = CallContext(
+        run_id=state.run_id, engagement_id=state.engagement_id, node_name="classify",
+        execution_key=state.current_node_attempt_id, actor=state.run_owner,
+        pii_columns_masked=[], pii_whitelist=[text_column],
+    )
+    results = classify_rows(
+        rows, text_column=text_column, row_key_column=row_key_column, gateway=gateway,
+        ctx=call_ctx, batch_size=cfg.get("batch_size", DEFAULT_BATCH_SIZE),
+    )
+    ctx.persistence.write_classification_results(state.run_id, to_persisted_rows(results, now=now))
+
+    if not results:
+        # Every batch was unavailable/invalid -- degrade gracefully, stay
+        # not_testable rather than claim a result that does not exist
+        # (CLAUDE.md §6 NN13).
+        return exceptions, ""
+
+    threshold = cfg.get("confidence_threshold", 0.5)
+    flagged = [r for r in results if r.personal_expense and r.confidence >= threshold]
+    updated = []
+    for e in exceptions:
+        if e["test_id"] == test_id:
+            e = dict(e)
+            e["status"] = "exception" if flagged else "pass"
+            e["exception_units"] = len(flagged)
+            e["reason"] = (
+                f"{len(results)}/{len(rows)} claim(s) classified; {len(flagged)} flagged as "
+                f"possible personal expense (confidence >= {threshold})"
+            )
+        updated.append(e)
+    return updated, f" T4.3: {len(results)} row(s) classified."
+
+
 def classify(ctx: NodeContext, state: RunState) -> RunState:
-    """No LLM endpoint is wired yet (CLAUDE.md build brief P3 §2): T4.3 stays
-    `not_testable` (its `classify` GenAI residual is a P6 deliverable, §4.2's
-    node table). This node's job today is the deterministic part only --
-    per-test exception summaries from what `execute` already persisted."""
+    """The deterministic part -- per-test exception summaries from what
+    `execute` already persisted -- always runs. Row-level LLM classification
+    for T4.3 (independent review 2026-09-24 item 4) additionally runs ONLY
+    when `Settings.enable_row_level_llm` is true AND the Skill's plan.yaml
+    opts a test into it via `not_testable.llm_classification`; see
+    `_maybe_classify_rows`'s own docstring. Neither is true for SKILL-001
+    today, so T4.3 stays `not_testable` ("awaiting governance approval to
+    send expense descriptions to a model") on every real run."""
     exceptions = [
         {
             "test_id": t["test_id"],
@@ -394,8 +502,9 @@ def classify(ctx: NodeContext, state: RunState) -> RunState:
         for t in state.test_results
     ]
     now = ctx.clock()
+    exceptions, classification_suffix = _maybe_classify_rows(ctx, state, exceptions, now)
     n_exceptions = sum(1 for e in exceptions if e["status"] == "exception")
-    message = f"{n_exceptions} test(s) with exceptions, {len(exceptions)} test(s) total"
+    message = f"{n_exceptions} test(s) with exceptions, {len(exceptions)} test(s) total" + classification_suffix
     return dataclasses.replace(state, exceptions=exceptions, events=state.events + [_event("classify", message, now)])
 
 
