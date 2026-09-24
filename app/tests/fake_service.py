@@ -96,6 +96,13 @@ class _FakeExecutor:
 class FakeAppContext:
     executor: _FakeExecutor = field(default_factory=_FakeExecutor)
     runs: dict = field(default_factory=dict)
+    # Independent review 2026-09-24 gap #3: a persisted stand-in for
+    # orchestrator/adapters/persistence_*.py's real management_actions UPDATE
+    # -- unlike the real backends, this fake derives its action rows live
+    # from each run's findings on every list_management_actions() call
+    # (there is no underlying table to write to), so an edit is kept here
+    # and merged back in at read time instead.
+    action_overrides: dict = field(default_factory=dict)
 
 
 def build_app_context(env=None) -> FakeAppContext:
@@ -378,8 +385,9 @@ def list_management_actions(ctx, filters=None) -> list:
     out = []
     for run_id, run in ctx.runs.items():
         for f in run.get("_findings_full", []):
-            out.append({
-                "action_id": f"MA-{f['finding_id']}",
+            action_id = f"MA-{f['finding_id']}"
+            row = {
+                "action_id": action_id,
                 "finding_id": f["finding_id"],
                 "finding_title": f["title"],
                 "run_id": run_id,
@@ -392,12 +400,42 @@ def list_management_actions(ctx, filters=None) -> list:
                 "evidence_link": f.get("test_id"),
                 "description": f.get("recommendation"),
                 "last_updated": "2026-09-23T00:00:00",
-            })
+                "updated_by": None,
+            }
+            row.update(ctx.action_overrides.get(action_id, {}))
+            out.append(row)
     if filters:
         run_id = filters.get("run_id")
         if run_id:
             out = [a for a in out if a.get("run_id") == run_id]
     return out
+
+
+def update_management_action(ctx, action_id, *, owner, status, target_date, response, actor) -> dict:
+    """Independent review 2026-09-24 gap #3: the fake's stand-in for
+    orchestrator.service.update_management_action -- raises the same
+    ManagementActionNotFound an action_id naming no real action would get
+    from the real backends, rather than silently creating a row."""
+    from orchestrator.errors import ManagementActionNotFound
+
+    existing = next((a for a in list_management_actions(ctx) if a["action_id"] == action_id), None)
+    if existing is None:
+        raise ManagementActionNotFound(action_id)
+    now = "2026-09-24T00:00:00"
+    ctx.action_overrides[action_id] = {
+        "owner": owner, "status": status, "target_date": target_date, "description": response,
+        "updated_by": actor, "last_updated": now,
+    }
+    updated = {**existing, **ctx.action_overrides[action_id]}
+    return {
+        "action_id": updated["action_id"],
+        "owner": updated.get("owner"),
+        "status": str(updated.get("status") or "").replace("_", " ").title(),
+        "target_date": updated.get("target_date"),
+        "response": updated.get("description"),
+        "updated_by": updated.get("updated_by"),
+        "last_updated": updated.get("last_updated"),
+    }
 
 
 def confirm_plan(ctx, run_id, actor) -> None:

@@ -231,6 +231,16 @@ def list_management_actions(filters: dict | None = None) -> list[dict]:
     return service.list_management_actions(get_context(), filters=filters)
 
 
+def update_management_action(
+    action_id: str, *, owner: str | None, status: str, target_date: str | None,
+    response: str | None, actor: str,
+) -> dict:
+    return service.update_management_action(
+        get_context(), action_id, owner=owner, status=status, target_date=target_date,
+        response=response, actor=actor,
+    )
+
+
 # ── Platform trace ───────────────────────────────────────────────────────────
 
 def list_trace_events(run_id: str | None = None) -> list[dict]:

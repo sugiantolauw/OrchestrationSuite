@@ -19,8 +19,11 @@ Public API (signatures kept stable for the UI to import against):
                      mode='playbook', review_plan_first=False, engagement_id='ENG-DEFAULT') -> str
     get_run(ctx, run_id) -> dict
     list_runs(ctx, filters=None) -> list[dict]
+    cross_run_totals(runs) -> dict   (pure; independent review 2026-09-24 gap #6)
     list_trace_events(ctx, run_id=None) -> list[dict]
     list_management_actions(ctx, filters=None) -> list[dict]
+    update_management_action(ctx, action_id, *, owner, status, target_date, response,
+                              actor) -> dict   (independent review 2026-09-24 gap #3)
     confirm_plan(ctx, run_id, actor) -> RunState
     sign_off(ctx, run_id, actor) -> RunState
     resume_run(ctx, run_id, actor) -> RunState
@@ -1671,6 +1674,10 @@ def list_runs(ctx: AppContext, filters: dict | None = None) -> list[dict]:
                 "engagement_id": r.get("engagement_id"),
                 "skill_name": skill_entry["name"] if skill_entry else r.get("skill_id"),
                 "audit_period": f"{r['audit_period_start']} – {r['audit_period_end']}",
+                # Independent review 2026-09-24 gap #6: cross_run_totals reads
+                # this back (CLAUDE.md §11 "Paused runs across a code
+                # deploy") to exclude a run explicitly marked superseded.
+                "superseded_by": r.get("superseded_by"),
                 "run_timestamp": r["created_at"],
                 "run_owner": r["run_owner"],
                 "data_mode": data_mode,
@@ -1694,6 +1701,95 @@ def list_runs(ctx: AppContext, filters: dict | None = None) -> list[dict]:
             }
         )
     return out
+
+
+# Independent review 2026-09-24 gap #6: the statuses a run must reach before
+# it counts towards a cross-run total. "Completed" and "Awaiting Signoff"
+# both carry a trustworthy, finished test result (a run in "Awaiting
+# Signoff" has already run every test and computed every number -- only
+# export is outstanding); "Queued"/"Running"/"Awaiting Confirmation" have
+# not, and "Failed"/"Interrupted" never will for this attempt.
+_ELIGIBLE_STATUSES_FOR_TOTALS = {"Completed", "Awaiting Signoff"}
+
+
+def _parse_audit_period(audit_period: str | None) -> tuple[str | None, str | None]:
+    # list_runs()'s own "{start} – {end}" formatting (CLAUDE.md build brief
+    # P3 §4) is the one shape every caller of cross_run_totals already
+    # carries -- parsed back here rather than requiring a second,
+    # separate-fields copy of the same two dates on every run dict.
+    if not audit_period or " – " not in audit_period:
+        return None, None
+    start, end = audit_period.split(" – ", 1)
+    return start.strip(), end.strip()
+
+
+def _periods_overlap(a: tuple[str | None, str | None], b: tuple[str | None, str | None]) -> bool:
+    a_start, a_end = a
+    b_start, b_end = b
+    # A period with a missing or unparseable bound can't be proven disjoint
+    # from another -- conservatively treat it as overlapping rather than
+    # risk a silent double-count (CLAUDE.md NN14).
+    if not a_start or not a_end or not b_start or not b_end:
+        return True
+    return a_start <= b_end and b_start <= a_end
+
+
+def cross_run_totals(runs: list[dict]) -> dict:
+    """Independent review 2026-09-24 gap #6: one rule, computed once, for
+    both cross-run KPIs that used to double-count -- `/runs`' "High-risk
+    findings" (summed every run, including re-runs and failed ones) and
+    `/actions`' "Total exposure" (already deduplicated exact re-runs of the
+    same skill/engagement/period -- independent review item 2 -- but still
+    summed runs whose periods merely OVERLAP without being identical, the
+    same spend counted under two windows).
+
+    Takes the list `list_runs()` already returned (never re-queries):
+      1. eligible = status in _ELIGIBLE_STATUSES_FOR_TOTALS and not
+         superseded (`superseded_by` falsy) -- CLAUDE.md §11 "Paused runs
+         across a code deploy".
+      2. Where the same (skill_id, engagement_id, audit_period) was run more
+         than once, only the latest (by run_timestamp) survives -- a re-run
+         is the same population re-tested, not additional risk.
+      3. high_risk_findings_total sums high_risk_count over that
+         deduplicated set. The "never sum across overlapping periods" rule
+         below is specifically about AMOUNTS AT RISK, not finding counts.
+      4. total_exposure: if no two surviving runs have overlapping audit
+         periods, it is the sum of potential_exposure over the set (a run
+         with no exposure metric contributes nothing, never a fabricated
+         $0). If any two DO overlap, summing would double-count the same
+         spend under two windows -- report the single latest run's own
+         figure instead. None (rendered "--", never a fabricated $0) when
+         there is nothing eligible to report."""
+    eligible = [
+        r for r in runs
+        if r.get("status") in _ELIGIBLE_STATUSES_FOR_TOTALS and not r.get("superseded_by")
+    ]
+    latest_by_group: dict[tuple, dict] = {}
+    for r in eligible:
+        key = (r.get("skill_id"), r.get("engagement_id"), r.get("audit_period"))
+        current = latest_by_group.get(key)
+        if current is None or (r.get("run_timestamp") or "") > (current.get("run_timestamp") or ""):
+            latest_by_group[key] = r
+    candidates = list(latest_by_group.values())
+
+    high_risk_findings_total = sum(r.get("high_risk_count", 0) or 0 for r in candidates)
+
+    if not candidates:
+        return {"high_risk_findings_total": high_risk_findings_total, "total_exposure": None}
+
+    periods = [_parse_audit_period(r.get("audit_period")) for r in candidates]
+    overlaps = any(
+        _periods_overlap(periods[i], periods[j])
+        for i in range(len(periods)) for j in range(i + 1, len(periods))
+    )
+    if overlaps:
+        latest = max(candidates, key=lambda r: r.get("run_timestamp") or "")
+        total_exposure = latest.get("potential_exposure")
+    else:
+        exposures = [r.get("potential_exposure") for r in candidates if r.get("potential_exposure") is not None]
+        total_exposure = sum(exposures) if exposures else None
+
+    return {"high_risk_findings_total": high_risk_findings_total, "total_exposure": total_exposure}
 
 
 def list_trace_events(ctx: AppContext, run_id: str | None = None) -> list[dict]:
@@ -1720,9 +1816,55 @@ def list_management_actions(ctx: AppContext, filters: dict | None = None) -> lis
                 "potential_exposure": r.get("potential_exposure"),
                 "last_updated": r.get("last_updated"),
                 "evidence_link": r.get("evidence_link"),
+                # Independent review 2026-09-24 gap #3: workspace_tne.py's
+                # _action_row_view reads `description` back as the "response"
+                # column (the same field an edit's `response` overwrites via
+                # update_management_action below) -- omitted here, a
+                # persisted edit could never be read back on reload.
+                "description": r.get("description"),
+                "updated_by": r.get("updated_by"),
             }
         )
     return out
+
+
+# Independent review 2026-09-24 gap #3: the Management Action Tracker's own
+# status dropdown values (app/src/workspace_tne.py _actions_tab), the same
+# set management_actions_status's CHECK constraint enforces
+# (orchestrator/ddl/*/012_management_action_edits.sql).
+_MANAGEMENT_ACTION_STATUSES = {"draft", "open", "under_review", "in_progress", "agreed", "remediated", "closed"}
+
+
+def update_management_action(
+    ctx: AppContext, action_id: str, *, owner: str | None, status: str, target_date: str | None,
+    response: str | None, actor: str,
+) -> dict:
+    """Independent review 2026-09-24 gap #3: persists an auditor's edit to a
+    management action's owner/status/target_date/response, replacing the
+    browser-session-only dcc.Store the Management Action Tracker used to
+    hold edits in -- CLAUDE.md §11's "Action ownership and responses are
+    saved with this run" is only true once edits write through to Delta /
+    LocalPersistence, recording who made the edit (`updated_by`) alongside
+    the existing `last_updated` "when". `status` is validated against the
+    Tracker's own set before it ever reaches the persistence layer, rather
+    than surfacing a raw constraint-violation error for an unreachable
+    caller mistake."""
+    if status not in _MANAGEMENT_ACTION_STATUSES:
+        raise ValueError(f"unknown management action status: {status!r}")
+    now = ctx.clock()
+    row = ctx.persistence.update_management_action(
+        action_id, owner=owner, status=status, target_date=target_date, response=response,
+        updated_by=actor, now=now,
+    )
+    return {
+        "action_id": row["action_id"],
+        "owner": row.get("owner"),
+        "status": str(row.get("status") or "").replace("_", " ").title(),
+        "target_date": row.get("target_date"),
+        "response": row.get("description"),
+        "updated_by": row.get("updated_by"),
+        "last_updated": row.get("last_updated"),
+    }
 
 
 def _confirm_explorer_plan(ctx: AppContext, run_id: str, actor: str) -> RunState:

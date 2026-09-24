@@ -44,6 +44,7 @@ import dash_bootstrap_components as dbc
 import yaml as _yaml
 from dash import ALL, Input, Output, State, ctx, dash_table, dcc, html
 from dash.exceptions import PreventUpdate
+from flask import request
 
 from src import charts
 from src.platform import adapters
@@ -53,6 +54,26 @@ from src.platform.components import kpi_card
 # (run_id, state_version) is fine". Holds at most one run's bundle: a
 # workspace tab is only ever looking at one run_id at a time. ─────────────────
 _CACHE: dict[tuple, dict] = {}
+
+
+def _request_actor() -> str:
+    """Independent review 2026-09-24 gap #3: the same identity rule
+    app/src/run_status.py's and app/src/run_setup.py's own _request_actor /
+    _request_owner apply for confirm/sign-off/resume (CLAUDE.md §9A.1,
+    P2/P3 gate review item 7) -- duplicated here deliberately, not imported,
+    same as this module's other cross-page helpers (see _catalogue_id_for's
+    docstring elsewhere in this file): "local-user" is a label the LOCAL
+    backend alone may use; the deployed backend must refuse to record a
+    management-action edit under an unverified identity."""
+    owner = request.headers.get("X-Forwarded-Email") or request.headers.get("X-Forwarded-User")
+    if owner:
+        return owner
+    if adapters.is_local_backend():
+        return "local-user"
+    raise adapters.MissingIdentityHeader(
+        "No verified identity header (X-Forwarded-Email / X-Forwarded-User) was present on "
+        "this request. Refusing to record an action under an unverified identity."
+    )
 
 # Skill *definitions* (plan.yaml/catalogue.yaml), not run data — static per
 # skill_id for the life of this process, same shape as
@@ -641,7 +662,7 @@ def _finding_exception_count(finding: dict, test_results: list[dict]) -> int | N
     return sum(counts)
 
 
-def _executive_tab(run: dict, findings: list[dict], payload: dict | None, actions: list[dict], frames: dict | None = None) -> html.Div:
+def _executive_tab(run: dict, findings: list[dict], payload: dict | None, actions: list[dict], frames: dict | None = None, tests: list[dict] | None = None) -> html.Div:
     n_high = sum(1 for f in findings if f.get("severity") == "High")
     # "Not closed" -- the same definition orchestrator.service.list_runs()
     # uses for its own per-run `open_actions` field (`a.get("status") !=
@@ -652,7 +673,17 @@ def _executive_tab(run: dict, findings: list[dict], payload: dict | None, action
     # definitions across the app).
     open_actions = sum(1 for a in actions if str(a.get("status", "")).lower() != "closed")
     test_results = run.get("test_results", [])
-    n_exception_tests = sum(1 for t in test_results if t.get("status") == "exception")
+    # Independent review 2026-09-24 gap #5: "Tests with exceptions" counts
+    # the 14 CATALOGUE tests, not plan.yaml's 21 primitive-instance
+    # sub-tests -- see _catalogue_test_statuses. Falls back to the raw
+    # (wrong-grain) count only when no catalogue rows were passed in, so a
+    # caller that genuinely has none still renders rather than raising.
+    if tests:
+        n_exception_tests = sum(
+            1 for r in _catalogue_test_statuses(tests, test_results).values() if r.get("status") == "exception"
+        )
+    else:
+        n_exception_tests = sum(1 for t in test_results if t.get("status") == "exception")
 
     priority = sorted(findings, key=lambda f: (
         {"High": 0, "Medium": 1, "Low": 2}.get(f.get("severity"), 3),
@@ -993,15 +1024,16 @@ def _findings_tab(bundle: dict) -> html.Div:
 # ── Management actions sub-tab ───────────────────────────────────────────────
 #
 # `management_actions` rows are real and persisted (orchestrator's `act`
-# node drafts one per finding, status "draft"). There is no service-layer
-# write path yet to update owner/status/target date/response from the UI
-# (orchestrator/service.py's public API has no update_management_action —
-# see this task's report), so — exactly like reference_app/app.py's own
-# Management Action Tracker, which the prototype itself labelled "For
-# showcase use · session-only data resets when the app restarts" — edits
-# here are kept in a session dcc.Store and merged over the real rows for
-# display, never written back as if persisted (CLAUDE.md NN13: no fake
-# successful integration).
+# node drafts one per finding, status "draft"). Independent review
+# 2026-09-24 gap #3: owner/status/target-date/response edits now persist too
+# -- orchestrator.service.update_management_action, called from _save_action
+# below -- so CLAUDE.md §11's "Action ownership and responses are saved with
+# this run" is true, not just displayed. The session dcc.Store below is kept
+# as an immediate-redraw cache over the same edit, not as the system of
+# record: `_save_action` writes through to persistence first and only then
+# updates the store, and clears `_CACHE` so this run's next bundle load (a
+# fresh page, or a browser restart) reads the edit back from persistence
+# rather than a snapshot taken before it.
 
 def _action_row_view(action: dict, override: dict | None) -> dict:
     override = override or {}
@@ -1059,9 +1091,8 @@ def _actions_tab(bundle: dict) -> html.Div:
     return html.Div([
         html.Div([
             html.H2("Management Action Tracker", style={"margin": 0, "fontSize": 17, "fontWeight": 700}),
-            html.Span("Rows are the run's own persisted management actions. Owner/status/target-date/response "
-                      "edits are session-only (no update endpoint yet — see this workspace's build report) "
-                      "and reset when the app restarts, same as the prototype's tracker.",
+            html.Span("Rows are the run's own persisted management actions. "
+                      "Action ownership and responses are saved with this run.",
                       style={"fontSize": 12, "color": "#6b7283"}),
         ], style={"marginBottom": 16}),
         dcc.Store(id="tne-action-overrides", storage_type="session", data={}),
@@ -1503,6 +1534,26 @@ def _combined_status(results: list[dict]) -> dict:
     return {**best, "exception_units": total_exceptions if best.get("status") == "exception" else best.get("exception_units")}
 
 
+def _catalogue_test_statuses(tests: list[dict], test_results: list[dict]) -> dict[str, dict]:
+    """Independent review 2026-09-24 gap #5: every "tests with exceptions" /
+    "tests assessed" count in this module must be over the 14 CATALOGUE
+    tests (skills/tne_exco/catalogue.yaml), never over plan.yaml's own,
+    larger set of primitive instances -- one catalogue test ("T3.2a") can
+    resolve to several plan.yaml sub-tests ("T3.2a_air_dom", "T3.2a_car_int",
+    ...), and counting those sub-tests directly (21, not 14) is exactly the
+    miscount CLAUDE.md's PPTX exec-summary fix (orchestrator/pptx_export.py
+    _catalogue_id_for/_combined_status) already corrected -- this mirrors
+    that same pattern for the UI. `_combined_status`'s priority (exception
+    over pass over not_testable) already gives the right rule: a catalogue
+    test "has exceptions" if ANY of its sub-tests does; one whose every
+    sub-test is not_testable is reported not_testable, never as a clean
+    pass."""
+    return {
+        test.get("test_id", ""): _combined_status(_results_for(test.get("test_id", ""), test_results))
+        for test in tests if test.get("test_id")
+    }
+
+
 def _reconciliation_panel(reconciliation: dict | None) -> html.Div | None:
     # CLAUDE.md §5 G6 / P2/P3 gate review item 2: reconciled on rows always,
     # plus Sigma(amount) and min/max date wherever the source's raw_<source>
@@ -1619,12 +1670,18 @@ def _methodology_panel(payload: dict | None) -> html.Details:
 
 
 def _catalogue_tab(tests: list[dict], test_results: list[dict], payload: dict | None) -> html.Div:
-    n_exception = sum(1 for r in test_results if r.get("status") == "exception")
-    n_pass = sum(1 for r in test_results if r.get("status") == "pass")
-    n_na = sum(1 for r in test_results if r.get("status") == "not_testable")
+    # Independent review 2026-09-24 gap #5: these KPIs used to count
+    # test_results directly -- plan.yaml's 21 primitive-instance sub-tests,
+    # including the two not_testable ones -- against a catalogue of 14. Now
+    # computed once, at catalogue grain, and reused for both the KPI cards
+    # and each row's own status below (see _catalogue_test_statuses).
+    catalogue_status = _catalogue_test_statuses(tests, test_results)
+    n_exception = sum(1 for r in catalogue_status.values() if r.get("status") == "exception")
+    n_pass = sum(1 for r in catalogue_status.values() if r.get("status") == "pass")
+    n_na = sum(1 for r in catalogue_status.values() if r.get("status") == "not_testable")
 
     status_kpis = html.Div([
-        kpi_card("Tests Executed", str(len(test_results))),
+        kpi_card("Tests Executed", str(len(tests))),
         kpi_card("Exceptions", str(n_exception)),
         kpi_card("Pass", str(n_pass)),
         kpi_card("Not Testable", str(n_na)),
@@ -1634,7 +1691,7 @@ def _catalogue_tab(tests: list[dict], test_results: list[dict], payload: dict | 
     tooltips = []
     for test in tests:
         test_id = test.get("test_id", "")
-        result = _combined_status(_results_for(test_id, test_results))
+        result = catalogue_status.get(test_id, {})
         status = result.get("status")
         status_label = _STATUS_LABEL.get(status, "Not run")
         reason = result.get("reason")
@@ -1731,7 +1788,7 @@ def tne_workspace_layout(run_id: str | None) -> html.Div:
         dcc.Store(id="tne-findings-store", data=findings),
         html.Div([
             dbc.Tabs([
-                dbc.Tab(_executive_tab(run, findings, payload, actions, bundle["frames"]), label="Executive Brief", tab_id="tab-executive"),
+                dbc.Tab(_executive_tab(run, findings, payload, actions, bundle["frames"], tests), label="Executive Brief", tab_id="tab-executive"),
                 dbc.Tab(findings_and_actions, label="Findings & Actions", tab_id="tab-findings"),
                 dbc.Tab(audit_detail, label="Audit Detail", tab_id="tab-audit"),
             ], id="main-tabs", active_tab="tab-executive"),
@@ -2070,10 +2127,25 @@ def register_callbacks(app) -> None:
         if not selected or not selected.get("action_id"):
             raise PreventUpdate
         action_id = selected["action_id"]
+        owner = (owner or "").strip()
+        status = status or "draft"
+        target_date = target_date or ""
+        response = (response or "").strip()
+        # Independent review 2026-09-24 gap #3: writes through to Delta /
+        # LocalPersistence (orchestrator.service.update_management_action)
+        # before the session-store merge below -- the store is an
+        # immediate-redraw cache over this same edit, not the system of
+        # record. _CACHE.clear() so this run's next bundle load (this same
+        # tab's own re-render, or a genuinely fresh page load) reads the
+        # persisted edit back rather than a snapshot taken before it.
+        adapters.update_management_action(
+            action_id, owner=owner, status=status, target_date=target_date, response=response,
+            actor=_request_actor(),
+        )
+        _CACHE.clear()
         overrides = dict(overrides or {})
         overrides[action_id] = {
-            "owner": (owner or "").strip(), "status": status or "draft",
-            "target_date": target_date or "", "response": (response or "").strip(),
+            "owner": owner, "status": status, "target_date": target_date, "response": response,
         }
         return overrides, False
 

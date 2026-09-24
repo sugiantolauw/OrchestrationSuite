@@ -117,6 +117,17 @@ class FindingNotFound(Exception):
         super().__init__(f"finding not found: {finding_id!r}")
 
 
+class ManagementActionNotFound(Exception):
+    """Independent review 2026-09-24 gap #3: raised by
+    PersistenceAdapter.update_management_action when action_id names no
+    persisted row -- never a silent no-op that would let an auditor's edit
+    disappear without telling them."""
+
+    def __init__(self, action_id: str):
+        self.action_id = action_id
+        super().__init__(f"management action not found: {action_id!r}")
+
+
 class InvalidReviewStateTransition(Exception):
     def __init__(self, finding_id: str, from_state: str, to_state: str):
         self.finding_id = finding_id
