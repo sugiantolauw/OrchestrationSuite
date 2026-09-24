@@ -1787,6 +1787,15 @@ user's request:
 
 Never restart the App on a build that lacks the idle-polling fix.
 
+**Development-workspace spend to date** (list price, `system.billing.usage` × `list_prices`, posted
+through 2026-09-24 08:00 UTC): **about $280**. That is SQL warehouse $266 (including the $218
+incident), Apps $12, and storage, predictive optimisation and networking under $3 together. Model
+serving was under $0.01. Running costs to budget for:
+- the App costs about $0.58 an hour while it is running, even when idle;
+- the warehouse costs about 20 minutes of compute per burst of activity (measured stop latency).
+
+Detail, refreshed at milestones: `docs/usage/token_usage_2026-09-24.xlsx`, sheet "Databricks billing".
+
 ### Decisions from the user after the independent review (2026-09-24)
 
 - **The headline is the amount at risk.** It keeps the prototype's "Potential exposure" label and
