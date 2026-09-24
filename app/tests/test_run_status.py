@@ -97,3 +97,17 @@ def test_get_export_pptx_not_yet_available_is_a_clean_failure():
     except NotImplementedError:
         raised = True
     assert raised
+
+
+def test_poll_stops_at_terminal_and_gate_statuses():
+    """Found-live cost review: an open /run/<id> tab must not keep polling
+    get_run forever while sat on a gate only this page's own button (Confirm
+    plan / Sign off findings / Resume) can clear -- those callbacks already
+    re-render run-page-body directly on click, so nothing is missed by not
+    polling meanwhile. "queued" and the plain "running" state are NOT in
+    this set: those progress on their own and the page must keep polling."""
+    assert run_status._TERMINAL_STATUSES == {
+        "completed", "failed", "awaiting_confirmation", "awaiting_signoff", "interrupted",
+    }
+    assert "queued" not in run_status._TERMINAL_STATUSES
+    assert "running" not in run_status._TERMINAL_STATUSES

@@ -291,6 +291,8 @@ def build_app_context(env: dict | None = None) -> AppContext:
         clock=clock,
         nodes_for=NODES_FOR,
         tracing=tracing,
+        poll_interval_s=getattr(settings, "executor_active_poll_interval_s", 30.0),
+        idle_poll_interval_s=getattr(settings, "executor_idle_poll_interval_s", 600.0),
     )
     ctx.executor = executor
     return ctx

@@ -127,6 +127,7 @@ class ThreadExecutor:
         clock: Callable[[], str],
         nodes_for: dict | None = None,
         poll_interval_s: float = _DEFAULT_POLL_INTERVAL_S,
+        idle_poll_interval_s: float | None = None,
         lease_ttl_s: float = _DEFAULT_LEASE_TTL_S,
         heartbeat_interval_s: float = _DEFAULT_HEARTBEAT_INTERVAL_S,
         tracing=None,
@@ -139,7 +140,19 @@ class ThreadExecutor:
         self._clock = clock
         self._nodes_for = nodes_for or NODES_FOR
         self._tracing = tracing or NullTracing()
+        # "Active" cadence (poll_interval_s) applies while this worker has any
+        # run in flight or is backing off a lease retry; "idle" is the slow
+        # safety sweep the rest of the time -- the loop otherwise wakes only
+        # from an in-process signal (start()/_try_admit called directly by
+        # start_audit_run/confirm_plan/sign_off/resume_run). Defaulting
+        # idle_poll_interval_s to poll_interval_s when not given keeps every
+        # existing caller (tests that pass only poll_interval_s) at its prior
+        # constant cadence; production wiring (orchestrator/service.py) passes
+        # both explicitly from Settings.
         self._poll_interval_s = poll_interval_s
+        self._idle_poll_interval_s = (
+            idle_poll_interval_s if idle_poll_interval_s is not None else poll_interval_s
+        )
         self._lease_ttl_s = lease_ttl_s
         self._heartbeat_interval_s = heartbeat_interval_s
 
@@ -241,7 +254,20 @@ class ThreadExecutor:
                 self._admit_all_queued()
             except Exception:  # pragma: no cover - defensive, the loop must not die
                 logger.exception("admission loop error")
-            self._stop_event.wait(self._poll_interval_s)
+            self._stop_event.wait(self._next_poll_interval())
+
+    def _next_poll_interval(self) -> float:
+        """Fast cadence while this worker has anything in flight (a run it is
+        actively executing, or a queued run backing off a failed lease
+        acquisition); otherwise the slow idle safety-sweep interval. A new
+        run created through the normal service functions is picked up
+        immediately regardless -- they call executor.start(run_id, phase),
+        which admits directly -- so this only controls how long an orphan or
+        a queued run this worker was not directly woken for can sit before
+        the next sweep notices it."""
+        with self._lock:
+            busy = bool(self._active_runs) or bool(self._admission_failures)
+        return self._poll_interval_s if busy else self._idle_poll_interval_s
 
     def _reap_orphans(self) -> None:
         # CLAUDE.md §2.3 rule 2 / P2/P3 gate review item 8: App-start reaping

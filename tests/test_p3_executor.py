@@ -129,6 +129,84 @@ def test_three_queued_runs_max_two_running_at_once(local_persistence):
         executor.stop()
 
 
+# ── idle admission-loop backoff (found-live cost review: unconditional 2s
+#    polling cost ~3,000 warehouse queries/hour with nothing queued or
+#    running) ──────────────────────────────────────────────────────────────
+
+
+def test_idle_admission_loop_backs_off_to_the_idle_interval(local_persistence):
+    """With nothing queued or running, the loop's first tick (always
+    immediate on start()) finds no work and must then wait the IDLE
+    interval before its next persistence call, not the fast ACTIVE one.
+    Uses real (but scaled-down) intervals rather than a fake clock --
+    self._stop_event.wait() sleeps real wall-clock time, so there is no
+    clock to fake here; ACTIVE/IDLE are scaled down so the assertion window
+    stays well under a second while still being several multiples of
+    ACTIVE and a small fraction of IDLE."""
+    persistence = local_persistence
+    calls = {"n": 0}
+    orig_find_runs = persistence.find_runs
+
+    def counting_find_runs(statuses):
+        calls["n"] += 1
+        return orig_find_runs(statuses)
+
+    persistence.find_runs = counting_find_runs
+
+    executor = ThreadExecutor(
+        persistence=persistence, settings=_Settings(), worker_id="worker-idle",
+        ctx_factory=lambda rid: object(),
+        fingerprint_factory=lambda rid: _fingerprint(f"FP-{rid}"),
+        clock=_make_clock(), nodes_for={"fieldwork": {"plan": [], "execute": [], "export": []}},
+        poll_interval_s=0.05, idle_poll_interval_s=5.0,
+    )
+    try:
+        executor.start()
+        time.sleep(0.6)  # ~12x ACTIVE, 1/8 of IDLE -- would be ~12 ticks at ACTIVE cadence
+    finally:
+        executor.stop()
+
+    # _reap_orphans + _admit_all_queued each call find_runs once per tick, so
+    # 2 calls = the one tick every idle-backed-off loop must still take
+    # immediately on start(); anything beyond a couple of calls means the
+    # loop never backed off to IDLE.
+    assert calls["n"] <= 4, calls["n"]
+
+
+def test_busy_admission_loop_keeps_the_active_interval(local_persistence):
+    """The counterpart of the idle test above: while this worker has a run
+    admitted (in `_active_runs`), the loop must keep polling at the fast
+    ACTIVE cadence, not fall back to IDLE -- otherwise a queued run waiting
+    on a freed concurrency slot could sit for the whole idle sweep."""
+    persistence = local_persistence
+    run_id = "RUN-BUSY-CADENCE"
+    _create(persistence, run_id, _make_clock())
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    def blocking_node(ctx, state):
+        entered.set()
+        release.wait(timeout=10)
+        return dataclasses.replace(state, events=state.events + [{"node": "block"}])
+
+    nodes_for = {"fieldwork": {"plan": [("block", blocking_node)], "execute": [], "export": []}}
+    executor = ThreadExecutor(
+        persistence=persistence, settings=_Settings(), worker_id="worker-busy",
+        ctx_factory=lambda rid: object(),
+        fingerprint_factory=lambda rid: _fingerprint(f"FP-{rid}"),
+        clock=_make_clock(), nodes_for=nodes_for,
+        poll_interval_s=0.05, idle_poll_interval_s=5.0, lease_ttl_s=30,
+    )
+    try:
+        executor.start()
+        assert entered.wait(timeout=10)
+        assert executor._next_poll_interval() == 0.05
+    finally:
+        release.set()
+        executor.stop()
+
+
 # ── lease takeover after expiry ─────────────────────────────────────────────
 
 

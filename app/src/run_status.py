@@ -16,7 +16,15 @@ from flask import request
 from src.platform import adapters
 
 _POLL_MS = 3000
-_TERMINAL_STATUSES = {"completed", "failed"}
+# Statuses at which this page stops polling (found-live cost review: every
+# open /run/<id> tab was polling get_run every 3s forever, even while
+# waiting on a gate only a click on THIS page can clear). Terminal statuses
+# (nothing left to happen) plus the HITL gates and "interrupted" -- each of
+# those already has its own button here (Confirm plan / Sign off findings /
+# Resume) whose callback re-renders run-page-body directly on click, so
+# nothing is lost by not polling while waiting for it. "queued" and the
+# default "running" branch keep polling: those progress on their own.
+_TERMINAL_STATUSES = {"completed", "failed", "awaiting_confirmation", "awaiting_signoff", "interrupted"}
 
 
 def _request_actor() -> str:

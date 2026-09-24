@@ -55,6 +55,17 @@ class Settings:
     admission_max_attempts: int = 20
     admission_backoff_base_s: float = 2.0
     admission_backoff_max_s: float = 60.0
+    # Executor admission-loop cadence (found-live cost review: the loop was
+    # polling the warehouse every 2s unconditionally, ~3,000 queries/hour with
+    # nothing queued or running). "Active" applies while this worker has any
+    # run in flight or backing off a lease retry; "idle" is the slow safety
+    # sweep the rest of the time -- the loop otherwise wakes only from an
+    # in-process signal (start_audit_run/confirm_plan/sign_off/resume_run all
+    # call executor.start(run_id, phase) directly). Operational knobs, not
+    # computation -- excluded from the runtime config hash, same as the
+    # admission-backoff fields above.
+    executor_active_poll_interval_s: float = 30.0
+    executor_idle_poll_interval_s: float = 600.0
 
     def __post_init__(self) -> None:
         _validate_identifier("catalog", self.catalog)
@@ -102,6 +113,8 @@ def load_settings(env: dict | None = None) -> Settings:
         admission_max_attempts=_parse_int(env.get("ADMISSION_MAX_ATTEMPTS"), 20),
         admission_backoff_base_s=_parse_float(env.get("ADMISSION_BACKOFF_BASE_S"), 2.0),
         admission_backoff_max_s=_parse_float(env.get("ADMISSION_BACKOFF_MAX_S"), 60.0),
+        executor_active_poll_interval_s=_parse_float(env.get("EXECUTOR_ACTIVE_POLL_INTERVAL_S"), 30.0),
+        executor_idle_poll_interval_s=_parse_float(env.get("EXECUTOR_IDLE_POLL_INTERVAL_S"), 600.0),
         # P2/P3 gate review item 4 (MLflow per-node spans, CLAUDE.md §2.3).
         # Unset -- never hardcoded here -- means mlflow's own default
         # resolution: MLFLOW_TRACKING_URI if the process environment already
@@ -132,6 +145,7 @@ def load_settings(env: dict | None = None) -> Settings:
 _RUNTIME_HASH_EXCLUDED_FIELDS = frozenset({
     "max_concurrent_runs", "executor", "mlflow_tracking_uri", "mlflow_experiment_path",
     "admission_max_attempts", "admission_backoff_base_s", "admission_backoff_max_s",
+    "executor_active_poll_interval_s", "executor_idle_poll_interval_s",
 })
 
 

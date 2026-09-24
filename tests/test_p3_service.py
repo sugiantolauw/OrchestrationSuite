@@ -20,7 +20,7 @@ from orchestrator.executor import reap_orphaned_runs_with_leases
 from tests.test_p3_nodes import MINI_SKILL_DIR, _write_mini_data
 
 
-def _build_ctx(tmp_path: Path, *, worker_id: str = "worker-a") -> service.AppContext:
+def _build_ctx(tmp_path: Path, *, worker_id: str = "worker-a", env_overrides: dict | None = None) -> service.AppContext:
     env = {
         "ORCH_BACKEND": "local",
         "ORCH_LOCAL_DB": str(tmp_path / "orch.db"),
@@ -36,6 +36,7 @@ def _build_ctx(tmp_path: Path, *, worker_id: str = "worker-a") -> service.AppCon
         # this test is exercising, so it is held fixed here.
         "CODE_REVISION": "test-fixed-revision",
     }
+    env.update(env_overrides or {})
     data_dir = tmp_path / "data"
     data_dir.mkdir(exist_ok=True)
     _write_mini_data(data_dir)
@@ -124,6 +125,40 @@ def test_full_local_run_to_signoff_and_export(tmp_path):
         assert signed_off_events
         # non-self sign-off: no "self-approved" suffix on the trace message.
         assert "self-approved" not in signed_off_events[0]["message"]
+    finally:
+        ctx.executor.stop()
+
+
+def test_run_completes_promptly_with_a_near_unreachable_idle_sweep_interval(tmp_path):
+    """Found-live cost review: the admission loop's idle safety-sweep
+    interval must never be what makes a run progress -- every transition
+    (start_audit_run/sign_off) wakes the executor directly
+    (ctx.executor.start(run_id, phase) -> _try_admit), so a run must reach
+    awaiting_signoff and then completed well within a couple of seconds
+    even with EXECUTOR_IDLE_POLL_INTERVAL_S set far longer than this test's
+    own timeout. If admission or sign-off ever came to depend on the idle
+    sweep instead of the direct wake, this test would time out."""
+    ctx = _build_ctx(tmp_path, env_overrides={
+        "EXECUTOR_ACTIVE_POLL_INTERVAL_S": "0.05",
+        "EXECUTOR_IDLE_POLL_INTERVAL_S": "120",
+    })
+    assert ctx.settings.executor_idle_poll_interval_s == 120.0
+    ctx.executor.start()
+    try:
+        bindings = service.suggest_bindings(ctx, "SKILL-MINI")
+        run_id = service.start_audit_run(
+            ctx, skill_id="SKILL-MINI", bindings=bindings,
+            audit_period=("2026-01-01", "2026-02-28"), objective="idle-sweep test",
+            run_owner="tester",
+        )
+        status = _wait_for_status(ctx, run_id, {"awaiting_signoff", "failed"}, timeout=5)
+        run = service.get_run(ctx, run_id)
+        assert status == "awaiting_signoff", run.get("status_reason")
+
+        service.sign_off(ctx, run_id, "approver")
+        status = _wait_for_status(ctx, run_id, {"completed", "failed"}, timeout=5)
+        run = service.get_run(ctx, run_id)
+        assert status == "completed", run.get("status_reason")
     finally:
         ctx.executor.stop()
 
