@@ -49,6 +49,7 @@ from pptx.enum.shapes import MSO_SHAPE
 from pptx.enum.text import MSO_ANCHOR, MSO_AUTO_SIZE, PP_ALIGN
 from pptx.util import Inches, Pt
 
+from orchestrator.catalogue_counts import catalogue_id_for, combined_status, results_for
 from orchestrator.findings import format_metric_value
 from orchestrator.signoff_policy import SELF_APPROVED_LABEL
 from orchestrator.state import RunState
@@ -72,7 +73,6 @@ GREEN = RGBColor(0x2C, 0x7A, 0x4B)
 SEVERITY_COLOR = {"High": RED, "Medium": AMBER, "Low": GREEN}
 STATUS_COLOR = {"exception": RED, "pass": GREEN, "not_testable": GREY}
 STATUS_LABEL = {"exception": "Exception", "pass": "Pass", "not_testable": "Not testable"}
-_STATUS_PRIORITY = {"exception": 0, "pass": 1, "not_testable": 2}
 
 FONT_HEAVY = "MarkOT-Heavy"
 FONT_BODY = "MarkOT"
@@ -270,32 +270,10 @@ def load_catalogue_rows(skill_dir: Path) -> list[dict]:
     return list(data.get("tests") or [])
 
 
-def _catalogue_id_for(plan_test_id: str, catalogue_ids: set[str]) -> str:
-    # Same exact-id-or-"<id>_"-prefix matching orchestrator.service and
-    # app/src/workspace_tne.py already use (duplicated deliberately, not
-    # imported, to avoid a cross-layer/circular import between this module
-    # and orchestrator.service -- see this module's own docstring).
-    if plan_test_id in catalogue_ids:
-        return plan_test_id
-    for cid in catalogue_ids:
-        if plan_test_id.startswith(f"{cid}_"):
-            return cid
-    return plan_test_id
-
-
-def _results_for(catalogue_test_id: str, test_results: list[dict]) -> list[dict]:
-    return [
-        r for r in test_results
-        if r.get("test_id") == catalogue_test_id or str(r.get("test_id", "")).startswith(catalogue_test_id + "_")
-    ]
-
-
-def _combined_status(results: list[dict]) -> dict:
-    if not results:
-        return {}
-    best = min(results, key=lambda r: _STATUS_PRIORITY.get(r.get("status"), 3))
-    total_exceptions = sum(r.get("exception_units") or 0 for r in results if r.get("status") == "exception")
-    return {**best, "exception_units": total_exceptions if best.get("status") == "exception" else best.get("exception_units")}
+# catalogue-grain grouping (exact-id-or-"<id>_"-prefix matching, combined
+# status) now lives in orchestrator.catalogue_counts, shared with
+# orchestrator/narration/run_values.py (independent review 2026-09-24 gap
+# #5). `catalogue_id_for`/`results_for`/`combined_status` imported above.
 
 
 def _reconciliation_ok(rec: dict) -> bool:
@@ -410,7 +388,7 @@ def _build_what_we_found(prs, findings: list[dict], catalogue_rows: list[dict], 
 
     groups: dict[str, list[dict]] = {}
     for f in findings:
-        cat_id = _catalogue_id_for(f.get("test_id") or "", catalogue_ids)
+        cat_id = catalogue_id_for(f.get("test_id") or "", catalogue_ids)
         category = category_by_id.get(cat_id, "Uncategorised")
         groups.setdefault(category, []).append(f)
 
@@ -620,8 +598,8 @@ def _build_test_coverage(prs, catalogue_rows: list[dict], state: RunState, now: 
     catalogue_ids = {t["test_id"] for t in catalogue_rows if t.get("test_id")}
     rows = []
     for t in catalogue_rows:
-        results = _results_for(t["test_id"], state.test_results)
-        combined = _combined_status(results)
+        results = results_for(t["test_id"], state.test_results)
+        combined = combined_status(results)
         status = combined.get("status", "not_testable")
         exceptions = combined.get("exception_units") if status == "exception" else None
         rows.append({
