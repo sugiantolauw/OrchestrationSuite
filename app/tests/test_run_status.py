@@ -111,3 +111,33 @@ def test_poll_stops_at_terminal_and_gate_statuses():
     }
     assert "queued" not in run_status._TERMINAL_STATUSES
     assert "running" not in run_status._TERMINAL_STATUSES
+
+
+def test_poll_stops_for_a_queued_run_from_a_different_deployment():
+    """Independent review 2026-09-24 item 6: a queue_note means THIS
+    deployment's executor will never claim this run (a code_revision
+    mismatch) -- polling forever costs a query per interval for a status
+    that will realistically never change from here."""
+    run = {"status": "queued", "queue_note": "queued — created by a different deployment (code revision abc123456789)"}
+    assert run_status._should_stop_polling(run, 1) is True
+
+
+def test_poll_continues_for_an_ordinary_queued_run():
+    run = {"status": "queued", "queue_note": None}
+    assert run_status._should_stop_polling(run, 1) is False
+
+
+def test_poll_continues_for_a_running_run_within_the_idle_cap():
+    run = {"status": "running"}
+    assert run_status._should_stop_polling(run, 5) is False
+
+
+def test_poll_stops_after_the_max_idle_poll_duration():
+    """An abandoned browser tab must not poll forever, whatever the status."""
+    run = {"status": "running"}
+    assert run_status._should_stop_polling(run, run_status._MAX_IDLE_INTERVALS) is True
+
+
+def test_poll_stops_for_an_unknown_run_after_the_idle_cap():
+    assert run_status._should_stop_polling(None, run_status._MAX_IDLE_INTERVALS) is True
+    assert run_status._should_stop_polling(None, 1) is False

@@ -26,6 +26,18 @@ _POLL_MS = 3000
 # default "running" branch keep polling: those progress on their own.
 _TERMINAL_STATUSES = {"completed", "failed", "awaiting_confirmation", "awaiting_signoff", "interrupted"}
 
+# Independent review 2026-09-24 item 6: a "queued" run whose own queue_note
+# says it was created by a DIFFERENT deployment (service._queue_affinity_note
+# -- a code_revision mismatch means THIS deployment's executor will never
+# claim it, ThreadExecutor's own admission check) is, in practice, almost
+# always permanently stuck: the deployment that created it is the one whose
+# redeploy replaced it. Polling this page forever costs a query every
+# _POLL_MS for a status that will realistically never change from here.
+# Independent of that: any status, queued or running, that has not changed
+# in _MAX_IDLE_INTERVALS polls (30 minutes at the default 3s interval) stops
+# polling too -- an abandoned browser tab must not poll forever.
+_MAX_IDLE_INTERVALS = 600
+
 
 def _request_actor() -> str:
     """See run_setup.py's _request_owner -- same rule: "local-user" is a
@@ -189,6 +201,23 @@ def _render_body(run: dict | None, run_id: str) -> html.Div:
     return html.Div(blocks)
 
 
+def _should_stop_polling(run: dict | None, n_intervals: int) -> bool:
+    """The run-poll dcc.Interval's `disabled` decision (independent review
+    2026-09-24 item 6), pulled out of the callback closure so it is directly
+    unit-testable: terminal/gate statuses (nothing left to happen here), a
+    queued run this deployment can never claim (its own queue_note says a
+    different deployment created it), or this tab has simply been open too
+    long (_MAX_IDLE_INTERVALS) -- whichever comes first."""
+    status = run.get("status") if run else None
+    if status in _TERMINAL_STATUSES:
+        return True
+    if status == "queued" and bool(run.get("queue_note")):
+        return True
+    if n_intervals >= _MAX_IDLE_INTERVALS:
+        return True
+    return False
+
+
 def register_callbacks(app) -> None:
 
     @app.callback(
@@ -199,8 +228,7 @@ def register_callbacks(app) -> None:
     )
     def _poll(_n, run_id):
         run = adapters.get_run(run_id)
-        disabled = bool(run and run.get("status") in _TERMINAL_STATUSES)
-        return _render_body(run, run_id), disabled
+        return _render_body(run, run_id), _should_stop_polling(run, _n)
 
     @app.callback(
         Output("run-page-body", "children", allow_duplicate=True),
