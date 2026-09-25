@@ -1991,6 +1991,10 @@ The run card's existing View, Export and Trace buttons are wired as follows:
   - **Message line (user, 2026-09-25):** `/runs` gains one line of text under the filters, empty by default, styled like `/workspace/tne`'s existing export error text. It reads "This run must be signed off before its export is available." after an Export click on a run that has not been signed off.
 - **Trace:** opens `/trace` filtered to that run.
 
+### Acceptance-round scope (user decision, 2026-09-25)
+
+The user chose to add three build-here items before acceptance testing, so that they are tested in the same pass: column mapping at run setup (item 2), the Skill authoring kit (item 5) and the P7 review workflow (item 6). The lifecycle M0 mockups are also built now, for approval during acceptance. The lifecycle build, SKILL-002 GST, governance switches, operations-as-code and the porting kit follow acceptance testing.
+
 ### Paused runs across a code deploy (user decision, 2026-09-24)
 
 A run pins the code revision it started on. When new code is deployed:
