@@ -219,6 +219,172 @@ def get_export(run_id: str, kind: str):
     return service.get_export(get_context(), run_id, kind)
 
 
+# ── P6 narration review (docs/specs/P6_narration_design.md §7 UI-1/UI-2/
+# UI-7) ──────────────────────────────────────────────────────────────────
+
+_EMPTY_NARRATION_REVIEW = {
+    "narration_enabled": False, "degraded_label": None,
+    "findings": [], "themes": [], "exec_summary": None,
+    "candidates": [], "undecided_candidate_ids": [],
+}
+
+
+def get_narration_review(run_id: str) -> dict | None:
+    """Resolves this run's model-written text and AI-proposed candidates for
+    the `/run/<id>` review panel (UI-1/UI-2/UI-7). No `orchestrator.service`
+    read-model exists for this yet (`decide_candidate`/`edit_narrative`/
+    `regenerate_narration`/`sign_off` are the WRITE side; `get_run` returns
+    only `RunState`, which never carries prose or candidates) -- built here,
+    read-only, from the same primitives the export node uses:
+    `ctx.persistence.list_findings`/`get_narratives`/`list_candidates`/
+    `list_themes`/`get_run_metrics` for the data, and
+    `orchestrator.narration.resolve.effective_prose`/`metrics_placeholder_
+    table` (CLAUDE.md §3 NN12) to turn a narrative row into `{text, status,
+    label, sources}`. One shared placeholder table (every run metric) is
+    used for every resolution call: `render()` only looks up the
+    placeholders actually present in a given piece of text, so a table
+    carrying more entries than one item cites is harmless -- and this avoids
+    needing the Skill-dependent `build_finding_table`/`build_theme_table`/
+    `run_values` builders (§4.6) just to show a reviewer what the model
+    wrote.
+
+    The fake backend (app/tests/fake_service.py) has no `.persistence` to
+    read candidates/narratives from -- there is genuinely nothing to review
+    there (a fake run never had narration), not a hidden default (CLAUDE.md
+    NN14), so that case returns the same empty, "narration off" shape a real
+    run with NARRATION_ENABLED=false would."""
+    from orchestrator.catalogue_counts import catalogue_tests_for_skill
+    from orchestrator.errors import RunNotFound
+    from orchestrator.narration import resolve as narration_resolve
+    from orchestrator.narration.run_values import run_values as narration_run_values
+
+    ctx = get_context()
+    persistence = getattr(ctx, "persistence", None)
+    if persistence is None:
+        return dict(_EMPTY_NARRATION_REVIEW)
+    try:
+        state = persistence.load_state(run_id)
+    except RunNotFound:
+        return None
+
+    findings = persistence.list_findings(run_id)
+    metrics = persistence.get_run_metrics(run_id)
+    candidates = persistence.list_candidates(run_id)
+    themes_rows = persistence.list_themes(run_id)
+    narratives_by_target = {
+        (r["target_kind"], r["target_id"], r["field"]): r for r in persistence.get_narratives(run_id)
+    }
+    # One shared placeholder table for every resolution call below (see the
+    # docstring): every run metric by name, plus the `run_*` derived
+    # entries (finding/test counts, the exposure headline, the audit
+    # period) that only the exec summary cites -- `run_values` needs this
+    # run's Skill only to compute test counts at catalogue grain rather
+    # than the plan's larger sub-test grain; `[]` (no Skill resolved, e.g.
+    # an unconfirmed Explorer run) still gives a correct, just coarser,
+    # count.
+    skill = service.resolve_run_skill(ctx, state)
+    catalogue_tests = catalogue_tests_for_skill(skill) if skill else []
+    run_table = narration_run_values(state, findings, metrics, catalogue_tests=catalogue_tests)
+    table = {**narration_resolve.metrics_placeholder_table(list(metrics.keys()), metrics), **run_table}
+    generation = int((state.options or {}).get("narration_generation", 0) or 0)
+
+    def _resolve(*, target_kind: str, target_id: str, field: str, fallback_text=None, is_list: bool = False) -> dict:
+        row = narratives_by_target.get((target_kind, target_id, field))
+        resolved = narration_resolve.effective_prose(
+            target_kind=target_kind, target_id=target_id, field=field,
+            narratives_by_target=narratives_by_target, table=table,
+            fallback_text=fallback_text, is_list=is_list,
+        )
+        resolved["narrative_id"] = row["narrative_id"] if row else None
+        return resolved
+
+    findings_out = []
+    for f in findings:
+        resolved = _resolve(
+            target_kind="finding", target_id=f["finding_id"], field="observation",
+            fallback_text=f.get("observation"),
+        )
+        findings_out.append({
+            "finding_id": f["finding_id"], "title": f.get("title"), "severity": f.get("severity"),
+            **resolved,
+        })
+
+    findings_by_id = {f["finding_id"]: f for f in findings}
+    themes_out = []
+    for theme in themes_rows:
+        if theme.get("generation") != generation or theme.get("superseded"):
+            continue
+        title = _resolve(target_kind="theme", target_id=theme["theme_id"], field="title")
+        if title["text"] is None:
+            continue
+        summary = _resolve(target_kind="theme", target_id=theme["theme_id"], field="summary")
+        if summary["text"] is None:
+            continue
+        root_cause = _resolve(target_kind="theme", target_id=theme["theme_id"], field="root_cause")
+        review_observations = _resolve(
+            target_kind="theme", target_id=theme["theme_id"], field="review_observations",
+            fallback_text=[], is_list=True,
+        )
+        members = [findings_by_id[fid] for fid in theme.get("finding_ids", []) if fid in findings_by_id]
+        themes_out.append({
+            "theme_id": theme["theme_id"], "title": title, "summary": summary,
+            "root_cause": root_cause, "review_observations": review_observations,
+            "members": [{"severity": m.get("severity"), "title": m.get("title")} for m in members],
+        })
+
+    exec_summary = _resolve(target_kind="run", target_id="run", field="exec_summary", fallback_text=[], is_list=True)
+
+    candidates_out = []
+    for c in candidates:
+        observation = _resolve(target_kind="candidate", target_id=c["candidate_id"], field="observation")
+        candidates_out.append({
+            "candidate_id": c["candidate_id"], "rule_id": c.get("rule_id"), "title": c.get("title"),
+            "proposed_severity": c.get("proposed_severity"), "severity_reason": c.get("severity_reason"),
+            "metrics_cited": c.get("metrics_cited") or [], "exposure_amount": c.get("exposure_amount"),
+            "candidate_status": c.get("candidate_status"), "decided_by": c.get("decided_by"),
+            "decided_at": c.get("decided_at"), "decision_reason": c.get("decision_reason"),
+            "decided_severity": c.get("decided_severity"),
+            "observation_text": observation["text"], "observation_sources": observation["sources"],
+        })
+
+    undecided = [c["candidate_id"] for c in candidates_out if c["candidate_status"] == "candidate"]
+
+    degraded_label = None
+    if exec_summary["status"] not in ("model", "model_repaired", "human_edit"):
+        degraded_label = exec_summary["label"]
+
+    return {
+        "narration_enabled": bool(getattr(ctx.settings, "narration_enabled", False)),
+        "degraded_label": degraded_label,
+        "findings": findings_out,
+        "themes": themes_out,
+        "exec_summary": exec_summary,
+        "candidates": candidates_out,
+        "undecided_candidate_ids": undecided,
+    }
+
+
+def decide_candidate(
+    run_id: str, candidate_id: str, *, decision: str, reason: str | None, decided_severity: str | None, actor: str,
+) -> dict:
+    return service.decide_candidate(
+        get_context(), run_id, candidate_id, decision=decision, reason=reason,
+        decided_severity=decided_severity, actor=actor,
+    )
+
+
+def edit_narrative(run_id: str, narrative_id: str, new_text, actor: str) -> dict:
+    return service.edit_narrative(get_context(), run_id, narrative_id, new_text, actor=actor)
+
+
+def regenerate_narration(run_id: str, actor: str) -> None:
+    service.regenerate_narration(get_context(), run_id, actor)
+
+
+def restart_stale_run(run_id: str, actor: str) -> str:
+    return service.restart_stale_run(get_context(), run_id, actor)
+
+
 # ── Audit runs ───────────────────────────────────────────────────────────────
 
 def list_audit_runs(filters: dict | None = None) -> list[dict]:

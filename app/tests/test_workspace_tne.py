@@ -5,9 +5,9 @@ from src import workspace_tne
 from src.platform import adapters
 
 
-def _completed_run():
+def _completed_run(skill_id="SKILL-001"):
     run_id = adapters.start_audit_run(
-        skill_id="SKILL-001",
+        skill_id=skill_id,
         bindings={"expense_report": "test_catalog.tne_source.expense_report"},
         audit_period=("2025-01-01", "2026-04-30"),
         objective="Assess spend.",
@@ -58,6 +58,21 @@ def test_exposure_summary_prefers_label_over_basis():
 def test_latest_completed_run_id_finds_the_run():
     run_id = _completed_run()
     assert workspace_tne.latest_completed_run_id() == run_id
+
+
+def test_latest_completed_run_id_ignores_a_completed_explorer_run():
+    # CLAUDE.md §6 D5: "/workspace/tne stays SKILL-001's" -- this page's
+    # every chart assumes tne_exco's own contract columns (this module's
+    # own docstring), so a completed Explorer (or any non-SKILL-001) run
+    # must never become the "latest completed run" this page renders. The
+    # Explorer run is created FIRST and the SKILL-001 run second: fake_
+    # service stamps every run with the same last_updated, so an unfiltered
+    # pick (the bug) would return whichever run sorts first for ties --
+    # here that's the Explorer run inserted first -- while the fix must
+    # still return the SKILL-001 run regardless of insertion order.
+    _completed_run(skill_id="SKILL-EXPLORER-1")
+    tne_run_id = _completed_run(skill_id="SKILL-001")
+    assert workspace_tne.latest_completed_run_id() == tne_run_id
 
 
 def test_workspace_layout_with_no_run_id_shows_empty_state():
@@ -132,6 +147,53 @@ def test_finding_card_raises_if_analyst_set_severity_was_never_persisted():
     }
     with pytest.raises(ValueError, match="analyst_set_severity"):
         workspace_tne._finding_card(0, finding)
+
+
+# ── UI-5/UI-6 (docs/specs/P6_narration_design.md §7): the accepted-AI-
+# proposed chip and the NN12 sources tooltip on /workspace/tne's finding
+# card -- both additive, no other visible change (CLAUDE.md §11 "the UI is
+# the prototype's, exactly"). ────────────────────────────────────────────
+
+
+def _base_finding(**overrides) -> dict:
+    finding = {
+        "severity": "High", "test_id": "T4.1", "title": "Missing receipts",
+        "observation": "obs", "recommendation": "rec", "management_questions": ["q?"],
+        "analyst_set_severity": True, "severity_basis": "threshold", "exposure_amount": None,
+        "finding_id": "F1",
+    }
+    finding.update(overrides)
+    return finding
+
+
+def test_finding_card_shows_no_ai_chip_for_a_rule_finding():
+    card = workspace_tne._finding_card(0, _base_finding())
+    text = str(card)
+    assert "AI-proposed" not in text
+
+
+def test_finding_card_shows_accepted_chip_for_an_ai_proposed_finding():
+    finding = _base_finding(origin="ai_proposed", accepted_by="reviewer@example.com")
+    card = workspace_tne._finding_card(0, finding)
+    text = str(card)
+    assert "AI-proposed, accepted by reviewer@example.com" in text
+
+
+def test_finding_card_observation_has_no_tooltip_when_no_metrics_cited():
+    card = workspace_tne._finding_card(0, _base_finding(metrics_cited={}))
+    # No `title=` kwarg reaches the rendered P at all (UI-6: "no visible
+    # change" only makes sense if absent metrics means no attribute, never
+    # an empty `title=""` that would still show a blank tooltip on hover).
+    assert "title=" not in str(card)
+
+
+def test_finding_card_observation_tooltip_names_the_findings_metrics_cited_source_fields():
+    finding = _base_finding(metrics_cited={"missing_receipt_count": {"value": 3, "unit": "count"}})
+    card = workspace_tne._finding_card(0, finding)
+    text = str(card)
+    assert "findings[F1].metrics_cited.missing_receipt_count" in text
+    # UI-6 must not change the visible observation text itself.
+    assert "obs" in text
 
 
 def test_render_filtered_findings_shows_top_three_and_collapses_rest():

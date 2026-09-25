@@ -90,6 +90,15 @@ _SEVERITY_COLOR = {"High": "#b85042", "Medium": "#e0952a", "Low": "#2c7a4b"}
 _ACTION_STATUS_COLOR = {"draft": "#b85042", "open": "#b85042", "under_review": "#e0952a",
                          "agreed": "#1c7293", "remediated": "#2c7a4b", "closed": "#6b7283"}
 
+# This workspace is SKILL-001's own (CLAUDE.md §6 D5: "/workspace/tne stays
+# SKILL-001's"; §11 "Column names ... T3.1b join ... Country for T6.1d" and
+# every chart below assume tne_exco's own contract columns) -- an Explorer
+# or GST run reaching this page would render nonsense (a different Skill's
+# frames coerced through SKILL-001's own contract-column lookups) rather
+# than fail loudly, so the "latest completed run" this page shows is scoped
+# to this Skill's own runs only.
+_SKILL_ID = "SKILL-001"
+
 _AMOUNT_COL = "Expense Amount (reimbursement currency)"
 _DATE_COL = "Transaction Date"
 
@@ -187,7 +196,10 @@ def _load_error_panel(run_id: str, exc: Exception) -> html.Div:
 
 def latest_completed_run_id() -> str | None:
     runs = adapters.list_audit_runs()
-    completed = [r for r in runs if str(r.get("status", "")).lower() == "completed"]
+    completed = [
+        r for r in runs
+        if str(r.get("status", "")).lower() == "completed" and r.get("skill_id") == _SKILL_ID
+    ]
     if not completed:
         return None
     completed.sort(key=lambda r: r.get("last_updated") or r.get("run_timestamp") or "", reverse=True)
@@ -807,13 +819,33 @@ def _finding_card(idx: int, finding: dict) -> html.Article:
         html.Span(severity, className="chip", style={"color": color, "borderColor": color}),
         html.Span(test_id, className="chip mono", style={"color": "#6b7283"}),
     ]
+    # UI-5 (docs/specs/P6_narration_design.md §7, CLAUDE.md §11 "Hybrid
+    # findings" UI for review): the one allowed addition to this row -- a
+    # chip naming the auditor who accepted this AI-proposed finding at
+    # sign-off. Only for origin='ai_proposed' findings (CLAUDE.md §3 NN2
+    # amendment); a rule finding's summary_items is unchanged.
+    if finding.get("origin") == "ai_proposed":
+        summary_items.append(html.Span(f"AI-proposed, accepted by {finding.get('accepted_by') or '—'}",
+                                        className="chip", style={"color": "#6b7283"}))
     exposure_line = (
         f"Exposure: ${exposure:,.0f}" if exposure is not None
         else "Exposure: not yet computed"
     )
 
+    # UI-6: NN12 sources as an HTML `title` attribute (hover tooltip) on the
+    # observation -- no visible change. This finding's own `metrics_cited`
+    # (already persisted alongside `observation`, CLAUDE.md §3 NN12) names
+    # exactly the RunState fields this text's numbers came from; the
+    # observation text itself is unchanged.
+    metrics_cited = finding.get("metrics_cited") or {}
+    observation_title = (
+        "Numbers from: " + ", ".join(
+            f"findings[{finding.get('finding_id')}].metrics_cited.{name}" for name in sorted(metrics_cited)
+        )
+    ) if metrics_cited else None
+
     detail = html.Div([
-        html.P(finding.get("observation", ""),
+        html.P(finding.get("observation", ""), title=observation_title,
                style={"margin": "0 0 10px", "fontSize": 13.5, "lineHeight": 1.55, "color": "#2c3040"}),
         html.Div(exposure_line, style={"marginBottom": 8, "fontSize": 11, "color": "#6b7283", "fontFamily": "monospace"}),
         html.Div([
