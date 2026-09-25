@@ -212,6 +212,35 @@ def test_pandas_profile_columns_currency_code_column():
     assert currency["semantic_type"] == "currency_code"
 
 
+def test_pandas_profile_columns_mixed_representation_date_does_not_crash():
+    # Live 2026-09-25 regression: infer_column_type's own mixed-
+    # representation fix means col_type "date" no longer implies
+    # non_null is datetime64 dtype -- a column whose cells mix native
+    # datetime.datetime with date-formatted text (tests/fixtures/
+    # tne_planted's own "Transaction Date") is object-dtype, and
+    # non_null.min()/.max() used to do pairwise Python `<=` comparisons
+    # straight on that raw object series, raising TypeError('<=' not
+    # supported between instances of 'datetime.datetime' and 'str')
+    # before this fix -- reproduced live via a real Explorer profile()
+    # node call over that exact fixture.
+    import datetime as dt
+
+    df = pd.DataFrame({
+        "__source": ["s"] * 4,
+        "__row_key": ["k1", "k2", "k3", "k4"],
+        "Transaction Date": [dt.datetime(2026, 1, 15), "2026-02-03", dt.datetime(2026, 3, 1), "2026-01-20"],
+    })
+    result = pandas_profile_columns(
+        df, max_distinct=30, min_count=1,
+        audit_period=("2026-01-01", "2026-02-28"), audit_timezone="Australia/Sydney",
+    )
+    date_col = next(c for c in result["columns"] if c["name"] == "Transaction Date")
+    assert date_col["type"] == "date"
+    assert date_col["min"] == "2026-01-15"
+    assert date_col["max"] == "2026-03-01"
+    assert date_col["in_period_count"] == 3  # every row except 2026-03-01
+
+
 def test_pandas_distinct_count_composite_key():
     df = pd.DataFrame({
         "A": [1, 1, 2, 2, 3],

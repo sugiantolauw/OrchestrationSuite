@@ -272,10 +272,23 @@ def pandas_profile_columns(
             col["max"] = _scalar_to_jsonable(non_null.max())
         if col_type in ("date", "datetime") and len(non_null):
             date_only = col_type == "date"
-            col["min"] = _scalar_to_jsonable(non_null.min(), date_only=date_only)
-            col["max"] = _scalar_to_jsonable(non_null.max(), date_only=date_only)
+            # Live 2026-09-25 regression (companion to infer_column_type's
+            # own mixed-representation fix): col_type "date"/"datetime" no
+            # longer implies non_null is already datetime64 dtype -- a
+            # column whose cells mix native datetime.datetime with
+            # date-formatted text is object-dtype even though every value
+            # IS a date, and non_null.min()/.max() do pairwise Python `<=`
+            # comparisons on an object series, which raise TypeError across
+            # a str and a datetime.datetime. Coerce once, the same
+            # format="mixed" parse infer_column_type already proved
+            # succeeds for every non-null value here; a no-op for the
+            # ordinary already-uniform-datetime64 case.
+            dates = non_null if pd.api.types.is_datetime64_any_dtype(non_null) \
+                else pd.to_datetime(non_null, format="mixed")
+            col["min"] = _scalar_to_jsonable(dates.min(), date_only=date_only)
+            col["max"] = _scalar_to_jsonable(dates.max(), date_only=date_only)
             if audit_period and audit_timezone:
-                col["in_period_count"] = _in_period_count(non_null, audit_period, audit_timezone)
+                col["in_period_count"] = _in_period_count(dates, audit_period, audit_timezone)
 
         if distinct_count <= max_distinct:
             values, suppressed = _value_counts(
