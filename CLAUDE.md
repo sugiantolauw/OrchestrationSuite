@@ -1254,6 +1254,11 @@ validate the schema client-side with one retry — never strip markdown fences t
     edit UI for now. Full column and threshold editing comes later.
   - (D5) Explorer results appear on `/runs`, `/trace`, `/actions` and in the XLSX (`/workspace/tne`
     stays SKILL-001's).
+  - (D5a, user, 2026-09-25) Explorer gets a source checklist inside the existing Explorer Mode
+    panel: one `dcc.Checklist` of the governed tables this identity can read plus the user's Ready
+    uploads. The auditor ticks 1–5 sources, and "Start new objective" profiles only those. Nothing
+    is auto-picked, and no selection gives a visible error. This replaces the "first 5 available"
+    behaviour.
   - (D6) The planner may see category value sets with counts, only for non-PII columns with at most
     30 distinct values, with any value seen in fewer than 5 rows withheld. It never sees rows.
   - (D7) Keep `get_open_ai_client()` as mandated.
