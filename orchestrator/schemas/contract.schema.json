@@ -13,6 +13,7 @@
           "header_trim": {"type": "boolean"},
           "entry_key": {"type": "array", "items": {"type": "string"}, "minItems": 1},
           "entry_key_repeats": {"type": "boolean"},
+          "optional": {"type": "boolean"},
           "columns": {
             "type": "object",
             "additionalProperties": {
@@ -40,6 +41,21 @@
           "required": ["format"]
         },
         "then": {"required": ["file"]}
+      }
+    },
+    "parameters": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "references": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+          "kind": {"type": "string", "enum": ["id_list", "table", "mapping"]},
+          "item_type": {"type": "string", "enum": ["integer", "string"]},
+          "columns": {"type": "object", "additionalProperties": {"type": "string"}},
+          "group": {"type": "string"}
+        },
+        "required": ["references", "kind", "group"],
+        "additionalProperties": false
       }
     }
   },

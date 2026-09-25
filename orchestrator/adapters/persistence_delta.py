@@ -146,6 +146,7 @@ _FINGERPRINT_COLUMNS = (
     "runtime_config_hash",
     "endpoint_config",
     "prompt_template_version",
+    "run_inputs_hash",
 )
 
 _RUN_STATE_SUMMARY_COLUMNS = (
@@ -883,9 +884,10 @@ class DeltaPersistence:
                 f"INSERT INTO {self._table('run_fingerprints')} (fingerprint_id, source_table_versions, "
                 "uploaded_file_hashes, reference_data_hashes, skill_content_hash, code_revision, "
                 "dependency_lock_hash, runtime_config_hash, endpoint_config, prompt_template_version, "
-                "created_at) VALUES (:fingerprint_id, :source_table_versions, :uploaded_file_hashes, "
-                ":reference_data_hashes, :skill_content_hash, :code_revision, :dependency_lock_hash, "
-                ":runtime_config_hash, :endpoint_config, :prompt_template_version, :created_at)",
+                "run_inputs_hash, created_at) VALUES (:fingerprint_id, :source_table_versions, "
+                ":uploaded_file_hashes, :reference_data_hashes, :skill_content_hash, :code_revision, "
+                ":dependency_lock_hash, :runtime_config_hash, :endpoint_config, :prompt_template_version, "
+                ":run_inputs_hash, :created_at)",
                 {
                     "fingerprint_id": fingerprint_id,
                     "source_table_versions": fingerprint["source_table_versions"],
@@ -897,6 +899,7 @@ class DeltaPersistence:
                     "runtime_config_hash": fingerprint["runtime_config_hash"],
                     "endpoint_config": fingerprint["endpoint_config"],
                     "prompt_template_version": fingerprint["prompt_template_version"],
+                    "run_inputs_hash": fingerprint.get("run_inputs_hash"),
                     "created_at": fingerprint.get("created_at") or utc_now(),
                 },
             )

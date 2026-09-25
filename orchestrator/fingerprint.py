@@ -244,6 +244,7 @@ def compute_fingerprint(
     code_revision: str | None = None,
     dependency_lock_path: Path | None = None,
     skill_content_hash: str | None | object = _UNSET,
+    run_inputs_hash: str | None = None,
 ) -> dict:
     requirements_path = Path(requirements_path)
     # P2/P3 gate review item 8: `dependency_lock_hash` hashes a REAL lock --
@@ -290,9 +291,19 @@ def compute_fingerprint(
         "runtime_config_hash": runtime_config_hash(dataclasses.replace(settings, code_revision=None)),
         "endpoint_config": _canonical_json(endpoint_config(settings)),
         "prompt_template_version": _prompt_template_version(prompts_dirs),
+        # Independent review 2026-09-25 item 1 ("run inputs"): stored on
+        # EVERY fingerprint (so it can always be read back), but included in
+        # the fingerprint_id hash only when non-null -- so a run with no
+        # column mappings/parameters/unsupplied sources computes the
+        # IDENTICAL fingerprint_id it would have before this field existed
+        # (docs/specs/P7_mapping_authoring_design.md §1.3).
+        "run_inputs_hash": run_inputs_hash,
     }
+    hashed_field_names = list(_HASHED_FIELDS)
+    if run_inputs_hash is not None:
+        hashed_field_names.append("run_inputs_hash")
     fingerprint_id = hashlib.sha256(
-        _canonical_json({k: fields[k] for k in _HASHED_FIELDS}).encode("utf-8")
+        _canonical_json({k: fields[k] for k in hashed_field_names}).encode("utf-8")
     ).hexdigest()
 
     result = dict(fields)
@@ -315,8 +326,11 @@ def verify_fingerprint(stored: dict, current: dict, *, allow_code_revision_diff:
     effect -- it will always differ as a direct, expected consequence of the
     one field callers were told may differ, never a second, independent
     signal of drift."""
+    hashed_field_names = list(_HASHED_FIELDS)
+    if stored.get("run_inputs_hash") is not None or current.get("run_inputs_hash") is not None:
+        hashed_field_names.append("run_inputs_hash")
     differing = {}
-    for field in _HASHED_FIELDS:
+    for field in hashed_field_names:
         if field == "code_revision" and allow_code_revision_diff:
             continue
         if stored.get(field) != current.get(field):

@@ -381,3 +381,41 @@ def test_verify_fingerprint_allow_code_revision_diff_still_enforces_every_other_
         verify_fingerprint(fp1, fp2, allow_code_revision_diff=True)
     assert "skill_content_hash" in exc.value.differing_fields
     assert "code_revision" not in exc.value.differing_fields
+
+
+def test_run_inputs_hash_absent_gives_same_fingerprint_id_as_before_the_field_existed():
+    """Independent review 2026-09-25 item 1 ("run inputs"): a run with no
+    column mappings/parameters/unsupplied sources must compute the
+    IDENTICAL fingerprint_id whether or not run_inputs_hash is passed at
+    all -- adding the field must never change an existing run's identity."""
+    fp_without_kwarg = _fp()
+    fp_with_none = _fp(run_inputs_hash=None)
+    assert fp_without_kwarg["fingerprint_id"] == fp_with_none["fingerprint_id"]
+
+
+def test_run_inputs_hash_changes_fingerprint_id_when_present():
+    fp_none = _fp()
+    fp_mapped = _fp(run_inputs_hash="abc123")
+    assert fp_none["fingerprint_id"] != fp_mapped["fingerprint_id"]
+    assert fp_mapped["run_inputs_hash"] == "abc123"
+    assert fp_none["run_inputs_hash"] is None
+
+
+def test_run_inputs_hash_change_changes_fingerprint_id():
+    fp1 = _fp(run_inputs_hash="mapping-a")
+    fp2 = _fp(run_inputs_hash="mapping-b")
+    assert fp1["fingerprint_id"] != fp2["fingerprint_id"]
+
+
+def test_verify_fingerprint_run_inputs_hash_mismatch_is_reported():
+    fp1 = _fp(run_inputs_hash="mapping-a")
+    fp2 = _fp(run_inputs_hash="mapping-b")
+    with pytest.raises(FingerprintMismatch) as exc:
+        verify_fingerprint(fp1, fp2)
+    assert "run_inputs_hash" in exc.value.differing_fields
+
+
+def test_verify_fingerprint_both_without_run_inputs_never_compares_it():
+    fp1 = _fp()
+    fp2 = _fp()
+    verify_fingerprint(fp1, fp2)  # should not raise

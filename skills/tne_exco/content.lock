@@ -12,5 +12,5 @@
 # made (e14e155, 022d7db). Whenever that test fails: bump manifest.yaml's
 # version, then regenerate this file so `version`/`content_hash` match the
 # new content again.
-version: "2.1.0-draft"
-content_hash: "0f5744f3001072e438a548f8c6baefa9dd7364f0d38254daf9b1459f54972e5d"
+version: "2.2.0-draft"
+content_hash: "e15f352b891fdda303076fed609cadf6d5573458ec8f7b3c5740d082b42b81d7"

@@ -40,6 +40,7 @@ _FINGERPRINT_COLUMNS = (
     "runtime_config_hash",
     "endpoint_config",
     "prompt_template_version",
+    "run_inputs_hash",
 )
 
 _RUN_STATE_SUMMARY_COLUMNS = (
@@ -493,7 +494,7 @@ class LocalPersistence:
                 "INSERT INTO run_fingerprints (fingerprint_id, source_table_versions, "
                 "uploaded_file_hashes, reference_data_hashes, skill_content_hash, code_revision, "
                 "dependency_lock_hash, runtime_config_hash, endpoint_config, "
-                "prompt_template_version, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                "prompt_template_version, run_inputs_hash, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     fingerprint_id,
                     fingerprint["source_table_versions"],
@@ -505,6 +506,7 @@ class LocalPersistence:
                     fingerprint["runtime_config_hash"],
                     fingerprint["endpoint_config"],
                     fingerprint["prompt_template_version"],
+                    fingerprint.get("run_inputs_hash"),
                     fingerprint.get("created_at") or utc_now(),
                 ),
             )
