@@ -147,6 +147,21 @@ class Settings:
     # many items -- a hard ceiling on how many AI-proposed findings one run
     # can produce, never just a UI truncation.
     narration_max_candidates: int = 3
+    # Found-live perf review 2026-09-25: `narrate` was making its ~45+
+    # narration calls strictly sequentially, so a full SKILL-001 run against
+    # a reasoning model took 9+ minutes of an auditor's wait before
+    # sign-off, even though most of those calls have no data dependency on
+    # each other (orchestrator.nodes.narration.narrate runs its independent
+    # stage -- profile, one call per finding, synthesis, priority,
+    # remediation, candidates, captions -- through a bounded
+    # ThreadPoolExecutor of this size; exec_summary alone waits for
+    # synthesis's themes, so it always runs after). An operational knob --
+    # it changes how fast a run narrates, never what it computes or stores
+    # (results are still assembled in the SAME deterministic order
+    # regardless of completion order) -- so it is excluded from the runtime
+    # config hash below, same as the executor/admission knobs. 1 recovers
+    # the old fully-sequential behaviour.
+    narration_max_parallel: int = 4
     # Explicit override of which repo Skills the planner sees as reference
     # examples (§4.4); empty means "the first two valid repo Skills sorted by
     # id" -- a later step's concern to resolve, this field only carries an
@@ -266,6 +281,7 @@ def load_settings(env: dict | None = None) -> Settings:
         narration_enabled=_parse_bool(env.get("NARRATION_ENABLED"), False),
         ai_proposed_findings_enabled=_parse_bool(env.get("AI_PROPOSED_FINDINGS_ENABLED"), False),
         narration_max_candidates=_parse_int(env.get("NARRATION_MAX_CANDIDATES"), 3),
+        narration_max_parallel=_parse_int(env.get("NARRATION_MAX_PARALLEL"), 4),
         explorer_reference_skill_ids=_parse_csv(env.get("EXPLORER_REFERENCE_SKILL_IDS")),
         explorer_category_max_distinct=_parse_int(env.get("EXPLORER_CATEGORY_MAX_DISTINCT"), 30),
         explorer_category_min_count=_parse_int(env.get("EXPLORER_CATEGORY_MIN_COUNT"), 5),
@@ -295,6 +311,7 @@ _RUNTIME_HASH_EXCLUDED_FIELDS = frozenset({
     "apps_python_version",
     "llm_monthly_token_budget",
     "llm_price_per_mtok_json",
+    "narration_max_parallel",
 })
 
 

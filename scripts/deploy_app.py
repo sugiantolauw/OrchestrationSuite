@@ -153,6 +153,7 @@ _ALWAYS_FORWARDED_SETTINGS: list[tuple[str, str]] = [
     ("narration_enabled", "NARRATION_ENABLED"),
     ("ai_proposed_findings_enabled", "AI_PROPOSED_FINDINGS_ENABLED"),
     ("narration_max_candidates", "NARRATION_MAX_CANDIDATES"),
+    ("narration_max_parallel", "NARRATION_MAX_PARALLEL"),
     ("explorer_category_max_distinct", "EXPLORER_CATEGORY_MAX_DISTINCT"),
     ("explorer_category_min_count", "EXPLORER_CATEGORY_MIN_COUNT"),
     ("explorer_max_columns", "EXPLORER_MAX_COLUMNS"),

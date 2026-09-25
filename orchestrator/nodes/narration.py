@@ -28,6 +28,8 @@ generation overwrites its own prior output rather than appending."""
 from __future__ import annotations
 
 import dataclasses
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any, Callable
 
 from orchestrator import exposure
 from orchestrator.catalogue_counts import catalogue_tests_for_skill
@@ -100,6 +102,43 @@ def _chart_specs(findings: list[dict], metrics: dict[str, dict]) -> tuple[list[d
     return specs, chart_metrics
 
 
+def _run_bounded(jobs: list[tuple[str, Callable[[], Any]]], max_workers: int) -> dict[str, Any]:
+    """Found-live perf review 2026-09-25: `narrate` used to make its ~45+
+    narration calls strictly sequentially, so a full SKILL-001 run against a
+    slower model spent 9+ minutes here before an auditor could sign off,
+    even though most of `narrate`'s own calls (one per finding, plus
+    profile/synthesis/priority/remediation/candidates/captions) have no data
+    dependency on one another -- every `orchestrator.narration.payloads`
+    builder they call reads only what `execute`/`classify`/`find`/
+    `prioritise` already persisted, never another narration call's output
+    (the one exception, `export_summary` needing synthesis's themes, stays
+    its own sequential step after this returns, in `narrate()` below).
+
+    `jobs` is `[(name, thunk)]`; each `thunk` is called with no arguments and
+    is expected to itself be side-effect-idempotent the way every
+    `narrate_*`/`narrate_candidates` function already is (CLAUDE.md §2.3
+    rule 1) -- re-running one is never observably different from running it
+    once. Results are collected by iterating the SUBMITTED futures in the
+    CALLER'S OWN `jobs` order, never completion order, so which job's
+    exception surfaces first (if more than one raises) is a function of the
+    caller's list, never of thread scheduling -- the one place completion
+    order could otherwise leak into anything this run persists or returns.
+    Every genuine per-item ordering concern (the `find` task's `seq`
+    numbers, which decide `llm_calls.call_id`) is handled by the CALLER
+    precomputing that order before jobs are ever submitted (`narrate()`
+    below; `runner._generate_item`'s own `seq_pair` docstring) -- this
+    function itself carries no ordering logic of its own to get wrong.
+
+    `max_workers <= 1` (or a single job) skips the thread pool entirely and
+    runs every job on this thread, in order -- the exact pre-existing
+    sequential behaviour, and what `NARRATION_MAX_PARALLEL=1` recovers."""
+    if max_workers <= 1 or len(jobs) <= 1:
+        return {name: fn() for name, fn in jobs}
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = [(name, pool.submit(fn)) for name, fn in jobs]
+        return {name: future.result() for name, future in futures}
+
+
 def narrate(ctx: NodeContext, state: RunState) -> RunState:
     now = ctx.clock()
 
@@ -134,13 +173,56 @@ def narrate(ctx: NodeContext, state: RunState) -> RunState:
         existing_human_edited=human_edited,
     )
 
-    profile_narrative_id = runner.narrate_profile(rc, state, skill)
+    ai_proposed_enabled = bool(getattr(ctx.settings, "ai_proposed_findings_enabled", False))
+    max_parallel = max(1, int(getattr(ctx.settings, "narration_max_parallel", 4) or 1))
 
-    finding_narratives: dict[str, str] = {}
+    # Perf review 2026-09-25: every job below reads only data already
+    # persisted before `narrate` started (findings/metrics/state/skill) --
+    # none of them depends on another job's OUTPUT, so all of them run
+    # through ONE bounded thread pool rather than one-at-a-time.
+    # `export_summary` is the sole exception (it needs synthesis's themes)
+    # and stays a separate, sequential step below. The `find` task's `seq`
+    # numbers are precomputed HERE, sequentially, in `findings`' own
+    # (already-deterministic, severity-then-rule_id) order, so which
+    # finding gets seq 1/3/5/... never depends on thread scheduling
+    # (runner._generate_item's own `seq_pair` docstring; G9).
+    finding_seq_pairs = {f["finding_id"]: rc.next_seq("find") for f in findings}
+    chart_specs, chart_metrics = _chart_specs(findings, metrics)
+
+    jobs: list[tuple[str, Callable[[], Any]]] = [("profile", lambda: runner.narrate_profile(rc, state, skill))]
     for finding in findings:
-        finding_narratives[finding["finding_id"]] = runner.narrate_finding(rc, finding, skill=skill, period=period)
+        fid = finding["finding_id"]
+        jobs.append((
+            f"find:{fid}",
+            lambda finding=finding, fid=fid: runner.narrate_finding(
+                rc, finding, skill=skill, period=period, seq_pair=finding_seq_pairs[fid],
+            ),
+        ))
+    jobs.append(("synthesis", lambda: runner.narrate_synthesis(rc, findings, skill=skill)))
+    jobs.append(("priority", lambda: runner.narrate_priority(rc, findings, skill=skill, period=period)))
+    jobs.append(("remediation", lambda: runner.narrate_remediation(rc, findings, skill=skill, period=period)))
+    if ai_proposed_enabled:
+        jobs.append((
+            "candidates",
+            lambda: candidates_module.narrate_candidates(
+                rc, state=state, skill=skill, metrics=metrics, findings=findings,
+                max_candidates=int(getattr(ctx.settings, "narration_max_candidates", 3) or 0),
+            ),
+        ))
+    jobs.append(("captions", lambda: runner.narrate_captions(rc, chart_specs, chart_metrics)))
 
-    themes, severity_proposals = runner.narrate_synthesis(rc, findings, skill=skill)
+    results = _run_bounded(jobs, max_parallel)
+
+    profile_narrative_id = results["profile"]
+    finding_narratives: dict[str, str] = {
+        finding["finding_id"]: results[f"find:{finding['finding_id']}"] for finding in findings
+    }
+    themes, severity_proposals = results["synthesis"]
+    priority_rationale = results["priority"]
+    remediation_drafts = results["remediation"]
+    chart_captions = results["captions"]
+    candidate_rows, superseded_count = results.get("candidates", ([], 0))
+
     if themes:
         ctx.persistence.write_themes(state.run_id, themes, now=now)
 
@@ -165,21 +247,11 @@ def narrate(ctx: NodeContext, state: RunState) -> RunState:
             skill_version=state.skill_version, now=now,
         )
 
-    candidate_rows: list[dict] = []
-    superseded_count = 0
-    ai_proposed_enabled = bool(getattr(ctx.settings, "ai_proposed_findings_enabled", False))
-    if ai_proposed_enabled:
-        candidate_rows, superseded_count = candidates_module.narrate_candidates(
-            rc, state=state, skill=skill, metrics=metrics, findings=findings,
-            max_candidates=int(getattr(ctx.settings, "narration_max_candidates", 3) or 0),
-        )
-
-    priority_rationale = runner.narrate_priority(rc, findings, skill=skill, period=period)
-    remediation_drafts = runner.narrate_remediation(rc, findings, skill=skill, period=period)
+    # `export_summary` needs synthesis's themes (theme titles, §4.1's own
+    # table), so it stays the one narration call that runs strictly AFTER
+    # the bounded stage above rather than inside it.
     catalogue_tests = catalogue_tests_for_skill(skill)
     exec_summary_id = runner.narrate_exec_summary(rc, state, findings, metrics, catalogue_tests=catalogue_tests, themes=themes)
-    chart_specs, chart_metrics = _chart_specs(findings, metrics)
-    chart_captions = runner.narrate_captions(rc, chart_specs, chart_metrics)
 
     counts = rc.origin_counts
     fallback_count = counts.get("fallback_invalid", 0) + counts.get("fallback_unavailable", 0)
