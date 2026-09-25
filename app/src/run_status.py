@@ -4,16 +4,44 @@ Playbook) and findings sign-off (mandatory in both modes, blocking export).
 
 The page never executes a node. Every button here calls a single
 orchestrator.service function (confirm_plan / sign_off / resume_run /
-get_export) and lets the executor and the next poll do the rest.
+get_export / decide_candidate / edit_narrative / regenerate_narration /
+restart_stale_run) and lets the executor and the next poll do the rest.
+
+On the awaiting_signoff block, this also renders the P6 narration review
+(docs/specs/P6_narration_design.md §7 UI-1 to UI-4): a "Model-written text
+for review" panel (rule findings' observation, themes, the exec summary,
+each with an edit control), an "AI-proposed findings" panel (Accept/Reject,
+a required severity or reason), and a Regenerate button. Sign-off is
+refused while any AI-proposed finding is undecided (UI-3). None of it
+decides a rule finding's existence, numbers or severity (CLAUDE.md §3 NN2)
+-- it is the human review surface for what the model wrote.
 """
 
 from __future__ import annotations
 
-from dash import Input, Output, State, dcc, html
+from dash import ALL, Input, Output, State, ctx, dcc, html, no_update
 from dash.exceptions import PreventUpdate
 from flask import request
 
+from orchestrator.errors import (
+    CandidateAlreadyDecided,
+    CandidateNotFound,
+    CandidateReasonRequired,
+    CandidateSeverityRequired,
+    CandidateSuperseded,
+    CandidatesUndecided,
+    NarrationDisabled,
+    NarrationNodeUnavailable,
+    NarrativeEditConflict,
+    NarrativeEditNotAllowed,
+    NarrativeEditRejected,
+    NarrativeNotFound,
+    NarrativeTargetNotFound,
+    RunCodeRevisionStale,
+    RunNotAwaitingSignoff,
+)
 from src.platform import adapters
+from src.platform.components import format_money_or_dash
 
 _POLL_MS = 3000
 # Statuses at which this page stops polling (found-live cost review: every
@@ -101,6 +129,15 @@ def run_page(run_id: str) -> html.Div:
             message="Signing off records your identity and timestamp on the run and is "
                     "required before export.",
         ),
+        # UI-4 (docs/specs/P6_narration_design.md §7): the same
+        # outside-the-polled-subtree pattern as the sign-off dialog above,
+        # for the same reason (a 3s poll re-rendering run-page-body must
+        # never race with, and silently close, an open confirmation).
+        dcc.ConfirmDialog(
+            id="run-regenerate-confirm-dialog",
+            message="Regenerate rewrites the model-written prose only -- your accept/reject "
+                    "decisions and edits are kept.",
+        ),
         html.Div(id="run-page-body"),
     ], className="shell dashboard-shell")
 
@@ -124,7 +161,187 @@ def _progress_view(run: dict) -> html.Div:
     ])
 
 
-def _render_body(run: dict | None, run_id: str) -> html.Div:
+# ── P6 narration review (docs/specs/P6_narration_design.md §7 UI-1/UI-2/
+# UI-3/UI-4/UI-7): a "Model-written text for review" panel and an
+# "AI-proposed findings" panel, shown only on the awaiting_signoff block.
+# The model never decides a rule finding's existence, numbers or severity
+# (CLAUDE.md §3 NN2) -- these panels are the human review surface for what
+# it DID write: prose around numbers the pipeline already fixed, plus any
+# candidate findings it proposed (accepted/rejected here, before sign-off).
+
+
+def _narrative_label_chip(resolved: dict) -> html.Span:
+    text = resolved.get("label") or (resolved.get("status") or "").replace("_", " ").title() or "—"
+    return html.Span(text, className="chip", style={"fontSize": 10.5})
+
+
+def _sources_line(resolved: dict) -> html.P:
+    sources = resolved.get("sources") or []
+    names = sorted({s["source_field"] for s in sources})
+    text = "Numbers from: " + (", ".join(names) if names else "—")
+    return html.P(text, className="sub mono", style={"fontSize": 11, "margin": "4px 0 0"})
+
+
+def _edit_control(resolved: dict) -> html.Details | None:
+    """UI-1: "Each paragraph gets an edit control." Only shown when a real
+    `narratives` row backs this text (`narrative_id` is not None) --
+    `service.edit_narrative` has nothing to edit otherwise (there is no row
+    for `NarrativeNotFound` to name)."""
+    narrative_id = resolved.get("narrative_id")
+    if not narrative_id:
+        return None
+    text = resolved.get("text")
+    is_list = isinstance(text, list)
+    value = "\n\n".join(text) if is_list else (text or "")
+    return html.Details([
+        html.Summary("Edit", className="ghost", style={"fontSize": 11, "width": "auto", "display": "inline-block"}),
+        html.Div([
+            dcc.Textarea(
+                id={"type": "narrative-edit-textarea", "index": narrative_id},
+                value=value, style={"width": "100%", "minHeight": 80, "marginTop": 6, "fontSize": 12.5},
+            ),
+            html.Button(
+                "Save edit",
+                id={"type": "narrative-edit-save-btn", "index": narrative_id, "list": is_list},
+                className="btn-generate", style={"width": "auto", "padding": "6px 16px", "marginTop": 6},
+            ),
+        ]),
+    ], style={"marginTop": 4})
+
+
+def _reviewed_item(title, chips: list, paragraphs, resolved: dict) -> html.Div:
+    body = paragraphs if isinstance(paragraphs, list) else [paragraphs]
+    return html.Div([
+        html.Div(chips, className="chip-row", style={"display": "flex", "gap": 6, "marginBottom": 6, "flexWrap": "wrap"}),
+        html.H3(title, style={"margin": "0 0 6px", "fontSize": 15}) if title else None,
+        *[html.P(p, style={"margin": "0 0 6px", "fontSize": 13, "lineHeight": 1.5}) for p in body if p],
+        _sources_line(resolved),
+        _edit_control(resolved),
+    ], className="panel", style={"marginTop": 10})
+
+
+def _narration_review_panel(narration: dict) -> html.Div:
+    children = [html.H3("Model-written text for review", style={"margin": "0 0 10px"})]
+
+    if narration.get("degraded_label"):
+        children.append(html.Div(
+            html.Span(narration["degraded_label"], className="chip"), style={"marginBottom": 10},
+        ))
+
+    for f in narration.get("findings", []):
+        children.append(_reviewed_item(
+            f.get("title"),
+            [
+                html.Span(f.get("severity") or "—", className="chip"),
+                _narrative_label_chip(f),
+            ],
+            f.get("text"), f,
+        ))
+
+    for theme in narration.get("themes", []):
+        summary = theme["summary"]
+        root_cause = theme.get("root_cause") or {}
+        review_obs = (theme.get("review_observations") or {}).get("text") or []
+        body = [summary.get("text")]
+        if root_cause.get("text"):
+            body.append(f"Root-cause hypothesis (for discussion): {root_cause['text']}")
+        item = _reviewed_item(
+            theme["title"].get("text"),
+            [html.Span("Theme", className="chip"), _narrative_label_chip(summary)],
+            body, summary,
+        )
+        if review_obs:
+            item.children.append(html.Div([
+                html.P("Review observations (not findings -- informational only, never exported):",
+                       className="sub", style={"margin": "8px 0 2px", "fontWeight": 600}),
+                html.Ul([html.Li(o, style={"fontSize": 12.5}) for o in review_obs]),
+            ]))
+        children.append(item)
+
+    exec_summary = narration.get("exec_summary")
+    if exec_summary and exec_summary.get("text"):
+        children.append(_reviewed_item(
+            "Executive summary",
+            [html.Span("Exec summary", className="chip"), _narrative_label_chip(exec_summary)],
+            exec_summary.get("text"), exec_summary,
+        ))
+
+    return html.Div(children, className="panel", style={"marginTop": 16})
+
+
+def _candidate_item(candidate: dict) -> html.Div:
+    status = candidate.get("candidate_status")
+    header = [
+        html.Span("AI-proposed", className="chip", style={"fontSize": 10.5}),
+        html.Span(candidate.get("proposed_severity") or "—", className="chip", style={"fontSize": 10.5}),
+    ]
+    metrics = ", ".join(candidate.get("metrics_cited") or []) or "—"
+    body = [
+        html.Div(header, style={"display": "flex", "gap": 6, "marginBottom": 6}),
+        html.H3(candidate.get("title") or candidate.get("rule_id"), style={"margin": "0 0 6px", "fontSize": 15}),
+        html.P(candidate.get("observation_text") or "", style={"margin": "0 0 6px", "fontSize": 13, "lineHeight": 1.5}),
+        html.P(
+            "Numbers from: " + (
+                ", ".join(sorted({s["source_field"] for s in candidate.get("observation_sources") or []})) or "—"
+            ),
+            className="sub mono", style={"fontSize": 11},
+        ),
+        html.P(f"Model-proposed severity: {candidate.get('proposed_severity') or '—'} "
+               f"— {candidate.get('severity_reason') or 'no reason given'}",
+               className="sub", style={"fontSize": 12}),
+        html.P(f"Cites: {metrics}", className="sub mono", style={"fontSize": 11}),
+        html.P(f"Own exposure: {format_money_or_dash(candidate.get('exposure_amount'))}",
+               className="sub mono", style={"fontSize": 12}),
+    ]
+
+    candidate_id = candidate["candidate_id"]
+    if status == "candidate":
+        controls = html.Div([
+            dcc.Dropdown(
+                id={"type": "candidate-severity-dropdown", "index": candidate_id},
+                options=[{"label": s, "value": s} for s in ("High", "Medium", "Low")],
+                placeholder="Severity (required to accept)", clearable=True,
+                style={"width": 240, "display": "inline-block", "marginRight": 8, "verticalAlign": "top"},
+            ),
+            dcc.Input(
+                id={"type": "candidate-reason-input", "index": candidate_id}, type="text",
+                placeholder="Reason (required to reject)",
+                style={"width": 260, "marginRight": 8},
+            ),
+            html.Button("Accept", id={"type": "candidate-accept-btn", "index": candidate_id},
+                        className="btn-generate", style={"width": "auto", "padding": "6px 16px", "marginRight": 6}),
+            html.Button("Reject", id={"type": "candidate-reject-btn", "index": candidate_id},
+                        className="ghost", style={"width": "auto", "padding": "6px 16px"}),
+        ], style={"display": "flex", "alignItems": "center", "flexWrap": "wrap", "gap": 6, "marginTop": 8})
+    elif status == "accepted":
+        controls = html.P(
+            f"Accepted by {candidate.get('decided_by') or '—'} at {candidate.get('decided_at') or '—'} "
+            f"(severity: {candidate.get('decided_severity') or '—'})",
+            className="sub", style={"marginTop": 8},
+        )
+    elif status == "rejected":
+        controls = html.P(
+            f"Rejected by {candidate.get('decided_by') or '—'}: {candidate.get('decision_reason') or '—'}",
+            className="sub", style={"marginTop": 8},
+        )
+    else:
+        controls = html.P("Superseded by a narration regeneration.", className="sub", style={"marginTop": 8})
+
+    body.append(controls)
+    return html.Div(body, className="panel", style={"marginTop": 10})
+
+
+def _candidates_panel(narration: dict) -> html.Div:
+    candidates = narration.get("candidates") or []
+    children = [html.H3("AI-proposed findings", style={"margin": "0 0 10px"})]
+    if not candidates:
+        children.append(html.P("No AI-proposed findings for this run.", className="sub"))
+    else:
+        children.extend(_candidate_item(c) for c in candidates)
+    return html.Div(children, className="panel", style={"marginTop": 16})
+
+
+def _render_body(run: dict | None, run_id: str, narration: dict | None = None) -> html.Div:
     if run is None:
         return html.Div([
             html.H2("Run not found", className="page-title"),
@@ -162,6 +379,13 @@ def _render_body(run: dict | None, run_id: str) -> html.Div:
             html.Button("Sign off findings", id="run-signoff-open-btn", className="btn-generate",
                         style={"width": "auto", "padding": "10px 24px"}),
         ], className="panel", style={"marginTop": 16}))
+        if narration is not None:
+            blocks.append(_narration_review_panel(narration))
+            blocks.append(_candidates_panel(narration))
+            blocks.append(html.Div([
+                html.Button("Regenerate narration", id="run-regenerate-btn", className="ghost",
+                            style={"width": "auto", "padding": "10px 24px"}),
+            ], className="panel", style={"marginTop": 16}))
 
     elif status == "queued":
         # P3 gate review item 4: run.get("queue_note") is None for an ordinary
@@ -228,6 +452,34 @@ def _should_stop_polling(run: dict | None, n_intervals: int) -> bool:
     return False
 
 
+def _run_and_narration(run_id: str) -> tuple[dict | None, dict | None]:
+    """UI-1/UI-2: the narration review is only fetched (and only rendered)
+    while a run sits at the one gate it applies to -- awaiting_signoff.
+    Refetched after every action below so the panel a click just acted on
+    (accept/reject/edit/regenerate) reflects that action immediately, the
+    same "re-render from a fresh get_run" pattern every other button on
+    this page already follows."""
+    run = adapters.get_run(run_id)
+    narration = adapters.get_narration_review(run_id) if run and run.get("status") == "awaiting_signoff" else None
+    return run, narration
+
+
+def _refresh(run_id: str) -> html.Div:
+    run, narration = _run_and_narration(run_id)
+    return _render_body(run, run_id, narration)
+
+
+def _stale_run_panel(exc: RunCodeRevisionStale) -> html.Div:
+    return html.Div([
+        _error_panel(exc),
+        html.Div(
+            html.Button("Start a fresh run", id="run-restart-stale-btn", className="btn-generate",
+                        style={"width": "auto", "padding": "10px 24px"}),
+            className="panel", style={"marginTop": 12},
+        ),
+    ])
+
+
 def register_callbacks(app) -> None:
 
     @app.callback(
@@ -237,8 +489,8 @@ def register_callbacks(app) -> None:
         State("run-page-run-id", "data"),
     )
     def _poll(_n, run_id):
-        run = adapters.get_run(run_id)
-        return _render_body(run, run_id), _should_stop_polling(run, _n)
+        run, narration = _run_and_narration(run_id)
+        return _render_body(run, run_id, narration), _should_stop_polling(run, _n)
 
     @app.callback(
         Output("run-page-body", "children", allow_duplicate=True),
@@ -253,7 +505,14 @@ def register_callbacks(app) -> None:
             adapters.confirm_plan(run_id, _request_actor())
         except adapters.MissingIdentityHeader as exc:
             return _error_panel(exc)
-        return _render_body(adapters.get_run(run_id), run_id)
+        except RunCodeRevisionStale as exc:
+            # CLAUDE.md §11 "Paused runs across a code deploy" (independent
+            # review 2026-09-24 gap #11): a run paused before its execute
+            # phase completed cannot continue on new code -- one click
+            # starts a fresh run with the same parameters (_restart_stale
+            # below), never a silent run under a different setup.
+            return _stale_run_panel(exc)
+        return _refresh(run_id)
 
     # "Sign off findings" only opens the native confirm dialog (a single-
     # Input callback writing a single, ALWAYS-mounted component's own prop --
@@ -281,9 +540,13 @@ def register_callbacks(app) -> None:
             raise PreventUpdate
         try:
             adapters.sign_off(run_id, _request_actor())
-        except adapters.MissingIdentityHeader as exc:
+        except (adapters.MissingIdentityHeader, CandidatesUndecided) as exc:
+            # UI-3: CandidatesUndecided's own message is exactly "decide
+            # every AI-proposed finding before sign-off" (orchestrator/
+            # errors.py) -- _error_panel renders it verbatim, never
+            # re-worded here.
             return _error_panel(exc)
-        return _render_body(adapters.get_run(run_id), run_id)
+        return _refresh(run_id)
 
     @app.callback(
         Output("run-page-body", "children", allow_duplicate=True),
@@ -298,7 +561,7 @@ def register_callbacks(app) -> None:
             adapters.resume_run(run_id, _request_actor())
         except adapters.MissingIdentityHeader as exc:
             return _error_panel(exc)
-        return _render_body(adapters.get_run(run_id), run_id)
+        return _refresh(run_id)
 
     @app.callback(
         Output("run-download-xlsx", "data"),
@@ -311,3 +574,124 @@ def register_callbacks(app) -> None:
             raise PreventUpdate
         filename, blob = adapters.get_export(run_id, "xlsx")
         return dcc.send_bytes(blob, filename)
+
+    # ── UI-2: AI-proposed findings — Accept / Reject ─────────────────────
+
+    @app.callback(
+        Output("run-page-body", "children", allow_duplicate=True),
+        Input({"type": "candidate-accept-btn", "index": ALL}, "n_clicks"),
+        State({"type": "candidate-severity-dropdown", "index": ALL}, "value"),
+        State({"type": "candidate-severity-dropdown", "index": ALL}, "id"),
+        State("run-page-run-id", "data"),
+        prevent_initial_call=True,
+    )
+    def _accept_candidate(n_clicks_list, severities, severity_ids, run_id):
+        if not any(n for n in n_clicks_list if n) or not ctx.triggered_id:
+            raise PreventUpdate
+        candidate_id = ctx.triggered_id["index"]
+        severity = next((v for v, i in zip(severities, severity_ids) if i["index"] == candidate_id), None)
+        try:
+            adapters.decide_candidate(
+                run_id, candidate_id, decision="accepted", reason=None,
+                decided_severity=severity, actor=_request_actor(),
+            )
+        except (adapters.MissingIdentityHeader, CandidateSeverityRequired, CandidateAlreadyDecided,
+                CandidateSuperseded, CandidateNotFound, RunNotAwaitingSignoff) as exc:
+            return _error_panel(exc)
+        return _refresh(run_id)
+
+    @app.callback(
+        Output("run-page-body", "children", allow_duplicate=True),
+        Input({"type": "candidate-reject-btn", "index": ALL}, "n_clicks"),
+        State({"type": "candidate-reason-input", "index": ALL}, "value"),
+        State({"type": "candidate-reason-input", "index": ALL}, "id"),
+        State("run-page-run-id", "data"),
+        prevent_initial_call=True,
+    )
+    def _reject_candidate(n_clicks_list, reasons, reason_ids, run_id):
+        if not any(n for n in n_clicks_list if n) or not ctx.triggered_id:
+            raise PreventUpdate
+        candidate_id = ctx.triggered_id["index"]
+        reason = next((v for v, i in zip(reasons, reason_ids) if i["index"] == candidate_id), None)
+        try:
+            adapters.decide_candidate(
+                run_id, candidate_id, decision="rejected", reason=reason,
+                decided_severity=None, actor=_request_actor(),
+            )
+        except (adapters.MissingIdentityHeader, CandidateReasonRequired, CandidateAlreadyDecided,
+                CandidateSuperseded, CandidateNotFound, RunNotAwaitingSignoff) as exc:
+            return _error_panel(exc)
+        return _refresh(run_id)
+
+    # ── UI-1: narrative edit ──────────────────────────────────────────────
+
+    @app.callback(
+        Output("run-page-body", "children", allow_duplicate=True),
+        Input({"type": "narrative-edit-save-btn", "index": ALL, "list": ALL}, "n_clicks"),
+        State({"type": "narrative-edit-textarea", "index": ALL}, "value"),
+        State({"type": "narrative-edit-textarea", "index": ALL}, "id"),
+        State("run-page-run-id", "data"),
+        prevent_initial_call=True,
+    )
+    def _save_narrative_edit(n_clicks_list, values, value_ids, run_id):
+        if not any(n for n in n_clicks_list if n) or not ctx.triggered_id:
+            raise PreventUpdate
+        narrative_id = ctx.triggered_id["index"]
+        is_list = ctx.triggered_id["list"]
+        value = next((v for v, i in zip(values, value_ids) if i["index"] == narrative_id), None)
+        new_text = [p.strip() for p in (value or "").split("\n\n") if p.strip()] if is_list else (value or "")
+        try:
+            adapters.edit_narrative(run_id, narrative_id, new_text, _request_actor())
+        except (adapters.MissingIdentityHeader, NarrativeEditRejected, NarrativeEditNotAllowed,
+                NarrativeEditConflict, NarrativeNotFound, NarrativeTargetNotFound) as exc:
+            # UI-1: NarrativeEditRejected's own message names the mismatched
+            # number (orchestrator/errors.py's own N-H1 violation text) --
+            # _error_panel renders it verbatim.
+            return _error_panel(exc)
+        return _refresh(run_id)
+
+    # ── UI-4: Regenerate narration ───────────────────────────────────────
+
+    @app.callback(
+        Output("run-regenerate-confirm-dialog", "displayed"),
+        Input("run-regenerate-btn", "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def _open_regenerate(n_clicks):
+        if not n_clicks:
+            raise PreventUpdate
+        return True
+
+    @app.callback(
+        Output("run-page-body", "children", allow_duplicate=True),
+        Input("run-regenerate-confirm-dialog", "submit_n_clicks"),
+        State("run-page-run-id", "data"),
+        prevent_initial_call=True,
+    )
+    def _confirm_regenerate(submit_n_clicks, run_id):
+        if not submit_n_clicks:
+            raise PreventUpdate
+        try:
+            adapters.regenerate_narration(run_id, _request_actor())
+        except (adapters.MissingIdentityHeader, NarrationDisabled, NarrationNodeUnavailable,
+                RunNotAwaitingSignoff) as exc:
+            return _error_panel(exc)
+        return _refresh(run_id)
+
+    # ── Stale-confirm restart ─────────────────────────────────────────────
+
+    @app.callback(
+        Output("url", "pathname", allow_duplicate=True),
+        Output("run-page-body", "children", allow_duplicate=True),
+        Input("run-restart-stale-btn", "n_clicks"),
+        State("run-page-run-id", "data"),
+        prevent_initial_call=True,
+    )
+    def _restart_stale(n_clicks, run_id):
+        if not n_clicks:
+            raise PreventUpdate
+        try:
+            new_run_id = adapters.restart_stale_run(run_id, _request_actor())
+        except adapters.MissingIdentityHeader as exc:
+            return no_update, _error_panel(exc)
+        return f"/run/{new_run_id}", no_update

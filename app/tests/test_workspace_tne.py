@@ -134,6 +134,53 @@ def test_finding_card_raises_if_analyst_set_severity_was_never_persisted():
         workspace_tne._finding_card(0, finding)
 
 
+# ── UI-5/UI-6 (docs/specs/P6_narration_design.md §7): the accepted-AI-
+# proposed chip and the NN12 sources tooltip on /workspace/tne's finding
+# card -- both additive, no other visible change (CLAUDE.md §11 "the UI is
+# the prototype's, exactly"). ────────────────────────────────────────────
+
+
+def _base_finding(**overrides) -> dict:
+    finding = {
+        "severity": "High", "test_id": "T4.1", "title": "Missing receipts",
+        "observation": "obs", "recommendation": "rec", "management_questions": ["q?"],
+        "analyst_set_severity": True, "severity_basis": "threshold", "exposure_amount": None,
+        "finding_id": "F1",
+    }
+    finding.update(overrides)
+    return finding
+
+
+def test_finding_card_shows_no_ai_chip_for_a_rule_finding():
+    card = workspace_tne._finding_card(0, _base_finding())
+    text = str(card)
+    assert "AI-proposed" not in text
+
+
+def test_finding_card_shows_accepted_chip_for_an_ai_proposed_finding():
+    finding = _base_finding(origin="ai_proposed", accepted_by="reviewer@example.com")
+    card = workspace_tne._finding_card(0, finding)
+    text = str(card)
+    assert "AI-proposed, accepted by reviewer@example.com" in text
+
+
+def test_finding_card_observation_has_no_tooltip_when_no_metrics_cited():
+    card = workspace_tne._finding_card(0, _base_finding(metrics_cited={}))
+    # No `title=` kwarg reaches the rendered P at all (UI-6: "no visible
+    # change" only makes sense if absent metrics means no attribute, never
+    # an empty `title=""` that would still show a blank tooltip on hover).
+    assert "title=" not in str(card)
+
+
+def test_finding_card_observation_tooltip_names_the_findings_metrics_cited_source_fields():
+    finding = _base_finding(metrics_cited={"missing_receipt_count": {"value": 3, "unit": "count"}})
+    card = workspace_tne._finding_card(0, finding)
+    text = str(card)
+    assert "findings[F1].metrics_cited.missing_receipt_count" in text
+    # UI-6 must not change the visible observation text itself.
+    assert "obs" in text
+
+
 def test_render_filtered_findings_shows_top_three_and_collapses_rest():
     findings = [{"severity": "High", "title": f"F{i}", "observation": "", "recommendation": "",
                  "management_questions": [], "analyst_set_severity": False} for i in range(5)]
