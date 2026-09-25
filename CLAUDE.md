@@ -1995,6 +1995,14 @@ The run card's existing View, Export and Trace buttons are wired as follows:
 
 The user chose to add three build-here items before acceptance testing, so that they are tested in the same pass: column mapping at run setup (item 2), the Skill authoring kit (item 5) and the P7 review workflow (item 6). The lifecycle M0 mockups are also built now, for approval during acceptance. The lifecycle build, SKILL-002 GST, governance switches, operations-as-code and the porting kit follow acceptance testing.
 
+**Design decisions (user, 2026-09-25; `docs/specs/P7_mapping_authoring_design.md` D-P7-1 to D-P7-11): every recommendation accepted.**
+- UI-M1 (run inputs listed at `/run/<id>` plan confirmation), UI-M2 (mapping suffix on the `/workspace/tne` evidence `source_ref` cell) and UI-R1 to UI-R6 (review workflow on `/run/<id>`) are approved.
+- Mappings, parameters and unsupplied sources are declared in the existing `SOURCE_BINDINGS` file, with no new UI. No SKILL-001 source becomes optional.
+- Segregation of duties: preparer, reviewer and approver are three different people; the run owner may be the preparer. Default groups are `audit-preparers`, `audit-reviewers` and `audit-approvers`, and corporate names are configured at the port.
+- Development workspace: labelled mode. Roles come from a test workspace group, one person may hold several roles, and the run is labelled "segregation of duties not enforced". Enforced is the code default and the corporate setting. The config file supplies roles only for the local backend and e2e tests.
+- Old self-approved runs keep their labels. Runs waiting at sign-off when this ships enter the workflow at preparation.
+- Only the preparer edits model text and decides AI-proposed findings. Reviewers and approvers raise notes or return the run.
+
 ### Paused runs across a code deploy (user decision, 2026-09-24)
 
 A run pins the code revision it started on. When new code is deployed:
