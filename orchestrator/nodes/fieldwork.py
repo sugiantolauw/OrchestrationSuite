@@ -321,13 +321,14 @@ def _explorer_llm_call_entry(result) -> dict:
     }
 
 
-def _explorer_plan_inputs(*, profile_payload: dict, prompts) -> dict:
+def _explorer_plan_inputs(*, profile_payload: dict, prompts, reference_skills: list) -> dict:
     return {
         "profile_sha256": sha256_bytes(_canon_json(profile_payload).encode("utf-8")),
-        # WHICH reference Skills to pass is a later work package (docs/specs/
-        # P6_P8_explorer_llm_design.md §4.4's own docstring in
-        # orchestrator.explorer.payload); this step always passes none.
-        "reference_skills": {},
+        # BUG-EXPLORER-2 (independent review round 2): the run's own pinned
+        # reference Skills (state.options.explorer.reference_skill_ids,
+        # ctx.explorer_reference_skills), keyed by id -> content_hash, the
+        # same shape the fingerprint's explorer_inputs_hash uses.
+        "reference_skills": {skill.skill_id: skill.content_hash for skill in reference_skills},
         "wire_schema_sha256": WIRE_SCHEMA_SHA256,
         "prompt_template_version": prompts.template_set_version(["explorer/planner", "explorer/repair"]),
         "validator_version": EXPLORER_VALIDATOR_VERSION,
@@ -349,10 +350,15 @@ def _plan_explorer(ctx: NodeContext, state: RunState) -> RunState:
     options = (state.options or {}).get("explorer", {})
     audit_timezone = options.get("audit_timezone") or getattr(ctx.settings, "audit_timezone", None)
 
+    # BUG-EXPLORER-2 (independent review round 2): this run's own pinned
+    # reference Skills (resolved once at start_explorer_run, §4.5), already
+    # loaded by service.build_node_context -- never re-resolved here.
+    reference_skills = list(getattr(ctx, "explorer_reference_skills", None) or [])
+
     payload = build_planner_payload(
         objective=state.objective, audit_period=state.audit_period, audit_timezone=audit_timezone,
         business_unit=state.business_unit, materiality=state.materiality,
-        profile_result=profile_payload, reference_skills=[],
+        profile_result=profile_payload, reference_skills=reference_skills,
     )
 
     if ctx.llm is None or ctx.prompts is None:
@@ -367,7 +373,7 @@ def _plan_explorer(ctx: NodeContext, state: RunState) -> RunState:
         execution_key=state.current_node_attempt_id, actor=state.run_owner,
         pii_columns_masked=_explorer_pii_masked(sources), pii_whitelist=[],
     )
-    inputs = _explorer_plan_inputs(profile_payload=profile_payload, prompts=prompts)
+    inputs = _explorer_plan_inputs(profile_payload=profile_payload, prompts=prompts, reference_skills=reference_skills)
 
     r1 = llm.call(
         task="plan_explorer", seq=1, messages=prompts.render("explorer/planner", **payload),

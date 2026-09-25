@@ -150,7 +150,7 @@ def test_planner_rules_text_is_the_numbered_rules_block():
     repo = FilePromptRepository()
     rules = repo.planner_rules_text()
     assert rules.startswith("1. Compose tests only from the primitives")
-    assert rules.rstrip().endswith("At most fifteen tests.")
+    assert rules.rstrip().endswith("unless those also appear in PROFILE.")
 
 
 # ── TASK_PROFILES (§3.4) ────────────────────────────────────────────────────

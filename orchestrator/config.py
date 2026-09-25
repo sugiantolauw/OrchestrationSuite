@@ -209,6 +209,26 @@ class Settings:
     # no tag name is treated as a PII marker -- classification then falls
     # through to the contract-flag and heuristic rules only.
     pii_tag_names: tuple[str, ...] = ()
+    # Independent review round 2 (BUG-EXPLORER-1, 2026-09-25): UCTableDataSource.
+    # list_tables()'s default (catalog=None) enumeration walks every catalog and
+    # schema this identity can read, with no notion of "which of these are
+    # actual audit source data" -- so the Explorer source checklist and the
+    # Playbook data-search box both surfaced this platform's OWN operational
+    # tables (the ledger schema, and other internal/app schemas) ahead of real
+    # business source tables. `DBX_SOURCE_SCHEMAS` (already read by
+    # scripts/deploy_app.py for grants -- CLAUDE.md §7) doubles as an ALLOW-list
+    # here when set: comma-separated `catalog.schema` names, the only schemas
+    # list_tables()'s default enumeration walks at all. Empty means no
+    # allow-list narrowing (falls back to walking every catalog/schema this
+    # identity can read, minus the exclusions below) -- never a silent
+    # narrowing nobody configured.
+    source_schemas: tuple[str, ...] = ()
+    # A configurable exclusion list, same `catalog.schema` shape, for any
+    # other internal/app schema that should never appear in source discovery
+    # -- in ADDITION to the ledger's own catalog.schema (DBX_CATALOG.DBX_SCHEMA),
+    # which is always excluded regardless of this list (never a hardcoded
+    # schema name -- CLAUDE.md NN16).
+    excluded_schemas: tuple[str, ...] = ()
     # LIFECYCLE_design.md §2.6: required to start any lifecycle run_kind
     # that calls a model at all (fieldwork never checks this -- `execute`
     # never calls an LLM, CLAUDE.md non-negotiable 2). Unset means no
@@ -325,6 +345,8 @@ def load_settings(env: dict | None = None) -> Settings:
         explorer_max_columns=_parse_int(env.get("EXPLORER_MAX_COLUMNS"), 200),
         explorer_max_prompt_chars=_parse_int(env.get("EXPLORER_MAX_PROMPT_CHARS"), 240_000),
         pii_tag_names=_parse_csv(env.get("PII_TAG_NAMES")),
+        source_schemas=_parse_csv(env.get("DBX_SOURCE_SCHEMAS")),
+        excluded_schemas=_parse_csv(env.get("DBX_EXCLUDED_SCHEMAS")),
     )
 
 
@@ -351,6 +373,12 @@ _RUNTIME_HASH_EXCLUDED_FIELDS = frozenset({
     "llm_monthly_token_budget",
     "llm_price_per_mtok_json",
     "narration_max_parallel",
+    # Source-discovery filtering only (which tables the UI offers to pick
+    # from) -- never what a bound run reads or computes, so two runs
+    # configured identically except for these should still share a
+    # fingerprint (same reasoning as source_bindings_path above).
+    "source_schemas",
+    "excluded_schemas",
 })
 
 

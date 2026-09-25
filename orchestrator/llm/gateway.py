@@ -572,6 +572,73 @@ class LLMGateway:
         )
 
 
+def _path_str(node: jsonschema.ValidationError) -> str:
+    path = "/".join(str(p) for p in node.absolute_path)
+    return f"{path}: {node.message}" if path else node.message
+
+
+def _describe_schema_error(exc: jsonschema.ValidationError) -> str:
+    """BUG-EXPLORER-2 (independent review round 2): PLAN_PROPOSAL_SCHEMA's
+    `tests[].params` is an `anyOf` over all 8 primitives' own param schemas,
+    each discriminated by its own `kind` const -- a plain `exc.message` on
+    a raw anyOf failure is just "{...} is not valid under any of the given
+    schemas", with no indication of which branch was closest or what was
+    actually wrong. That message was the ONLY signal the one permitted
+    repair round got when the planner's raw output failed schema
+    validation before it even reached the semantic validator's own
+    itemised violations (validate.py) -- live 2026-09-25, this genuinely
+    happened and wasted the one repair round on an unfixable proposal
+    (RUN-18A4C2D9AA8D, both transport attempts).
+
+    `exc.context` (populated on an anyOf/oneOf failure) holds one sub-error
+    per branch that failed; `.schema_path[0]` is that branch's index. The
+    branch whose OWN errors never complain about `kind` itself is the one
+    the instance actually meant to match (its `kind` const DID match) --
+    reporting THAT branch's other errors ("'max_line' is a required
+    property") is what actually tells the model what to fix, instead of
+    the anyOf dump. Falls back to the plain top-level message whenever this
+    reasoning does not apply (no context at all -- a non-anyOf failure --
+    or more than one candidate branch, which V-T1's own wire-level check
+    already reports separately when `kind` was simply omitted)."""
+    context = exc.context
+    if not context:
+        return _path_str(exc)
+
+    by_branch: dict[int, list[jsonschema.ValidationError]] = {}
+    for sub in context:
+        branch = sub.schema_path[0] if sub.schema_path else None
+        if isinstance(branch, int):
+            by_branch.setdefault(branch, []).append(sub)
+    if not by_branch:
+        return _path_str(exc)
+
+    # Every branch's params object requires "kind" (§4.5's discriminator) --
+    # if EVERY branch's only complaint about it is "missing" (never "wrong
+    # value"), the object omitted the key entirely rather than mismatching
+    # it, and no branch can ever be picked out as "the one meant". Name that
+    # specific, common mistake directly instead of falling through to the
+    # ambiguous anyOf dump.
+    missing_kind_everywhere = all(
+        any(e.message == "'kind' is a required property" for e in errs) for errs in by_branch.values()
+    )
+    if missing_kind_everywhere:
+        path = "/".join(str(p) for p in exc.absolute_path)
+        return (
+            f"{path}: params is missing the required property 'kind' -- 'kind' must be present and "
+            f"equal to this test's own 'primitive' value"
+        )
+
+    kind_mismatch_branches = {
+        branch for branch, errs in by_branch.items()
+        if any(list(e.absolute_path) and e.absolute_path[-1] == "kind" for e in errs)
+    }
+    candidates = [b for b in by_branch if b not in kind_mismatch_branches]
+    if len(candidates) != 1:
+        return _path_str(exc)
+    branch_errors = sorted(by_branch[candidates[0]], key=lambda e: str(e.absolute_path))
+    return "; ".join(_path_str(e) for e in branch_errors)
+
+
 def _parse_and_validate(text: str | None, schema: dict) -> tuple[dict | None, str | None]:
     if not text:
         return None, "empty response text"
@@ -582,5 +649,5 @@ def _parse_and_validate(text: str | None, schema: dict) -> tuple[dict | None, st
     try:
         jsonschema.validate(parsed, schema)
     except jsonschema.ValidationError as exc:
-        return None, f"schema validation failed: {exc.message}"
+        return None, f"schema validation failed: {_describe_schema_error(exc)}"
     return parsed, None

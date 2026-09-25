@@ -412,6 +412,71 @@ def test_schema_violating_json_is_also_invalid_output():
     assert result.status == "invalid_output"
 
 
+# ── BUG-EXPLORER-2 (independent review round 2): actionable anyOf messages ──
+# PLAN_PROPOSAL_SCHEMA's tests[].params is exactly the kind of anyOf-over-8-
+# branches shape whose raw jsonschema message is a useless dump -- these
+# fixtures are the two real, live-captured shapes from RUN-18A4C2D9AA8D's
+# planner output that wasted its one permitted repair round on that dump.
+
+
+def _split_detection_test(params: dict) -> dict:
+    return {
+        "schema_version": "explorer-plan/1", "skill_name": "x", "domain": "x", "summary": "x",
+        "sources": [], "populations": [], "risks": [], "controls": [], "thresholds": [],
+        "tests": [{
+            "key": "test_split_expenses", "name": "x", "primitive": "split_detection", "params": params,
+            "control_key": "c1", "risk_key": "r1", "assertion": "operating",
+            "control_objective": "x", "risk_hypothesis": "x", "rationale": "x",
+        }],
+        "findings": [], "data_gaps": [], "assumptions": [],
+    }
+
+
+def test_anyof_error_names_the_one_specific_missing_property_when_kind_matches():
+    import json as _json
+
+    from orchestrator.explorer.wire_schema import PLAN_PROPOSAL_SCHEMA
+    from orchestrator.llm.gateway import _parse_and_validate
+
+    params = {
+        "kind": "split_detection", "population": "pop_expense_report",
+        "group_keys": ["Employee ID"], "date_column": "Transaction Date",
+        "amount_column": "Expense Amount (reimbursement currency)",
+        "window_days": {"threshold": "t_split_window_days"},
+        "aggregate_threshold": {"threshold": "t_split_aggregate"},
+        # max_line omitted -- every allow-listed param is required-but-nullable
+        "metrics": [{"name": "split_excess_sum", "kind": "sum", "column": "x",
+                     "key": None, "unit": "currency", "where": None}],
+    }
+    parsed, error = _parse_and_validate(
+        _json.dumps(_split_detection_test(params)), PLAN_PROPOSAL_SCHEMA
+    )
+    assert parsed is None
+    assert error == "schema validation failed: tests/0/params: 'max_line' is a required property"
+
+
+def test_anyof_error_names_a_missing_kind_when_it_is_absent_from_every_branch():
+    import json as _json
+
+    from orchestrator.explorer.wire_schema import PLAN_PROPOSAL_SCHEMA
+    from orchestrator.llm.gateway import _parse_and_validate
+
+    params = {
+        "population": "pop_expense_report", "group_keys": ["Employee ID"],
+        "date_column": "Transaction Date", "amount_column": "Expense Amount (reimbursement currency)",
+        "window_days": {"threshold": "t_split_window_days"},
+        "aggregate_threshold": {"threshold": "t_split_aggregate"}, "max_line": None,
+        "metrics": [{"name": "split_excess_sum", "kind": "sum", "column": "x",
+                     "key": None, "unit": "currency", "where": None}],
+    }
+    parsed, error = _parse_and_validate(
+        _json.dumps(_split_detection_test(params)), PLAN_PROPOSAL_SCHEMA
+    )
+    assert parsed is None
+    assert "missing the required property 'kind'" in error
+    assert "not valid under any of the given schemas" not in error
+
+
 # ── permanent unavailability (403 etc) ───────────────────────────────────
 
 
