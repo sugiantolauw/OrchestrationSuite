@@ -157,7 +157,7 @@ def audit_runs_page() -> html.Div:
 
 # ─── Platform Trace page ────────────────────────────────────────────────────
 
-def platform_trace_page() -> html.Div:
+def platform_trace_page(run_id: str | None = None) -> html.Div:
     runs = adapters.list_audit_runs()
     events = adapters.list_trace_events()
 
@@ -172,7 +172,13 @@ def platform_trace_page() -> html.Div:
         demo_indicator() if adapters.is_demo_mode() else None,
 
         html.Div([
-            dcc.Dropdown(id="trace-run-filter", options=run_options,
+            # `value=run_id` (CLAUDE.md §11 "Run cards on /runs (user
+            # decision, 2026-09-25)" Trace button) preselects this dropdown
+            # from /trace?run_id=<id> -- app.py's route_page passes it
+            # through. tree.py's shape() (tests/test_layout_parity.py) only
+            # ever compares (tag, id, className), never `value`, so this is
+            # not a layout-parity change and needs no allow-list entry.
+            dcc.Dropdown(id="trace-run-filter", options=run_options, value=run_id,
                          placeholder="Filter by run", style={"flex": 1, "fontSize": 13}),
         ], className="filter-row"),
 

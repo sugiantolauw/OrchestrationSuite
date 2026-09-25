@@ -116,3 +116,41 @@ def test_callback_is_registered_on_the_real_app(real_ctx):
     just a direct call to the module."""
     entry = load_app_entry()
     assert "trace-events-body.children" in entry.app.callback_map
+
+
+# ── CLAUDE.md §11 "Run cards on /runs (user decision, 2026-09-25)" Trace
+# button: /trace?run_id=<id> preselects the existing "Filter by run"
+# dropdown so the table is filtered on arrival ──────────────────────────
+
+
+def test_platform_trace_page_preselects_the_dropdown_value_from_run_id(real_ctx):
+    from src.platform.pages import platform_trace_page
+
+    real_ctx.persistence.append_trace_event(_event("RUN-A", "EVT-A1", "a event"))
+
+    layout = platform_trace_page(run_id="RUN-A")
+    dropdown = layout.children[2].children[0]
+    assert dropdown.id == "trace-run-filter"
+    assert dropdown.value == "RUN-A"
+
+
+def test_platform_trace_page_leaves_the_dropdown_unset_with_no_run_id(real_ctx):
+    from src.platform.pages import platform_trace_page
+
+    layout = platform_trace_page()
+    dropdown = layout.children[2].children[0]
+    assert dropdown.value is None
+
+
+def test_route_page_passes_the_run_id_query_param_through_to_trace(real_ctx):
+    """app.py's route_page(pathname="/trace", search="?run_id=RUN-A") must
+    reach platform_trace_page as run_id="RUN-A" -- exercised through the
+    real app.py entry point (tests/test_layouts.py's own
+    test_route_page_dispatches_every_known_path pattern), not by calling
+    platform_trace_page directly, so a future change to app.py's own
+    query-param plumbing is caught here too."""
+    entry = load_app_entry()
+    layout = entry.route_page("/trace", "?run_id=RUN-A")
+    dropdown = layout.children[2].children[0]
+    assert dropdown.id == "trace-run-filter"
+    assert dropdown.value == "RUN-A"
