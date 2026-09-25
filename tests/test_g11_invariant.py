@@ -20,17 +20,24 @@ and, for each one whose origin means it carries real prose (`model`,
      the generation-time code path used, under the row's own origin (never
      a `model`-origin re-check against a `human_edit` row's legitimately
      typed digits);
-  3. renders it (`orchestrator.narration.placeholders.render`) and asserts
-     every remaining digit character in the rendered text sits inside a
-     span that WAS a placeholder in the template -- the digit can only
-     have come from `format_metric_value`, never from stray model prose
-     (the "span tracking" requirement);
-  4. for an `observation` field (a finding's or a candidate's) and for the
-     run's `exec_summary`, additionally requires that every one of the
-     item's own cited metrics was actually referenced (N-C1 coverage, in
-     the direction "every number in the text maps to a cited metric" is
-     necessary but not sufficient -- this is the other direction, "every
-     cited metric appears").
+  3. for a `model`/`model_repaired` row only (docs/specs/P6_narration_design.md
+     §3.6 point 2's own wording, "every stored MODEL narrative"), renders it
+     (`orchestrator.narration.placeholders.render`) and asserts every
+     remaining digit character in the rendered text sits inside a span that
+     WAS a placeholder in the template -- the digit can only have come from
+     `format_metric_value`, never from stray model prose (the "span
+     tracking" requirement). A `human_edit` row is exempt: N-H1 (already
+     checked in step 2) is its correct, by-design invariant -- a literal
+     typed digit that equals a cited metric's rendering, never routed
+     through a placeholder at all;
+  4. for a `model`/`model_repaired` `observation` field (a finding's or a
+     candidate's) and for the run's `exec_summary`, additionally requires
+     that every one of the item's own cited metrics was actually referenced
+     (N-C1 coverage, in the direction "every number in the text maps to a
+     cited metric" is necessary but not sufficient -- this is the other
+     direction, "every cited metric appears"). Also exempt for `human_edit`:
+     an auditor may restate a cited figure as a literal number without using
+     its placeholder name.
 
 This is independent of, and never reuses, the generation-time validation
 inside orchestrator.narration.runner/candidates -- it re-derives the table
@@ -198,13 +205,31 @@ def test_every_stored_narrative_re_validates_and_renders_with_digits_confined_to
                 # leaves every non-placeholder character byte-for-byte
                 # unchanged): the template with every placeholder span
                 # removed has no digit character left in it at all.
-                spans = scan_placeholders(item)
-                stripped = strip_placeholder_spans(item, spans)
-                stray_digits = [ch for ch in stripped if ch.isnumeric()]
-                assert not stray_digits, (
-                    f"{run_id} {row['narrative_id']}: digit(s) {stray_digits} outside any "
-                    f"placeholder span in stored text {item!r}"
-                )
+                #
+                # §3.6 point 2's own wording is "every stored MODEL
+                # narrative" -- this span-tracking invariant is a MODEL
+                # authorship guarantee (N-D1: the model writes placeholders,
+                # never numbers). A human_edit row is explicitly exempt: §14
+                # Answers Q3 / N-H1 (already re-checked above via
+                # validate_prose(..., origin="human_edit", ...)) lets an
+                # auditor type a literal digit as long as it equals a cited
+                # metric's rendering -- BUG-SYNTH-BARE-TESTID-STILL-LIVE
+                # (independent review round 4, 2026-09-25): this assertion
+                # ran unconditionally and would fail on any genuine,
+                # by-design literal-number human edit (the shared e2e
+                # fixture's own edit scenario happened to use placeholder
+                # syntax, so it never tripped this gap until a real run's
+                # literal-text edit did).
+                if origin_arg == "model":
+                    spans = scan_placeholders(item)
+                    stripped = strip_placeholder_spans(item, spans)
+                    stray_digits = [ch for ch in stripped if ch.isnumeric()]
+                    assert not stray_digits, (
+                        f"{run_id} {row['narrative_id']}: digit(s) {stray_digits} outside any "
+                        f"placeholder span in stored text {item!r}"
+                    )
+                else:
+                    spans = scan_placeholders(item)
 
                 rendered = render(item, table)
                 # render() raises NarrationConfigError for any placeholder
@@ -223,13 +248,112 @@ def test_every_stored_narrative_re_validates_and_renders_with_digits_confined_to
                             f"missing from rendered text {rendered!r}"
                         )
 
-            if required is not None:
+            # N-C1 coverage ("every cited metric appears") is a placeholder-
+            # usage requirement -- meaningless for a human_edit row, which
+            # may legitimately restate a cited figure as a literal number
+            # (N-H1, checked above) without using that metric's placeholder
+            # name at all. Scoped to origin=="model" for the same reason as
+            # the span-tracking check above.
+            if origin_arg == "model" and required is not None:
                 missing = required - covered
                 assert not missing, (
                     f"{run_id} {row['narrative_id']} ({row['target_kind']}.{row['field']}): "
                     f"cited metric(s) {sorted(missing)} never referenced in the stored prose"
                 )
     assert checked > 0, "no narrative item was checked -- the fixture e2e runs produced no real prose"
+
+
+def test_g11_invariant_exempts_a_literal_digit_human_edit_from_the_model_only_checks():
+    """BUG-SYNTH-BARE-TESTID-STILL-LIVE (independent review round 4,
+    2026-09-25): a real run (RUN-6A95B7FDD22F) had a genuine, deliberate
+    human edit on a finding's observation replacing its placeholder syntax
+    with a literal rendering ("198 of 234 ... 84.6%", exactly the shape
+    N-H1/CLAUDE.md §14 Answers Q3 permits: a typed number equal to a cited
+    metric's displayed rendering). The round's own G11 check flagged it as
+    a "stray digit leak" and "required metrics not referenced" -- but those
+    are placeholder-usage invariants that only apply to MODEL-authored text
+    (docs/specs/P6_narration_design.md §3.6 point 2: "every stored MODEL
+    narrative"). `tests/test_g11_invariant.py`'s own official stored-state
+    check applied them unconditionally, to human_edit rows too -- a real
+    gap that the shared e2e fixture's own edit scenario never exercised,
+    because it happens to use placeholder syntax rather than a literal
+    number. This reproduces the exact shape with a fresh run and proves:
+    (1) the literal-digit human edit is accepted (N-H1) and persists as
+    such; (2) it fails the OLD, unconditional span-tracking/coverage
+    checks (proving this is a real gap, not a hypothetical one);
+    (3) it passes the fixed, origin-scoped invariant this file now applies."""
+    import tempfile
+    from pathlib import Path
+
+    from orchestrator.findings import format_metric_value
+
+    with tempfile.TemporaryDirectory() as tmp:
+        # A fresh run of our own (not _run_happy_path's, which edits and
+        # signs off -- edit_narrative is only allowed while
+        # awaiting_signoff, CLAUDE.md §6.4).
+        ctx = _build_ctx(Path(tmp))
+        ctx.executor.start()
+        ctx.model_client = _happy_client()
+        run_id = _start_run(ctx)
+        status = _wait_for(ctx, run_id, {"awaiting_signoff", "failed"})
+        assert status == "awaiting_signoff", service.get_run(ctx, run_id).get("status_reason")
+        try:
+            state = ctx.persistence.load_state(run_id)
+            findings = ctx.persistence.list_findings(run_id)
+            t1 = next(f for f in findings if f.get("test_id") == "T1")
+            observation_id = state.finding_narratives[t1["finding_id"]]
+
+            row = next(r for r in ctx.persistence.get_narratives(run_id) if r["narrative_id"] == observation_id)
+            table = service._narrative_table(ctx, state, row)
+            hv_count_rendered = format_metric_value(table["hv_count"].value, table["hv_count"].unit)
+            hv_amount_rendered = format_metric_value(table["hv_amount"].value, table["hv_amount"].unit)
+
+            literal_text = (
+                f"[Regression: literal-digit human edit, no placeholders.] "
+                f"{hv_count_rendered} claim(s) exceeded the high-value threshold, "
+                f"worth {hv_amount_rendered} in total exposure."
+            )
+            # This must succeed -- N-H1 permits a typed number equal to a
+            # cited metric's rendering, exactly what the round-4 finding did.
+            service.edit_narrative(ctx, run_id, observation_id, literal_text, actor="bob")
+
+            row = next(
+                r for r in ctx.persistence.get_narratives(run_id) if r["narrative_id"] == observation_id
+            )
+            assert row["origin"] == "human_edit"
+            assert row["template_text"] == literal_text
+
+            table = service._narrative_table(ctx, state, row)
+            allowed_identifiers = service._narrative_allowed_identifiers(ctx, state, row)
+            validator_field = service._VALIDATOR_FIELD_FOR[(row["target_kind"], row["field"])]
+
+            # (1) N-H1 itself: always the correct check for human_edit, and
+            # it passes -- this was never the broken part.
+            result = validate_prose(
+                literal_text, table, field=validator_field, origin="human_edit",
+                allowed_identifiers=allowed_identifiers,
+            )
+            assert result.valid, [(v.rule_id, v.message) for v in result.violations]
+
+            # (2) Proves the gap is real: the OLD, origin-blind span-tracking
+            # check would have failed this genuinely valid human edit.
+            spans = scan_placeholders(literal_text)
+            stripped = strip_placeholder_spans(literal_text, spans)
+            stray_digits = [ch for ch in stripped if ch.isnumeric()]
+            assert stray_digits, "expected literal digits outside any placeholder span (that's the point of the edit)"
+
+            required = _required_coverage_names(ctx, state, row, table)
+            assert required, "expected T1's observation to cite at least one metric"
+            assert not (required & result.used_placeholders), (
+                "expected zero placeholder usage in a literal-text edit -- coverage cannot be met by name"
+            )
+
+            # (3) The fixed invariant (this file's own test, above) does NOT
+            # raise on this row -- confirmed by construction: it only
+            # applies the span-tracking/coverage checks when
+            # origin_arg == "model", and this row's origin is "human_edit".
+        finally:
+            ctx.executor.stop()
 
 
 # ── BUG-4b (independent review, 2026-09-25): a chart caption that
