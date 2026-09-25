@@ -40,6 +40,7 @@ from orchestrator.errors import (
     RunCodeRevisionStale,
     RunNotAwaitingSignoff,
 )
+from src import pending_runs
 from src.platform import adapters
 from src.platform.components import format_money_or_dash
 
@@ -452,6 +453,32 @@ def _should_stop_polling(run: dict | None, n_intervals: int) -> bool:
     return False
 
 
+def _pending_run_view(run_id: str) -> dict | None:
+    """CLAUDE.md §11 "Run start opens the run page at once" (2026-09-25):
+    while the `runs` row src/run_setup.py's async-start worker is writing
+    does not exist yet, this reads pending_runs' own in-process registry
+    (never Delta -- nothing here costs a query) and renders EXACTLY what a
+    real run already shows for the matching status, no new element or text:
+    "pending" -> the same dict shape a real "queued" run has, so
+    _render_body's existing queued block renders; "failed" -> the same
+    shape a real "failed" run has, so _render_body's existing failed block
+    (NN14: loud, visible -- the exception message, verbatim) renders. No
+    registry entry at all (never registered, already completed then pruned,
+    or the App restarted before the row was written) returns None, same as
+    adapters.get_run for an unknown id -- the page's existing "Run not
+    found" behaviour."""
+    entry = pending_runs.status(run_id)
+    if entry is None:
+        return None
+    state, error = entry
+    if state == "failed":
+        return {
+            "run_id": run_id, "status": "failed", "status_label": "Failed",
+            "status_reason": error or "No reason recorded.",
+        }
+    return {"run_id": run_id, "status": "queued", "status_label": "Queued", "queue_note": None}
+
+
 def _run_and_narration(run_id: str) -> tuple[dict | None, dict | None]:
     """UI-1/UI-2: the narration review is only fetched (and only rendered)
     while a run sits at the one gate it applies to -- awaiting_signoff.
@@ -463,8 +490,14 @@ def _run_and_narration(run_id: str) -> tuple[dict | None, dict | None]:
     adapters.get_run_and_narration loads this run's state once and reuses
     it for both (P3/P4 perf gap review 2026-09-25) -- calling adapters.get_run
     and adapters.get_narration_review here separately, as this used to,
-    loaded it twice per render."""
-    return adapters.get_run_and_narration(run_id)
+    loaded it twice per render.
+
+    When the `runs` row does not exist yet, falls back to
+    _pending_run_view -- see its own docstring."""
+    run, narration = adapters.get_run_and_narration(run_id)
+    if run is None:
+        run = _pending_run_view(run_id)
+    return run, narration
 
 
 def _refresh(run_id: str) -> html.Div:

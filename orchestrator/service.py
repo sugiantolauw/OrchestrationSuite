@@ -92,6 +92,7 @@ from orchestrator.errors import (
     ExplorerInputError,
     ExplorerPlanNotConfirmable,
     FingerprintMismatch,
+    InvalidRunId,
     NarrationDisabled,
     NarrationNodeUnavailable,
     NarrativeEditConflict,
@@ -1252,6 +1253,15 @@ def suggest_bindings(ctx: AppContext, skill_id: str) -> dict[str, str | None]:
 # ── Runs ──────────────────────────────────────────────────────────────────────
 
 
+def generate_run_id() -> str:
+    """CLAUDE.md §11 "Run start opens the run page at once" (2026-09-25):
+    the one place app/src/platform/adapters.py may generate a run_id before
+    a run exists -- a thin re-export of runs_module.generate_run_id() so the
+    web tier's pre-generated id and start_audit_run's own default (when no
+    run_id is supplied) are always produced by the exact same function."""
+    return runs_module.generate_run_id()
+
+
 def start_audit_run(
     ctx: AppContext,
     *,
@@ -1267,7 +1277,24 @@ def start_audit_run(
     materiality: float | None = None,
     generate_management_actions: bool = True,
     jira_preview_requested: bool = False,
+    run_id: str | None = None,
 ) -> str:
+    # `run_id`, when given (CLAUDE.md §11 "Run start opens the run page at
+    # once", 2026-09-25): the caller (app/src/run_setup.py's async-start
+    # worker) already pre-generated it via generate_run_id() above and
+    # navigated the browser to /run/<run_id> before this function even
+    # started running. Validated HERE, against generate_run_id()'s own
+    # format, before it becomes a Delta row's identity (NN14) -- never
+    # trusted blind, since it crossed the web-tier boundary. This is
+    # deliberately NOT enforced inside runs_module.create_run itself: every
+    # other internal caller (tests/, other orchestrator/ code) passes its
+    # own human-readable run_id for fixture clarity, which is a different,
+    # already-trusted caller this check must not break. None (the default,
+    # every other caller of THIS function) keeps today's behaviour of
+    # generating one inside create_run.
+    if run_id is not None and not runs_module.is_valid_run_id(run_id):
+        raise InvalidRunId(run_id)
+
     # Independent review 2026-09-24 item 5: a run refuses to start while a
     # required readiness check is failing -- the same cached report /ready
     # exposes, not a fresh probe on every click (cost -- CLAUDE.md §11 idle-
@@ -1356,6 +1383,7 @@ def start_audit_run(
     }
     state = runs_module.create_run(
         ctx.persistence,
+        run_id=run_id,
         run_kind="fieldwork",
         engagement_id=engagement_id,
         skill_id=skill_id,

@@ -18,6 +18,7 @@ for _path in (_REPO_ROOT, _APP_DIR, _TESTS_DIR):
 import pytest  # noqa: E402
 
 import fake_service  # noqa: E402
+from src import pending_runs  # noqa: E402
 from src.platform import adapters  # noqa: E402
 
 
@@ -30,6 +31,16 @@ def fake_backend(monkeypatch):
     adapters._ctx = None
     yield
     adapters._ctx = None
+
+
+@pytest.fixture(autouse=True)
+def clean_pending_runs():
+    """src.pending_runs' registry is a process-wide, module-level dict
+    (CLAUDE.md §11 "Run start opens the run page at once") -- without this,
+    one test's pending/failed entries would still be there for the next."""
+    pending_runs._reset_for_tests()
+    yield
+    pending_runs._reset_for_tests()
 
 
 def load_app_entry():

@@ -42,6 +42,19 @@ class RunAlreadyExists(Exception):
         super().__init__(f"run already exists: {run_id!r}")
 
 
+class InvalidRunId(Exception):
+    """CLAUDE.md §11 "Run start opens the run page at once" (2026-09-25):
+    create_run() accepts a caller-supplied run_id (so the web tier can
+    pre-generate one before the `runs` row exists) but never trusts it
+    blind -- it must match generate_run_id()'s own format. Anything else
+    (a stray client value, a typo'd URL segment) fails loudly here rather
+    than being written to Delta as a run identity (NN14)."""
+
+    def __init__(self, run_id: str):
+        self.run_id = run_id
+        super().__init__(f"invalid run_id: {run_id!r} (expected the RUN-<12 hex> format)")
+
+
 class FingerprintMismatch(Exception):
     def __init__(self, differing_fields: dict):
         self.differing_fields = differing_fields

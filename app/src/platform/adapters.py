@@ -155,6 +155,15 @@ def propose_plan(run_config: dict) -> dict:
 
 # ── Run lifecycle ────────────────────────────────────────────────────────────
 
+def generate_run_id() -> str:
+    """CLAUDE.md §11 "Run start opens the run page at once" (2026-09-25):
+    lets app/src/run_setup.py's async-start worker pre-generate the id it
+    navigates to before start_audit_run's own background call has even
+    started -- a thin pass-through to service.generate_run_id(), never
+    computed here (this module's own contract, see the file docstring)."""
+    return service.generate_run_id()
+
+
 def start_audit_run(
     *,
     skill_id: str,
@@ -169,6 +178,7 @@ def start_audit_run(
     materiality: float | None = None,
     generate_management_actions: bool = True,
     jira_preview_requested: bool = False,
+    run_id: str | None = None,
 ) -> str:
     return service.start_audit_run(
         get_context(),
@@ -184,6 +194,7 @@ def start_audit_run(
         materiality=materiality,
         generate_management_actions=generate_management_actions,
         jira_preview_requested=jira_preview_requested,
+        run_id=run_id,
     )
 
 

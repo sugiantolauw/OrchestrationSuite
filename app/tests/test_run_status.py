@@ -37,6 +37,75 @@ def test_render_body_unknown_run():
     assert "not found" in str(body).lower()
 
 
+# ── Async run start (CLAUDE.md §11 "Run start opens the run page at once",
+# 2026-09-25): while the `runs` row does not exist yet, /run/<id> reads
+# pending_runs' own registry instead of get_run.
+
+def test_run_and_narration_shows_the_existing_queued_state_while_pending():
+    import threading
+
+    from src import pending_runs
+
+    release = threading.Event()
+    pending_runs.start("RUN-PENDING000001", "dedupe-key-1", lambda: release.wait(timeout=5))
+    try:
+        run, narration = run_status._run_and_narration("RUN-PENDING000001")
+        assert run["status"] == "queued"
+        assert narration is None
+        body = run_status._render_body(run, "RUN-PENDING000001", narration)
+        text = str(body)
+        # The SAME markup a real queued run renders (_render_body's own
+        # status == "queued" branch) -- no new element or text.
+        assert "Waiting to start" in text
+        assert "Queued — waiting for an available run slot." in text
+    finally:
+        release.set()
+        pending_runs._wait_until_settled("RUN-PENDING000001")
+
+
+def test_run_and_narration_shows_the_existing_failed_state_on_pending_failure():
+    from src import pending_runs
+
+    def fn():
+        raise ValueError("no binding for expense_report")
+
+    pending_runs.start("RUN-PENDING000002", "dedupe-key-2", fn)
+    pending_runs._wait_until_settled("RUN-PENDING000002")
+
+    run, narration = run_status._run_and_narration("RUN-PENDING000002")
+    assert run["status"] == "failed"
+    body = run_status._render_body(run, "RUN-PENDING000002", narration)
+    text = str(body)
+    # The SAME markup a real failed run renders (_render_body's own
+    # status == "failed" branch) -- NN14: the exception message, verbatim.
+    assert "Run failed" in text
+    assert "ValueError: no binding for expense_report" in text
+
+
+def test_run_and_narration_falls_back_to_not_found_with_no_registry_entry():
+    run, narration = run_status._run_and_narration("RUN-NEVER-REGISTERED")
+    assert run is None
+    assert narration is None
+    body = run_status._render_body(run, "RUN-NEVER-REGISTERED", narration)
+    assert "not found" in str(body).lower()
+
+
+def test_run_and_narration_prefers_the_real_run_once_it_exists():
+    """Once the background job has actually written the `runs` row,
+    get_run_and_narration finds it directly -- the pending-registry
+    fallback is never consulted, even if a stale entry for the same id is
+    still sitting in the registry (belt-and-braces: pending_runs.start
+    itself already drops a successful entry)."""
+    from src import pending_runs
+
+    run_id = _new_run()
+    assert pending_runs.status(run_id) is None  # nothing registered for a
+    # run created directly via adapters.start_audit_run, as this helper does
+
+    run, narration = run_status._run_and_narration(run_id)
+    assert run["status"] == "awaiting_signoff"
+
+
 def test_render_body_awaiting_confirmation_shows_confirm_button():
     run_id = _new_run(review_plan_first=True)
     run = adapters.get_run(run_id)

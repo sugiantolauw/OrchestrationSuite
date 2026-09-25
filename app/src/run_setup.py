@@ -37,6 +37,7 @@ keeps home_layout() itself pixel-for-pixel the prototype's tree.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -44,6 +45,7 @@ from dash import ALL, Input, Output, State, callback_context, dcc, html, no_upda
 from dash.exceptions import PreventUpdate
 from flask import request
 
+from src import pending_runs
 from src.platform import adapters
 from src.platform.components import (
     data_asset_card,
@@ -772,8 +774,18 @@ def register_callbacks(app) -> None:
     )
     def start_run(n_clicks, objective, start_date, end_date, business_unit, materiality, options,
                    selected_skill_id, explorer_store):
-        """Starts a real audit run (CLAUDE.md §2.1: start_audit_run only
-        inserts the `runs` row and hands off to the executor).
+        """Starts a real audit run and navigates to it AT ONCE (CLAUDE.md §11
+        "Run start opens the run page at once", 2026-09-25): the actual
+        adapters.start_audit_run(...) call (CLAUDE.md §2.1: it only inserts
+        the `runs` row and hands off to the executor, but doing even that
+        takes several sequential Delta writes -- ~10-20s, measured live) is
+        submitted to pending_runs' own small background worker rather than
+        awaited here, so this callback returns -- and the browser navigates
+        to /run/<run_id> -- in about a second. Until the `runs` row actually
+        exists, /run/<run_id> reads pending_runs' registry to show the same
+        "Queued" state a real queued run shows, or the same error panel on
+        failure (never silently -- NN14). See the change report for the
+        alternative considered.
 
         DEVIATION from the prototype: `start_demo_run` always navigated to
         the fixed "/workspace/tne" dashboard, because it never started a
@@ -781,13 +793,16 @@ def register_callbacks(app) -> None:
         complete the instant it is created (it must clear the mandatory
         plan-confirmation and findings-sign-off gates, CLAUDE.md §2.4
         non-negotiable 3), so this navigates to the run's own status page
-        instead. See the change report for the alternative considered.
+        instead.
 
         Explorer mode (D3): when explorer-run-store holds a run_id, this
         button CONFIRMS that run's proposal (with any plan_edits already
         applied) instead of starting a new Playbook run -- exactly the
         "Start audit analysis... confirms the plan" behaviour §5.1
-        describes for "Start new objective" having already been clicked."""
+        describes for "Start new objective" having already been clicked.
+        confirm_plan is a single, already-fast state transition (not the
+        multi-write run creation above), so it stays synchronous here, as
+        it always has."""
         if not n_clicks:
             raise PreventUpdate
 
@@ -804,12 +819,16 @@ def register_callbacks(app) -> None:
         skill_id = selected_skill_id or _DEFAULT_SKILL_ID
 
         try:
-            # _auto_bind now reads the current identity too (independent
-            # review 2026-09-24 item 7 -- it scopes uploads to the current
-            # user), so it must be inside this same try/except: a missing
-            # identity header on the deployed backend (adapters.
-            # MissingIdentityHeader) needs the same friendly panel as any
-            # other start-run failure, never a raw Dash error.
+            # _auto_bind and _request_owner still run synchronously, here,
+            # before anything is submitted to the background worker:
+            # _request_owner() reads flask.request, which only exists
+            # inside this request -- it would raise RuntimeError if called
+            # from the background thread after this callback has returned.
+            # Both are already fast (no multi-write run creation), so
+            # deferring them would buy nothing; a bad binding or an
+            # unverified identity is shown in THIS response, exactly as
+            # before, never deferred to the run page (independent review
+            # 2026-09-24 item 7 -- it scopes uploads to the current user).
             bindings, missing = _auto_bind(skill_id)
             if missing:
                 raise ValueError(
@@ -817,19 +836,6 @@ def register_callbacks(app) -> None:
                     f"{', '.join(missing)} by exact name."
                 )
             run_owner = _request_owner()
-            run_id = adapters.start_audit_run(
-                skill_id=skill_id,
-                bindings=bindings,
-                audit_period=(start_date, end_date),
-                objective=(objective or "").strip(),
-                run_owner=run_owner,
-                mode="playbook",
-                review_plan_first="preview_plan" in options,
-                business_unit=(business_unit or "").strip() or None,
-                materiality=float(materiality) if materiality not in (None, "") else None,
-                generate_management_actions="gen_actions" in options,
-                jira_preview_requested="jira_preview" in options,
-            )
         except Exception as exc:  # NN14: fail loudly and visibly, never a silent default
             return no_update, html.Div([
                 html.Div([
@@ -840,6 +846,35 @@ def register_callbacks(app) -> None:
                 ]),
             ], className="panel", style={"marginTop": 12})
 
+        run_kwargs = dict(
+            skill_id=skill_id,
+            bindings=bindings,
+            audit_period=(start_date, end_date),
+            objective=(objective or "").strip(),
+            run_owner=run_owner,
+            mode="playbook",
+            review_plan_first="preview_plan" in options,
+            business_unit=(business_unit or "").strip() or None,
+            materiality=float(materiality) if materiality not in (None, "") else None,
+            generate_management_actions="gen_actions" in options,
+            jira_preview_requested="jira_preview" in options,
+        )
+        # A genuine double-click / resubmit (same auditor, same form state,
+        # before the first click's background write has finished) reuses
+        # that click's own pending run_id instead of starting a second run
+        # -- "the button can't fire twice for one id".
+        dedupe_key = hashlib.sha256(
+            json.dumps(run_kwargs, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()
+        existing = pending_runs.find_pending(dedupe_key)
+        if existing:
+            return f"/run/{existing}", no_update
+
+        run_id = adapters.generate_run_id()
+        pending_runs.start(
+            run_id, dedupe_key,
+            lambda: adapters.start_audit_run(run_id=run_id, **run_kwargs),
+        )
         return f"/run/{run_id}", no_update
 
     @app.callback(
