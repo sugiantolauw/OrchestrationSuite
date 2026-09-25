@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import re
 import uuid
 
 from orchestrator.errors import (
@@ -80,6 +81,30 @@ def _emit(persistence, state: RunState, *, event_type: str, actor: str, message:
     )
 
 
+
+# CLAUDE.md §11 "Run start opens the run page at once" (2026-09-25): the web
+# tier (app/src/run_setup.py) pre-generates a run_id with THIS SAME function
+# before the `runs` row exists, so it can navigate to /run/<run_id> while the
+# real create_run() below still runs in the background -- generate_run_id()
+# is factored out rather than inlined so both callers produce exactly one
+# format. RUN_ID_RE is that format, exported for service.start_audit_run to
+# validate a run_id it received from the web tier against (is_valid_run_id
+# below) -- create_run() itself stays permissive: every existing internal
+# caller (tests/, other orchestrator/ code) passes its own human-readable
+# run_id for fixture clarity, a use this function has always allowed and
+# which has nothing to do with the web-tier trust boundary the new
+# parameter on start_audit_run is guarding.
+RUN_ID_RE = re.compile(r"^RUN-[0-9A-F]{12}$")
+
+
+def generate_run_id() -> str:
+    return f"RUN-{uuid.uuid4().hex[:12].upper()}"
+
+
+def is_valid_run_id(run_id: str) -> bool:
+    return bool(RUN_ID_RE.match(run_id))
+
+
 def create_run(
     persistence,
     *,
@@ -107,7 +132,7 @@ def create_run(
         if engagement_id is None or persistence.get_engagement(engagement_id) is None:
             raise EngagementNotFound(engagement_id or "")
 
-    run_id = run_id or f"RUN-{uuid.uuid4().hex[:12].upper()}"
+    run_id = run_id or generate_run_id()
     state = RunState(
         run_id=run_id,
         run_kind=run_kind,

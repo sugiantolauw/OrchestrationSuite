@@ -464,6 +464,42 @@ def test_start_audit_run_rejects_missing_binding(tmp_path):
         )
 
 
+def test_start_audit_run_honours_a_caller_supplied_run_id(tmp_path):
+    """CLAUDE.md §11 "Run start opens the run page at once" (2026-09-25):
+    app/src/run_setup.py pre-generates the run_id (via service.
+    generate_run_id(), the same generator create_run's own default uses)
+    before the `runs` row exists -- start_audit_run must use it verbatim,
+    not silently generate a different one."""
+    from orchestrator.runs import generate_run_id
+
+    ctx = _build_ctx(tmp_path)
+    bindings = service.suggest_bindings(ctx, "SKILL-MINI")
+    pre_generated = generate_run_id()
+    run_id = service.start_audit_run(
+        ctx, skill_id="SKILL-MINI", bindings=bindings,
+        audit_period=("2026-01-01", "2026-02-28"), objective="x", run_owner="tester",
+        run_id=pre_generated,
+    )
+    assert run_id == pre_generated
+    assert ctx.persistence.load_state(pre_generated).run_id == pre_generated
+
+
+def test_start_audit_run_rejects_a_malformed_caller_supplied_run_id(tmp_path):
+    """A run_id crossing the web-tier boundary (§11) is validated against
+    generate_run_id()'s own format before it ever becomes a Delta row's
+    identity (NN14) -- never trusted blind."""
+    from orchestrator.errors import InvalidRunId
+
+    ctx = _build_ctx(tmp_path)
+    bindings = service.suggest_bindings(ctx, "SKILL-MINI")
+    with pytest.raises(InvalidRunId):
+        service.start_audit_run(
+            ctx, skill_id="SKILL-MINI", bindings=bindings,
+            audit_period=("2026-01-01", "2026-02-28"), objective="x", run_owner="tester",
+            run_id="not-a-real-run-id",
+        )
+
+
 def test_start_audit_run_writes_data_assets_in_the_same_insert_as_the_run(tmp_path):
     """Regression (found live, against a real deployed App): data_assets
     used to be written in a SEPARATE save_state call after create_run,

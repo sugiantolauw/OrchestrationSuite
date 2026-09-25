@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import threading
+import time
+
+import dash
 import flask
 import pytest
 
 import fake_service
-from src import run_setup
+from src import pending_runs, run_setup
 from src.platform import adapters
 
 
@@ -203,3 +207,172 @@ def test_propose_plan_returns_the_real_node_sequence():
         "Deterministic audit tests", "Exception classification", "Evidence-linked findings",
         "Insights & prioritisation", "Management actions", "Export & Jira preview",
     ]
+
+
+# ── Async run start (CLAUDE.md §11 "Run start opens the run page at once",
+# 2026-09-25): "Start audit analysis" pre-generates the run_id, submits the
+# real adapters.start_audit_run(...) call to pending_runs' own background
+# worker, and navigates to /run/<run_id> immediately. These tests invoke
+# the REAL registered `start_run` Dash callback (found via app.callback_map,
+# the same pattern test_explorer_ui.py uses) against the fake backend
+# (app/tests/conftest.py's autouse fixture), so they exercise the exact
+# closure app.py wires up, not a re-implementation of it.
+
+def _make_landing_app():
+    app = dash.Dash(__name__)
+    app.layout = lambda: run_setup.home_layout()
+    run_setup.register_callbacks(app)
+    return app
+
+
+def _find_callback(app, *, inputs):
+    want = [{"id": i, "property": p} for i, p in inputs]
+    for entry in app.callback_map.values():
+        if entry.get("inputs") == want:
+            return entry["callback"].__wrapped__
+    available = [e.get("inputs") for e in app.callback_map.values()]
+    raise AssertionError(f"no callback registered for inputs {want}; available: {available}")
+
+
+def _start_run_fn():
+    app = _make_landing_app()
+    return _find_callback(app, inputs=[("start-run-btn", "n_clicks")])
+
+
+def _call_start_run(fn, *, n_clicks=1):
+    return fn(
+        n_clicks, "Assess spend.", "2025-01-01", "2026-04-30", None, None,
+        ["preview_plan", "gen_actions"], "SKILL-001", None,
+    )
+
+
+def _patch_full_bindings(monkeypatch):
+    """SKILL-001's fake contract has a source (attendee_validity) fake_service's
+    own suggest_bindings leaves unbound (test_auto_bind_uses_suggest_bindings_
+    when_no_matching_upload above) -- irrelevant to what these async-start
+    tests are checking, so _auto_bind is patched to a complete binding set
+    instead of also crafting a matching upload fixture per test."""
+    monkeypatch.setattr(
+        run_setup, "_auto_bind",
+        lambda skill_id: (
+            {"expense_report": "test_catalog.tne_source.expense_report",
+             "attendee_validity": "test_catalog.tne_source.attendee_validity"},
+            [],
+        ),
+    )
+
+
+def test_start_run_navigates_immediately_even_when_start_audit_run_is_slow(monkeypatch):
+    _patch_full_bindings(monkeypatch)
+    real_start = adapters.start_audit_run
+
+    def slow_start(**kwargs):
+        time.sleep(0.3)
+        return real_start(**kwargs)
+
+    monkeypatch.setattr(adapters, "start_audit_run", slow_start)
+    fn = _start_run_fn()
+
+    with _probe_app.test_request_context("/", headers={"X-Forwarded-Email": "auditor@example.com"}):
+        started = time.monotonic()
+        pathname, summary = _call_start_run(fn)
+        elapsed = time.monotonic() - started
+
+    assert elapsed < 0.15, (
+        f"start_run took {elapsed:.3f}s -- it must return before the background write finishes"
+    )
+    assert summary is dash.no_update
+    assert pathname.startswith("/run/RUN-")
+    run_id = pathname[len("/run/"):]
+    # Registered as pending immediately -- the background job may still be
+    # sleeping, or (on a slow CI box) may have already settled.
+    assert pending_runs.status(run_id) is not None or adapters.get_run(run_id) is not None
+    pending_runs._wait_until_settled(run_id)
+    assert adapters.get_run(run_id) is not None
+
+
+def test_start_run_uses_the_pre_generated_run_id_for_the_real_call(monkeypatch):
+    _patch_full_bindings(monkeypatch)
+    captured = {}
+    real_start = adapters.start_audit_run
+
+    def capturing_start(**kwargs):
+        captured["run_id"] = kwargs.get("run_id")
+        return real_start(**kwargs)
+
+    monkeypatch.setattr(adapters, "start_audit_run", capturing_start)
+    fn = _start_run_fn()
+
+    with _probe_app.test_request_context("/", headers={"X-Forwarded-Email": "auditor@example.com"}):
+        pathname, _ = _call_start_run(fn)
+    run_id = pathname[len("/run/"):]
+    pending_runs._wait_until_settled(run_id)
+    assert captured["run_id"] == run_id
+
+
+def test_start_run_failure_is_recorded_never_swallowed(monkeypatch):
+    _patch_full_bindings(monkeypatch)
+
+    def failing_start(**kwargs):
+        raise ValueError("contract violation: no binding for X")
+
+    monkeypatch.setattr(adapters, "start_audit_run", failing_start)
+    fn = _start_run_fn()
+
+    with _probe_app.test_request_context("/", headers={"X-Forwarded-Email": "auditor@example.com"}):
+        pathname, _ = _call_start_run(fn)
+    run_id = pathname[len("/run/"):]
+    settled = pending_runs._wait_until_settled(run_id)
+    assert settled == ("failed", "ValueError: contract violation: no binding for X")
+    # Never removed -- NN14: a still-open /run/<id> tab must be able to see
+    # this exactly.
+    assert pending_runs.status(run_id) == settled
+
+
+def test_double_click_reuses_the_same_pending_run_instead_of_starting_two(monkeypatch):
+    _patch_full_bindings(monkeypatch)
+    call_count = {"n": 0}
+    release = threading.Event()
+    real_start = adapters.start_audit_run
+
+    def slow_start(**kwargs):
+        call_count["n"] += 1
+        release.wait(timeout=5)
+        return real_start(**kwargs)
+
+    monkeypatch.setattr(adapters, "start_audit_run", slow_start)
+    fn = _start_run_fn()
+
+    with _probe_app.test_request_context("/", headers={"X-Forwarded-Email": "auditor@example.com"}):
+        pathname1, _ = _call_start_run(fn, n_clicks=1)
+        # A second click, same form state, arriving before the first
+        # click's background write has finished -- must reuse the same
+        # run_id, not start a second run.
+        pathname2, _ = _call_start_run(fn, n_clicks=2)
+
+    assert pathname1 == pathname2
+    run_id = pathname1[len("/run/"):]
+    release.set()
+    pending_runs._wait_until_settled(run_id)
+    assert call_count["n"] == 1
+    assert adapters.get_run(run_id) is not None
+
+
+def test_a_later_click_after_the_first_completes_starts_a_genuinely_new_run(monkeypatch):
+    """Double-click dedup must not block a legitimate second, later run with
+    the same parameters -- only a resubmit still in flight."""
+    _patch_full_bindings(monkeypatch)
+    fn = _start_run_fn()
+    with _probe_app.test_request_context("/", headers={"X-Forwarded-Email": "auditor@example.com"}):
+        pathname1, _ = _call_start_run(fn, n_clicks=1)
+    run_id1 = pathname1[len("/run/"):]
+    pending_runs._wait_until_settled(run_id1)
+
+    with _probe_app.test_request_context("/", headers={"X-Forwarded-Email": "auditor@example.com"}):
+        pathname2, _ = _call_start_run(fn, n_clicks=2)
+    run_id2 = pathname2[len("/run/"):]
+    pending_runs._wait_until_settled(run_id2)
+
+    assert run_id1 != run_id2
+    assert adapters.get_run(run_id1) is not None
+    assert adapters.get_run(run_id2) is not None

@@ -284,6 +284,14 @@ def _make_findings(run_id: str) -> list:
     ]
 
 
+def generate_run_id() -> str:
+    """Mirrors orchestrator.service.generate_run_id()'s own contract (a
+    fresh id each call) so app/tests exercising the pre-generate-then-start
+    flow (app/src/run_setup.py) see the same shape this fake's own
+    start_audit_run defaults to below."""
+    return f"RUN-{uuid.uuid4().hex[:8].upper()}"
+
+
 def start_audit_run(
     ctx,
     *,
@@ -299,8 +307,9 @@ def start_audit_run(
     materiality=None,
     generate_management_actions=True,
     jira_preview_requested=False,
+    run_id=None,
 ) -> str:
-    run_id = f"RUN-{uuid.uuid4().hex[:8].upper()}"
+    run_id = run_id or generate_run_id()
     status = "awaiting_confirmation" if review_plan_first else "awaiting_signoff"
     full_findings = _make_findings(run_id)
     ctx.runs[run_id] = {
