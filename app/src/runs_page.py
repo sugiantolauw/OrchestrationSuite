@@ -136,10 +136,32 @@ def _url_parts(target: str) -> tuple[str, str]:
 
 def register_callbacks(app) -> None:
 
+    # BUG-RUNVIEW-1 (live browser round 3): without prevent_initial_call,
+    # this callback fired once on every /runs page load anyway (dcc.Dropdown
+    # Inputs default to firing on mount even with value=None -- unlike
+    # _view_run/_trace_run/_export_run below, which all already declare
+    # prevent_initial_call=True), replacing the whole server-rendered
+    # runs-list.children subtree with a second, functionally-identical
+    # client-side render moments after paint. audit_runs_page() already
+    # renders the correct unfiltered runs-list itself, so that extra round
+    # trip served no purpose -- and it recreates every run-view-btn/
+    # run-export-btn/run-trace-btn pattern-matching button as a fresh
+    # element right after mount, the same "subtree gets replaced out from
+    # under a click shortly after render" shape the sign-off race
+    # (tests/e2e/test_connected_app.py's module docstring) was fixed
+    # against once already. A click landing in that window updates a button
+    # instance dash-renderer is about to treat as superseded, and the
+    # pattern-matching callback's own request resolves against the
+    # freshly-mounted (unclicked) set -- a 204 PreventUpdate with no
+    # navigation, on every button in runs-list, not just View. Real
+    # deployed-app latency (cross_run_totals, list_audit_runs on real Delta)
+    # makes that window far wider than this suite's fast local backend ever
+    # shows it. Fixed by never re-rendering runs-list on mount at all.
     @app.callback(
         Output("runs-list", "children"),
         Input("runs-skill-filter", "value"),
         Input("runs-status-filter", "value"),
+        prevent_initial_call=True,
     )
     def _filter_runs(skill, status):
         return _rows_for_filter(skill, status)
