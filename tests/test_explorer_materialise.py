@@ -136,6 +136,78 @@ def test_materialised_currency_unit_resolved_from_placeholder(tmp_path):
     assert metrics["hv_amount"]["unit"] == "AUD"
 
 
+def test_materialise_contract_constrains_the_evidenced_currency_column_not_a_noisy_second_one():
+    """Live regression (independent review round 2, execute-phase crash):
+    with a second, non-evidenced (multi-valued) currency_code-classified
+    column present -- exactly the real SKILL-001 shape (a single-valued
+    reimbursement currency alongside a multi-valued per-line transaction
+    currency) -- the contract's allowed_values constraint must land on the
+    EVIDENCED column, never on the noisy one (which would fail every real
+    run's G7 contract check on real, legitimately multi-currency data)."""
+    profile = _profile()
+    profile["expense_report"]["columns"].append(
+        {"name": "FX Currency", "type": "string", "null_count": 0, "distinct_count": 3, "unique": False,
+         "semantic_type": "currency_code", "pii": False, "pii_basis": None,
+         "values": [{"value": "AUD", "count": 5}, {"value": "USD", "count": 3}, {"value": "SGD", "count": 2}],
+         "suppressed_values": 0},
+    )
+    effective = to_canonical(_wire())
+    files = materialise(
+        effective, profile=profile, run_sources=_run_sources(), run_id="RUN3",
+        confirmed_at="2026-09-24T00:00:00Z", owner="alice", audit_timezone="Australia/Sydney",
+    )
+    contract = yaml.safe_load(files["contract.yaml"])
+    columns = contract["sources"]["expense_report"]["columns"]
+    assert columns["Currency"].get("allowed_values") == ["AUD"]
+    assert "FX Currency" in columns
+    assert "allowed_values" not in columns["FX Currency"]
+
+
+def test_materialise_resolves_currency_for_a_test_with_no_threshold_ref_at_all():
+    """Live regression (independent review round 2, confirm-time crash):
+    duplicate_detection (and any primitive whose params never reference a
+    threshold -- key_columns/amount_column are plain columns, not {
+    "threshold": id}) has NOTHING for _threshold_refs_in_params to yield,
+    so the loop variable it fed into the currency-resolution check below
+    was never bound at all, and confirm_plan crashed with UnboundLocalError
+    on `thresh_id not in resolved_currency` for a REAL, valid Explorer
+    proposal -- exactly this shape. materialise() must resolve the
+    currency metric's unit from the profile (not crash) even though this
+    test cites no threshold whatsoever."""
+    wire = _wire()
+    wire["tests"] = [{
+        "key": "t2", "name": "Duplicate claims", "primitive": "duplicate_detection",
+        "params": {
+            "kind": "duplicate_detection", "population": "p1",
+            "key_columns": ["Employee ID"], "amount_column": None, "exclude_within": None,
+            "metrics": [
+                {"name": "dup_groups", "kind": "groups", "column": None, "key": None, "unit": "count", "where": None},
+                {"name": "dup_amount", "kind": "sum", "column": "Amount", "key": None, "unit": "currency", "where": None},
+            ],
+        },
+        "control_key": "c1", "risk_key": "r1", "assertion": "operating",
+        "control_objective": "objective text", "risk_hypothesis": "hypothesis text",
+        "rationale": "rationale text",
+    }]
+    wire["findings"] = [{
+        "key": "f2", "test_key": "t2", "title": "Duplicate claims", "trigger": "dup_groups > 0",
+        "severity": [{"when": "dup_groups > 0", "then": "High"}, {"when": None, "then": "Low"}],
+        "metrics_cited": ["dup_groups", "dup_amount"], "thresholds_cited": [], "monetary_basis": "excess",
+        "observation": "{dup_groups} duplicate group(s) totalling {dup_amount}.",
+        "recommendation": "Review duplicate claims.",
+        "management_questions": ["What controls exist?"],
+    }]
+    wire["thresholds"] = []
+    effective = to_canonical(wire)
+    files = materialise(
+        effective, profile=_profile(), run_sources=_run_sources(), run_id="RUN2",
+        confirmed_at="2026-09-24T00:00:00Z", owner="alice", audit_timezone="Australia/Sydney",
+    )
+    plan = yaml.safe_load(files["plan.yaml"])
+    metrics = plan["tests"][0]["params"]["metrics"]
+    assert metrics["dup_amount"]["unit"] == "AUD"
+
+
 # ── G8-shaped: catalogue.yaml threshold text renders against thresholds.yaml ──
 
 

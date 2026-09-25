@@ -25,7 +25,7 @@ from typing import Any
 
 import yaml
 
-from orchestrator.explorer.currency import resolve_currency_unit
+from orchestrator.explorer.currency import resolve_currency_column, resolve_currency_unit
 from orchestrator.explorer.param_walk import iter_column_params
 
 # ── identifiers (§4.11) ──────────────────────────────────────────────────
@@ -201,7 +201,7 @@ def materialise(
             if tid not in used_by[thresh_id]:
                 used_by[thresh_id].append(tid)
         for name, spec in (params.get("metrics") or {}).items():
-            if spec.get("unit") == "currency" and source and thresh_id not in resolved_currency:
+            if spec.get("unit") == "currency" and source and source not in resolved_currency:
                 code = resolve_currency_unit(source, profile)
                 if code:
                     resolved_currency.setdefault(source, code)
@@ -287,11 +287,20 @@ def materialise(
                 columns_wanted.add(col)
         for col in s.get("entry_key") or []:
             columns_wanted.add(col)
-        currency_col = None
+        # Independent review round 2 (BUG-EXPLORER-2, live regression): every
+        # currency_code-classified column still belongs in the contract (so
+        # it is readable/inspectable), but the allowed_values CONSTRAINT
+        # below must land on the SAME column resolve_currency_unit actually
+        # evidenced -- previously this was just the LAST currency_code
+        # column in profile order, which could be a second, non-evidenced,
+        # multi-valued "noise" column (e.g. a per-line transaction-FX
+        # currency alongside the single-valued reimbursement currency), and
+        # writing an `allowed_values: [AUD]` constraint onto THAT column
+        # failed every real run with a genuine ContractViolation.
+        currency_col = resolve_currency_column(name, profile)
         for c in (profile.get(name) or {}).get("columns", []):
             if c.get("semantic_type") == "currency_code":
-                currency_col = c["name"]
-                columns_wanted.add(currency_col)
+                columns_wanted.add(c["name"])
 
         columns: dict[str, dict] = {}
         for col_name in sorted(columns_wanted):
