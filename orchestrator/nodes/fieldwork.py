@@ -1464,6 +1464,20 @@ def _write_xlsx_workpaper(
     cover_fields.append(("narration_served_model_versions", ", ".join(served_model_versions) or "—"))
     accepted_ai_count = sum(1 for f in findings if f.get("origin") == "ai_proposed")
     cover_fields.append(("ai_proposed_findings_accepted", accepted_ai_count))
+    # Independent review 2026-09-25 item 1 ("run inputs" §1.3 "plus a
+    # run_inputs flag on the cover"): absent for the common case of a run
+    # with none declared, same "never a fabricated row" discipline as above.
+    run_inputs_for_cover = (state.options or {}).get("run_inputs") or {}
+    n_mappings = len(run_inputs_for_cover.get("mappings") or {})
+    n_parameters = len(run_inputs_for_cover.get("parameters") or {})
+    n_not_supplied = len(run_inputs_for_cover.get("not_supplied") or {})
+    if n_mappings or n_parameters or n_not_supplied:
+        cover_fields.append((
+            "run_inputs",
+            f"Project-specific inputs applied: {n_mappings} column mapping(s), "
+            f"{n_parameters} parameter(s), {n_not_supplied} source(s) not supplied "
+            f"(see the Run inputs sheet)",
+        ))
     for r, (label, value) in enumerate(cover_fields, start=1):
         _write_str(cover, r, 0, label, bold)
         _write_str(cover, r, 1, value)
@@ -1638,6 +1652,39 @@ def _write_xlsx_workpaper(
         _write_str(ws7, r, 5, row["text"])
         _write_str(ws7, r, 6, row["numbers_from"])
     _write_str(ws7, len(narrative_rows) + 2, 0, footer)
+
+    # Independent review 2026-09-25 item 1 ("run inputs" -- docs/specs/
+    # P7_mapping_authoring_design.md §1.3): one row per declared column
+    # mapping, parameter and not_supplied source. The sheet exists (headers
+    # only) even for a run with none, so a reader never has to distinguish
+    # "no sheet" from "empty run".
+    run_inputs = (state.options or {}).get("run_inputs") or {}
+    ws8 = wb.add_worksheet("Run inputs")
+    ws8.write_row(0, 0, ["kind", "source_or_parameter", "detail"], bold)
+    ri_row = 1
+    for source, columns in sorted((run_inputs.get("mappings") or {}).items()):
+        for contract_col, physical_col in sorted(columns.items()):
+            _write_str(ws8, ri_row, 0, "mapping")
+            _write_str(ws8, ri_row, 1, source)
+            _write_str(ws8, ri_row, 2, f"{contract_col!r} used as {physical_col!r}")
+            ri_row += 1
+    for name, param in sorted((run_inputs.get("parameters") or {}).items()):
+        provenance = param.get("provenance") or {}
+        _write_str(ws8, ri_row, 0, "parameter")
+        _write_str(ws8, ri_row, 1, name)
+        _write_str(
+            ws8, ri_row, 2,
+            f"{param.get('path')} (sha256 {param.get('sha256')}, owner {provenance.get('owner')}, "
+            f"as of {provenance.get('as_of')})",
+        )
+        ri_row += 1
+    for source, entry in sorted((run_inputs.get("not_supplied") or {}).items()):
+        affected = ", ".join(entry.get("affected_tests") or [])
+        _write_str(ws8, ri_row, 0, "not_supplied")
+        _write_str(ws8, ri_row, 1, source)
+        _write_str(ws8, ri_row, 2, f"{entry.get('reason')} — affected tests: {affected or 'none'}")
+        ri_row += 1
+    _write_str(ws8, ri_row + 1, 0, footer)
 
     wb.close()
     return buf.getvalue()

@@ -452,16 +452,32 @@ def _date_bounds(df: pd.DataFrame | None, date_col: str, fallback: tuple[str, st
     return s.min().strftime("%Y-%m-%d"), s.max().strftime("%Y-%m-%d")
 
 
-def _fmt_source_ref(source_ref) -> str:
+def _fmt_source_ref(source_ref, run_inputs: dict | None = None) -> str:
     """source_ref (orchestrator.primitives.common._base_source_ref) is
     {"sources": [{"name","version"}], "columns": [...], "grain", "population"} —
-    render it as "source@version (grain)" rather than a raw dict repr."""
+    render it as "source@version (grain)" rather than a raw dict repr.
+
+    UI-M2 (D-P7-3, docs/specs/P7_mapping_authoring_design.md §1.4): when
+    this run declared a column mapping for one of the cited source(s), a
+    "— mapped: ..." suffix names it — this cell is where finding provenance
+    already lives, so no new element is needed. `run_inputs` is this run's
+    own RunState.options["run_inputs"] (§1.3), keyed by source name only —
+    it does not (and cannot, without per-metric engine tracking this lane
+    does not add) say which specific finding used which mapped column."""
     if not isinstance(source_ref, dict):
         return "—"
     sources = source_ref.get("sources") or []
     names = ", ".join(f"{s.get('name')}@{s.get('version')}" for s in sources if s.get("name"))
     grain = source_ref.get("grain")
-    return f"{names} ({grain})" if names and grain else (names or "—")
+    base = f"{names} ({grain})" if names and grain else (names or "—")
+    if base == "—" or not run_inputs:
+        return base
+    mappings = run_inputs.get("mappings") or {}
+    pairs = []
+    for s in sources:
+        for contract, physical in sorted((mappings.get(s.get("name")) or {}).items()):
+            pairs.append(f"{physical}→{contract}")
+    return f"{base} — mapped: {'; '.join(pairs)}" if pairs else base
 
 
 def _fmt_metric(value, unit) -> str:
@@ -1866,14 +1882,20 @@ def register_callbacks(app) -> None:
         Output("tne-evidence-offcanvas", "title"),
         Input({"type": "tne-view-evidence", "index": ALL}, "n_clicks"),
         State("tne-findings-store", "data"),
+        State("tne-run-id", "data"),
         prevent_initial_call=True,
     )
-    def _open_evidence(n_clicks_list, findings):
+    def _open_evidence(n_clicks_list, findings, run_id):
         if not any(n for n in n_clicks_list if n) or not ctx.triggered_id:
             raise PreventUpdate
         idx = ctx.triggered_id["index"]
         finding = (findings or [])[idx]
         metrics_cited = finding.get("metrics_cited", {})
+        # UI-M2: this run's own declared column mappings, read from the
+        # already-cached bundle _filter_findings above also reads from --
+        # no extra persistence round trip beyond that existing cache.
+        bundle = _load_bundle(run_id)
+        run_inputs = ((bundle or {}).get("run") or {}).get("options", {}).get("run_inputs")
 
         rows = []
         for name, m in metrics_cited.items():
@@ -1881,7 +1903,7 @@ def register_callbacks(app) -> None:
                 html.Td(name, style={"fontFamily": "monospace", "fontSize": 11, "color": "#6b7283"}),
                 html.Td(_fmt_metric(m.get("value"), m.get("unit")),
                         style={"fontSize": 12.5, "fontWeight": 600, "fontFamily": "monospace", "textAlign": "right"}),
-                html.Td(_fmt_source_ref(m.get("source_ref")), style={"fontSize": 11, "color": "#6b7283"}),
+                html.Td(_fmt_source_ref(m.get("source_ref"), run_inputs), style={"fontSize": 11, "color": "#6b7283"}),
             ]))
 
         threshold_rows = []

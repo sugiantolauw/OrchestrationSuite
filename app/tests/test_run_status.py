@@ -113,6 +113,64 @@ def test_render_body_awaiting_confirmation_shows_confirm_button():
     assert "run-confirm-plan-btn" in str(body)
 
 
+# ── UI-M1 (D-P7-2, docs/specs/P7_mapping_authoring_design.md §1.4) ──────────
+
+def test_run_inputs_lines_mapping():
+    lines = run_status._run_inputs_lines(
+        {"mappings": {"expense_report": {"Employee ID": "Emp No"}}, "not_supplied": {}, "parameters": {}}
+    )
+    assert lines == ["expense_report: column 'Emp No' used as Employee ID"]
+
+
+def test_run_inputs_lines_parameter():
+    lines = run_status._run_inputs_lines({
+        "mappings": {}, "not_supplied": {},
+        "parameters": {
+            "population_of_interest": {
+                "path": "/Volumes/x/y/exco_ids.csv", "sha256": "1a2b3c4d5e6f",
+                "provenance": {"owner": "X", "as_of": "2026-07-01"},
+            },
+        },
+    })
+    assert lines == ["population_of_interest: exco_ids.csv (sha256 1a2b3c4d…, owner X, as of 2026-07-01)"]
+
+
+def test_run_inputs_lines_not_supplied():
+    lines = run_status._run_inputs_lines({
+        "mappings": {}, "parameters": {},
+        "not_supplied": {"booking_detail": {"reason": "reason", "affected_tests": ["T3.1b", "T3.3a"]}},
+    })
+    assert lines == ["booking_detail not supplied (reason) — T3.1b, T3.3a not testable"]
+
+
+def test_run_inputs_lines_empty():
+    assert run_status._run_inputs_lines(None) == []
+    assert run_status._run_inputs_lines({"mappings": {}, "not_supplied": {}, "parameters": {}}) == []
+
+
+def test_render_body_awaiting_confirmation_with_run_inputs_lists_them():
+    run_id = _new_run(review_plan_first=True)
+    run = adapters.get_run(run_id)
+    run = dict(run)
+    run["options"] = dict(run.get("options") or {})
+    run["options"]["run_inputs"] = {
+        "mappings": {}, "parameters": {},
+        "not_supplied": {"booking_detail": {"reason": "no data", "affected_tests": ["T3.1b"]}},
+    }
+    body = run_status._render_body(run, run_id)
+    text = str(body)
+    assert "This run uses project-specific inputs, so the plan must be confirmed." in text
+    assert "booking_detail not supplied (no data) — T3.1b not testable" in text
+    assert "run-confirm-plan-btn" in text
+
+
+def test_render_body_awaiting_confirmation_without_run_inputs_omits_the_list():
+    run_id = _new_run(review_plan_first=True)
+    run = adapters.get_run(run_id)
+    body = run_status._render_body(run, run_id)
+    assert "project-specific inputs" not in str(body)
+
+
 def test_render_body_awaiting_signoff_shows_signoff_button():
     run_id = _new_run()
     run = adapters.get_run(run_id)

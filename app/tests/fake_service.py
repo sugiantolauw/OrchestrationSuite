@@ -177,6 +177,15 @@ def suggest_bindings(ctx, skill_id: str, *, skill: dict | None = None) -> dict:
     return {"expense_report": "test_catalog.tne_source.expense_report", "attendee_validity": None}
 
 
+def not_supplied_sources_for_skill(ctx, skill_id: str) -> dict:
+    # Independent review 2026-09-25 item 1 ("run inputs"): this fake stand-in
+    # has no SOURCE_BINDINGS of its own, so no source is ever not_supplied --
+    # app/'s run_setup._auto_bind still calls this (it must, in production),
+    # and gets the same "nothing configured" answer the real
+    # orchestrator.service does when SOURCE_BINDINGS is unset.
+    return {}
+
+
 def get_upload_base_path(ctx) -> str:
     return "/tmp/fake-uploads"
 

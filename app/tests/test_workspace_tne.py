@@ -718,3 +718,26 @@ def test_workspace_layout_renders_an_awaiting_signoff_run_with_no_status_gate(mo
         run_ctx.executor.stop()
         adapters._ctx = None
         workspace_tne._CACHE.clear()
+
+
+# UI-M2 (D-P7-3, docs/specs/P7_mapping_authoring_design.md section 1.4)
+
+def test_fmt_source_ref_no_run_inputs_unchanged():
+    source_ref = {"sources": [{"name": "expense_report", "version": "abc12345"}], "grain": "row"}
+    assert workspace_tne._fmt_source_ref(source_ref) == "expense_report@abc12345 (row)"
+    assert workspace_tne._fmt_source_ref(source_ref, None) == "expense_report@abc12345 (row)"
+    assert workspace_tne._fmt_source_ref(source_ref, {"mappings": {}}) == "expense_report@abc12345 (row)"
+
+
+def test_fmt_source_ref_appends_mapping_suffix():
+    source_ref = {"sources": [{"name": "expense_report", "version": "abc12345"}], "grain": "row"}
+    run_inputs = {"mappings": {"expense_report": {"Employee ID": "Emp No"}}}
+    result = workspace_tne._fmt_source_ref(source_ref, run_inputs)
+    assert result.startswith("expense_report@abc12345 (row) — mapped: ")
+    assert "Emp No→Employee ID" in result
+
+
+def test_fmt_source_ref_unaffected_source_no_suffix():
+    source_ref = {"sources": [{"name": "approval_aging", "version": "1"}], "grain": "row"}
+    run_inputs = {"mappings": {"expense_report": {"Employee ID": "Emp No"}}}
+    assert workspace_tne._fmt_source_ref(source_ref, run_inputs) == "approval_aging@1 (row)"

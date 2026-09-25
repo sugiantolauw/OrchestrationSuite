@@ -447,6 +447,57 @@ def test_export_produces_labelled_ticket_previews_when_option_on(local_persisten
     assert sheet.cell(row=2, column=5).value == TICKET_PREVIEW_STATUS
 
 
+def test_export_xlsx_run_inputs_sheet_empty_when_no_run_inputs(local_persistence, tmp_path):
+    """Independent review 2026-09-25 item 1 ("run inputs"): the sheet exists
+    (headers only) even for an ordinary run, and the cover has no
+    run_inputs row."""
+    import openpyxl
+
+    h = _make_harness(local_persistence, tmp_path)
+    state = _run_through_prioritise(h)
+    state = act(h.ctx, state)
+    state = export(h.ctx, state)
+
+    wb = openpyxl.load_workbook(Path(state.exports["xlsx"]["path"]))
+    assert "Run inputs" in wb.sheetnames
+    sheet = wb["Run inputs"]
+    assert sheet.cell(row=1, column=1).value == "kind"
+    assert sheet.cell(row=2, column=1).value is None  # no data rows, only the footer far below
+
+    cover = wb["Cover"]
+    cover_labels = {cover.cell(row=r, column=1).value for r in range(1, cover.max_row + 1)}
+    assert "run_inputs" not in cover_labels
+
+
+def test_export_xlsx_run_inputs_sheet_lists_declared_inputs(local_persistence, tmp_path):
+    run_inputs = {
+        "mappings": {"claims": {"Employee ID": "Emp No"}},
+        "not_supplied": {"register": {"reason": "not held", "affected_tests": ["T2"]}},
+        "parameters": {},
+    }
+    h = _make_harness(local_persistence, tmp_path, options={"run_inputs": run_inputs})
+    state = _run_through_prioritise(h)
+    state = act(h.ctx, state)
+    state = export(h.ctx, state)
+
+    import openpyxl
+
+    wb = openpyxl.load_workbook(Path(state.exports["xlsx"]["path"]))
+    sheet = wb["Run inputs"]
+    rows = [
+        tuple(sheet.cell(row=r, column=c).value for c in (1, 2, 3))
+        for r in range(2, sheet.max_row + 1)
+        if sheet.cell(row=r, column=1).value in ("mapping", "not_supplied")
+    ]
+    assert ("mapping", "claims", "'Employee ID' used as 'Emp No'") in rows
+    assert any(r[0] == "not_supplied" and r[1] == "register" and "not held" in r[2] for r in rows)
+
+    cover = wb["Cover"]
+    cover_rows = {cover.cell(row=r, column=1).value: cover.cell(row=r, column=2).value for r in range(1, cover.max_row + 1)}
+    assert "1 column mapping(s)" in cover_rows["run_inputs"]
+    assert "1 source(s) not supplied" in cover_rows["run_inputs"]
+
+
 def test_export_xlsx_never_writes_a_live_formula_cell(local_persistence, tmp_path):
     """P2/P3 gate review item 7 (OWASP CSV/formula-injection guidance): a
     data-derived string starting with =, +, -, @, tab or CR must be written
