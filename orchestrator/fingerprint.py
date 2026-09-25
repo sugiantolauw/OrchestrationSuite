@@ -71,6 +71,32 @@ def _hash_entries(entries: list[tuple[str, bytes]]) -> str:
     return h.hexdigest()
 
 
+# BUG-ROBUST-1: files that are byproducts of running the repo's own code or
+# of a developer's OS/editor, never part of a Skill's authored content
+# (CLAUDE.md §4.4's layout: manifest/contract/plan/thresholds/findings, the
+# custom.py/workspace.py escape hatches, and prompts/reference files an
+# auditor or Skill author wrote). __pycache__ is the concrete failure this
+# guards: reference/build_monthly_rates.py (a real, tracked Skill file) is
+# runnable, and CPython importing or py_compile-ing it writes a stray .pyc
+# next to it -- picked up by the old unfiltered rglob("*") and handed to
+# register_skill's content.decode("utf-8"), which crashes on the binary
+# bytes. A stray .pyc changing skill_content_hash (and so every run
+# fingerprint) depending on which tool last imported the module is exactly
+# the non-reproducibility this hash exists to prevent.
+_SKILL_CONTENT_IGNORED_NAMES = frozenset({".DS_Store"})
+_SKILL_CONTENT_IGNORED_SUFFIXES = (".pyc", ".pyo")
+
+
+def _is_skill_content_file(path: Path) -> bool:
+    if "__pycache__" in path.parts:
+        return False
+    if path.name in _SKILL_CONTENT_IGNORED_NAMES:
+        return False
+    if path.suffix in _SKILL_CONTENT_IGNORED_SUFFIXES:
+        return False
+    return True
+
+
 def skill_content_entries(skill_dir: Path | None) -> list[tuple[str, bytes]]:
     """Every file that is part of a Skill's CONTENT (CLAUDE.md §3 NN7/NN8,
     P2/P3 gate review item 9) -- {relative path: raw bytes}, as a list of
@@ -105,7 +131,7 @@ def skill_content_entries(skill_dir: Path | None) -> list[tuple[str, bytes]]:
         d = skill_dir / dirname
         if d.is_dir():
             for p in d.rglob("*"):
-                if p.is_file():
+                if p.is_file() and _is_skill_content_file(p):
                     entries.append((str(p.relative_to(skill_dir)), p.read_bytes()))
     return entries
 

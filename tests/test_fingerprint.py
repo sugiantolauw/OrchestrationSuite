@@ -91,6 +91,49 @@ def test_changes_when_skill_file_byte_changes(tmp_path):
     assert fp1["skill_content_hash"] != fp2["skill_content_hash"]
 
 
+def test_pycache_under_reference_does_not_change_the_skill_content_hash(tmp_path):
+    """BUG-ROBUST-1: reference/build_monthly_rates.py-style scripts are real,
+    tracked Skill content (CLAUDE.md §4.4 -- prompts/ and reference/ files),
+    and CPython importing or py_compile-ing one writes a stray __pycache__/
+    *.pyc next to it. That byproduct must not change skill_content_hash --
+    otherwise the hash (and so every run's fingerprint) depends on whichever
+    tool last happened to import the module, and register_skill's own
+    content.decode("utf-8") crashes outright on the binary .pyc bytes."""
+    skill_dir = tmp_path / "skill"
+    (skill_dir / "reference").mkdir(parents=True)
+    (skill_dir / "manifest.yaml").write_text("id: SKILL-001\nversion: 1\n")
+    (skill_dir / "reference" / "build_monthly_rates.py").write_text("# a real, tracked reference script\n")
+    fp1 = _fp(skill_dir=skill_dir)
+
+    pycache = skill_dir / "reference" / "__pycache__"
+    pycache.mkdir()
+    (pycache / "build_monthly_rates.cpython-311.pyc").write_bytes(b"\xa7\x0d\x0d\x0a\x00\x00\x00\x00binary")
+    fp2 = _fp(skill_dir=skill_dir)
+
+    assert fp1["fingerprint_id"] == fp2["fingerprint_id"]
+    assert fp1["skill_content_hash"] == fp2["skill_content_hash"]
+
+
+def test_ds_store_and_pyc_under_prompts_or_reference_are_excluded(tmp_path):
+    """Same rule, other non-content files CLAUDE.md's own bug report names
+    (.DS_Store, a stray *.pyc not inside __pycache__)."""
+    skill_dir = tmp_path / "skill"
+    (skill_dir / "prompts").mkdir(parents=True)
+    (skill_dir / "reference").mkdir(parents=True)
+    (skill_dir / "manifest.yaml").write_text("id: SKILL-001\nversion: 1\n")
+    fp1 = _fp(skill_dir=skill_dir)
+
+    (skill_dir / "prompts" / ".DS_Store").write_bytes(b"\x00\x01\x02")
+    (skill_dir / "reference" / "stray.pyc").write_bytes(b"\x00\x01\x02")
+    fp2 = _fp(skill_dir=skill_dir)
+
+    assert fp1["fingerprint_id"] == fp2["fingerprint_id"]
+
+    (skill_dir / "prompts" / "system.txt").write_text("a real prompt override\n")
+    fp3 = _fp(skill_dir=skill_dir)
+    assert fp3["fingerprint_id"] != fp1["fingerprint_id"]
+
+
 def test_skill_content_hash_none_for_explorer():
     fp = _fp(skill_dir=None)
     assert fp["skill_content_hash"] is None
