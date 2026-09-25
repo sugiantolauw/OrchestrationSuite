@@ -46,16 +46,20 @@ Rules:
 10. monetary_basis and a money metric always agree, in both directions: monetary_basis is "spend"
     or "excess" if AND ONLY IF the finding's metrics_cited includes a metric whose unit is
     "currency" -- never cite a money metric under monetary_basis "none", and never set
-    monetary_basis "spend"/"excess" without citing one. "spend"/"excess" also needs the source's
-    entry_key: one or more columns that together identify one transaction. Check each candidate
-    column's own "unique" field in PROFILE first -- a single column PROFILE marks "unique": true is
-    always the safest choice. If NO single column is marked "unique": true, do not guess: either
-    combine several columns you are genuinely confident together identify one row (their combined
-    distinct-ness is checked for you, so a wrong guess simply fails validation), or, when you are
-    not confident of any combination, do not use monetary_basis "spend"/"excess" for this source at
-    all -- write "none" instead, cite no money metric in that finding, and note the missing entry_key
-    in data_gaps. A near-unique count (e.g. 999 of 1,000 rows distinct) is NOT "unique": true and
-    must not be treated as if it were.
+    monetary_basis "spend"/"excess" without citing one. A source's own rows are already distinct
+    transaction lines by default, so "spend"/"excess" needs NO sources[].entry_key at all in the
+    ordinary case -- leave entry_key null and use monetary_basis "spend"/"excess" freely. Declare
+    entry_key ONLY when you have specific evidence that this source's grain is NOT one row per
+    transaction (for example, several rows share every business-identifying value and differ only
+    in a line-level attribute such as an attendee name on one entertainment claim), and even then
+    only when you can name a column or column combination PROFILE evidences as unique for that
+    source: check each candidate column's own "unique" field first -- a single column PROFILE marks
+    "unique": true is always the safest choice; a composite key's combined distinct-ness is checked
+    for you, so a wrong guess simply fails validation. A near-unique count (e.g. 999 of 1,000 rows
+    distinct) is NOT "unique": true and must not be treated as if it were. If you suspect a
+    repeating grain but cannot name a column combination PROFILE evidences as unique, do not declare
+    entry_key -- leave it null (row identity still applies and monetary_basis "spend"/"excess"
+    remains available) and instead note the repeating-grain concern in data_gaps.
 11. A parameter's JSON Schema type never changes: where a parameter may be omitted, write it as
     null, never as an empty array [] or empty object {}. An empty array is a real, non-null value
     (zero grouping/exclusion columns) and several parameters require it to be non-empty when given

@@ -547,6 +547,19 @@ def validate_proposal(
                     f"sources.{source}.date_column {s['date_column']!r} is not a date/datetime column (V-C2)",
                 )
         # ── V-C3: entry_key ──────────────────────────────────────────────
+        # CLAUDE.md independent-review decision 2026-09-24 item 1 / NN14:
+        # line identity for a row-grain source is its own row identity --
+        # an entry_key is required only where the grain genuinely repeats
+        # (skills/tne_exco/contract.yaml's attendee_validity is the
+        # reference case). A source that declares no entry_key is therefore
+        # VALID for V-C3/monetary_basis purposes (row identity always
+        # exists and is always unique); this branch previously marked it
+        # invalid, which made every monetary_basis:spend|excess finding on
+        # a plain row-grain source unconditionally fail V-N3 -- the live
+        # 2026-09-25 measurement's "0/3 valid, all V-C3/N-3 unresolvable
+        # entry_key" was this false positive, not a real data problem. A
+        # DECLARED entry_key must still be unique at the pinned version, or
+        # this still fails loudly (V-C3, below) -- that part is unchanged.
         entry_key = s.get("entry_key")
         if entry_key:
             missing = [c for c in entry_key if c not in cols]
@@ -583,7 +596,7 @@ def validate_proposal(
                             f"version ({distinct} distinct of {row_count} rows) (V-C3)",
                         )
         else:
-            entry_key_valid[source] = False
+            entry_key_valid[source] = True
 
     # ── per-test checks (V-T1, V-T2, V-T3, V-T4, V-T5, V-T6, V-T7, V-C1) ─
     test_metrics: dict[str, set[str]] = {}

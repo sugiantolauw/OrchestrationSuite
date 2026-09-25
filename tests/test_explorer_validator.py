@@ -366,6 +366,20 @@ def test_v_c3_positive_composite_key_unique():
     assert "V-C3" not in _rules(report)
 
 
+def test_v_c3_positive_no_entry_key_row_grain():
+    # Independent review 2026-09-24 item 1 / NN14, live regression
+    # 2026-09-25: a row-grain source with NO declared entry_key uses row
+    # identity for line identity and must be VALID for both V-C3 and the
+    # V-N3 monetary_basis check -- it must NOT require an entry_key.
+    c = _base_canonical()
+    c["sources"][0]["entry_key"] = None
+    report = _validate(c)
+    assert "V-C3" not in _rules(report)
+    assert "V-N3" not in _finding_rules(report)
+    assert _test_valid(report)
+    assert _finding_valid(report)
+
+
 # ── V-T1 ─────────────────────────────────────────────────────────────────
 
 
@@ -531,10 +545,15 @@ def test_v_n2_positive():
 # ── V-N3 ─────────────────────────────────────────────────────────────────
 
 
-def test_v_n3_negative_spend_without_entry_key():
+def test_v_n3_negative_spend_with_non_unique_entry_key():
+    # A DECLARED entry_key that is not unique at the pinned version still
+    # fails loudly (V-C3) and therefore still fails V-N3 -- unlike a source
+    # that declares no entry_key at all (row identity, always valid; see
+    # test_v_c3_positive_no_entry_key_row_grain).
     c = _base_canonical()
-    c["sources"][0]["entry_key"] = None
+    c["sources"][0]["entry_key"] = ["Employee ID 2"]  # profile: unique=False
     report = _validate(c)
+    assert "V-C3" in _rules(report)
     assert "V-N3" in _finding_rules(report)
 
 
