@@ -433,7 +433,7 @@ def test_cap_truncates_the_candidates_list(local_persistence, tmp_path, monkeypa
 
     real_generate_item = runner_module._generate_item
 
-    def fake_generate_item(rc, *, task, payload, schema, extra_params, validate_fn):
+    def fake_generate_item(rc, *, task, payload, schema, extra_params, validate_fn, **_):
         if task != "find_candidates":
             return real_generate_item(
                 rc, task=task, payload=payload, schema=schema, extra_params=extra_params, validate_fn=validate_fn,
