@@ -376,7 +376,8 @@ def _plan_explorer(ctx: NodeContext, state: RunState) -> RunState:
     )
     if r1.status == "unavailable":
         plan_payload = {
-            "kind": "explorer", "status": "llm_unavailable", "label": None, "proposal": None,
+            "kind": "explorer", "status": "llm_unavailable",
+            "label": narration_resolve.LABEL_LLM_UNAVAILABLE, "proposal": None,
             "proposal_sha256": None, "validation": None, "validation_before_repair": None,
             "llm": {"planner": _explorer_llm_call_entry(r1), "repair": None},
             "data_gaps_computed": data_gaps_computed, "inputs": inputs,
