@@ -89,6 +89,23 @@ def test_load_settings_admission_backoff_defaults_when_env_empty():
     assert settings.admission_backoff_max_s == 60.0
 
 
+def test_load_settings_reads_llm_retry_env():
+    env = {"LLM_MAX_TRANSPORT_ATTEMPTS": "7", "LLM_RETRY_BACKOFF_MAX_S": "90"}
+    settings = load_settings(env)
+    assert settings.llm_max_transport_attempts == 7
+    assert settings.llm_retry_backoff_max_s == 90.0
+
+
+def test_load_settings_llm_retry_defaults_when_env_empty():
+    # Round-4 narration-content fix (task item 2): raised from 3/30s so the
+    # worst-case total backoff (75s, see orchestrator/config.py's own
+    # comment on these two fields) outlasts a Databricks Model Serving
+    # per-minute rate-limit window.
+    settings = load_settings({})
+    assert settings.llm_max_transport_attempts == 5
+    assert settings.llm_retry_backoff_max_s == 75.0
+
+
 def test_runtime_config_hash_excludes_secrets():
     # Settings has no token field at all -- a token can never enter the hash.
     assert not hasattr(Settings(), "token")

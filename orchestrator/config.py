@@ -132,8 +132,37 @@ class Settings:
     # excluded from the runtime config hash below, same reasoning as
     # llm_retry_backoff_s: they change how a call is retried, never what a
     # node computes.
-    llm_max_transport_attempts: int = 3
-    llm_retry_backoff_max_s: float = 30.0
+    #
+    # Round-4 narration-content fix (2026-09-25, task item 2): the previous
+    # defaults (3 attempts, 30s cap) gave a worst-case total backoff of only
+    # 5+10=15s across the two waits between three attempts -- nowhere near
+    # the ~60s a Databricks Model Serving workspace's PER-MINUTE rate limit
+    # (REQUEST_LIMIT_EXCEEDED "output tokens per minute"/"QPS") needs to
+    # reset, so a genuinely transient per-minute exhaustion looked identical
+    # to a longer outage and exhausted retries before the limit could ever
+    # clear (observed live: prioritise/act/find_synthesis batch calls fell
+    # back to fallback_unavailable on exactly this shape of 429). 5 attempts
+    # with a 75s cap gives 4 waits -- min(5,75)=5, min(10,75)=10,
+    # min(20,75)=20, min(40,75)=40 -- a worst-case backoff of 5+10+20+40=75s
+    # before the 5th (final) attempt, plus up to 25% jitter on each wait
+    # (orchestrator.llm.gateway._call_live), so up to ~94s of sleep for one
+    # call that is rate-limited on every attempt; a run's ~45 short
+    # narration calls run narration_max_parallel (default 2) at a time, so a
+    # run where every single call is persistently rate-limited for its full
+    # retry budget adds, in the true worst case, roughly
+    # ceil(45/2) * 94s =~ 35 minutes -- a theoretical ceiling from assuming
+    # sustained saturation on every call, not what a real transient burst
+    # costs (most calls succeed on the first or second attempt; this bound
+    # exists to be stated, not to be a realistic expectation). A GENUINELY
+    # DEAD endpoint (disabled, 403, no such endpoint) never enters this
+    # backoff loop at all: `ModelUnavailable(permanent=True)`
+    # (orchestrator/llm/errors.py) is raised and returned immediately by
+    # `_call_live`'s own `except ModelUnavailable` branch, with no retry and
+    # no sleep, regardless of these two settings -- see
+    # tests/test_llm_gateway.py's permanent-unavailability tests and
+    # tests/test_config.py's coverage of these two defaults.
+    llm_max_transport_attempts: int = 5
+    llm_retry_backoff_max_s: float = 75.0
     # Independent review item 4: T4.3 row-level classification via the
     # model client is BUILT but switched off by default -- while off, T4.3
     # stays `not_testable` ("awaiting governance approval to send expense
@@ -307,8 +336,8 @@ def load_settings(env: dict | None = None) -> Settings:
         readiness_cache_ttl_s=_parse_float(env.get("READINESS_CACHE_TTL_S"), 120.0),
         llm_timeout_s=_parse_float(env.get("LLM_TIMEOUT_S"), 180.0),
         llm_retry_backoff_s=_parse_float(env.get("LLM_RETRY_BACKOFF_S"), 5.0),
-        llm_max_transport_attempts=_parse_int(env.get("LLM_MAX_TRANSPORT_ATTEMPTS"), 3),
-        llm_retry_backoff_max_s=_parse_float(env.get("LLM_RETRY_BACKOFF_MAX_S"), 30.0),
+        llm_max_transport_attempts=_parse_int(env.get("LLM_MAX_TRANSPORT_ATTEMPTS"), 5),
+        llm_retry_backoff_max_s=_parse_float(env.get("LLM_RETRY_BACKOFF_MAX_S"), 75.0),
         enable_row_level_llm=_parse_bool(env.get("ENABLE_ROW_LEVEL_LLM"), False),
         apps_python_version=env.get("DBX_APPS_PYTHON_VERSION") or "3.11",
         llm_monthly_token_budget=_parse_optional_int(env.get("LLM_MONTHLY_TOKEN_BUDGET")),

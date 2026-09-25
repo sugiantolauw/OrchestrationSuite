@@ -302,22 +302,45 @@ def build_finding_payload(finding: dict, *, skill, period: tuple[str, str]) -> t
 
 
 def build_synthesis_payload(findings: list[dict], *, skill) -> tuple[dict, dict[str, dict[str, PlaceholderEntry]]]:
+    """`identifiers` (round-4 narration-content fix, task item 1): a
+    dedicated `{key, test_ids}` pair per finding, separate from the
+    `findings` list below, so the two identifier forms are never read off
+    the same object under ambiguous labels. `themes[].finding_keys` and
+    `severity_proposals[].finding_key` (the schema's own enum, built from
+    these same `key` values by `narrate_synthesis`) must copy a `key` here
+    character-for-character; prose (title/summary/root_cause_hypothesis/
+    review_observations) must instead copy one of that same entry's
+    `test_ids`, in full including any suffix -- never the other way
+    around. This is what synthesis_user.md's IDENTIFIERS section now
+    points the model at, replacing the earlier design where `key` and
+    `test_id` sat as two same-shaped fields on one `findings` item with no
+    structural signal for which one a given output field wants (the cause
+    of the live 2026-09-25 failure: `finding_keys` entries
+    'T6_1d_dom'/'T3_2a_air_dom', neither in the schema's own key enum --
+    the model had applied the *test_id* suffix-preservation rule to the
+    *key* field instead). `findings` below is unchanged and still carries
+    both `key` and `test_id` per item, since a reader also benefits from
+    seeing them side by side for context; only the prompt's own framing of
+    which one to write where has moved to `identifiers`."""
     items = []
+    identifiers = []
     tables: dict[str, dict[str, PlaceholderEntry]] = {}
     for finding in findings:
         key = finding_key(finding)
+        test_id = finding.get("test_id")
         table = build_finding_table(finding, skill=skill)
         tables[key] = table
         items.append({
             "key": key,
             "title": finding.get("title"),
-            "test_id": finding.get("test_id"),
+            "test_id": test_id,
             "severity": finding.get("severity"),
             "severity_rule": finding.get("severity_rule"),
             "monetary_basis": finding.get("monetary_basis"),
             "placeholders": _serialise_table(table),
         })
-    return {"findings": items}, tables
+        identifiers.append({"key": key, "test_ids": [test_id] if test_id else []})
+    return {"identifiers": identifiers, "findings": items}, tables
 
 
 # ── `find_candidates` (finding-candidates/1): one call, skipped by the

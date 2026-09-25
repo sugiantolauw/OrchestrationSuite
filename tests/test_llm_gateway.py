@@ -285,6 +285,89 @@ def test_backoff_without_retry_after_is_capped_at_retry_backoff_max_s(monkeypatc
     assert slept == [5.0]
 
 
+# ── round-4 narration-content fix (task item 2): the new Settings defaults
+# (5 attempts, 75s cap -- orchestrator/config.py) must give enough total
+# backoff to outlast a per-minute rate-limit window (~60s), while a
+# genuinely dead (permanent) endpoint still fails on its first attempt
+# regardless of the larger budget. ──────────────────────────────────────────
+
+
+def test_new_default_retry_budget_survives_a_per_minute_rate_limit_window(monkeypatch):
+    """4 consecutive RateLimited failures (no Retry-After) then success,
+    under exactly the new Settings defaults (llm_max_transport_attempts=5,
+    llm_retry_backoff_s=5.0, llm_retry_backoff_max_s=75.0 --
+    orchestrator/config.py). The pre-round-4 defaults (3 attempts, 30s cap)
+    gave only 5+10=15s of total backoff; these give 5+10+20+40=75s -- past
+    the ~60s a Databricks Model Serving per-minute limit needs to clear."""
+    persistence = _persistence()
+    client = FakeModelClient(responses={
+        "databricks-gpt-oss-120b": [
+            RateLimited("ep", "boom 1"), RateLimited("ep", "boom 2"),
+            RateLimited("ep", "boom 3"), RateLimited("ep", "boom 4"),
+            _resp(text="ok on the 5th attempt"),
+        ]
+    })
+    slept: list[float] = []
+    monkeypatch.setattr("orchestrator.llm.gateway.time.sleep", lambda s: slept.append(s))
+    monkeypatch.setattr("orchestrator.llm.gateway.random.uniform", lambda a, b: 0.0)  # isolate the base schedule
+    gw = _gateway(
+        client, persistence=persistence,
+        max_transport_attempts=5, retry_backoff_s=5.0, retry_backoff_max_s=75.0,
+    )
+    result = gw.call(task="classify", seq=1, messages=[], desired_params={}, ctx=_ctx())
+    assert result.status == "ok"
+    assert result.text == "ok on the 5th attempt"
+    assert len(client.calls) == 5
+    assert slept == [5.0, 10.0, 20.0, 40.0]
+    assert sum(slept) == 75.0
+    # The 4th wait alone starts only after 5+10+20=35s have already elapsed,
+    # and the 5th (final) attempt begins only after all 75s have elapsed --
+    # comfortably past the ~60s a per-minute quota needs to reset.
+    assert sum(slept[:3]) < 60.0 <= sum(slept)
+
+
+def test_new_default_retry_budget_still_gives_up_as_non_permanent_after_5_attempts(monkeypatch):
+    persistence = _persistence()
+    client = FakeModelClient(responses={
+        "databricks-gpt-oss-120b": [
+            RateLimited("ep", f"boom {i}") for i in range(5)
+        ]
+    })
+    monkeypatch.setattr("orchestrator.llm.gateway.time.sleep", lambda s: None)
+    monkeypatch.setattr("orchestrator.llm.gateway.random.uniform", lambda a, b: 0.0)
+    gw = _gateway(
+        client, persistence=persistence,
+        max_transport_attempts=5, retry_backoff_s=5.0, retry_backoff_max_s=75.0,
+    )
+    result = gw.call(task="classify", seq=1, messages=[], desired_params={}, ctx=_ctx())
+    assert result.status == "unavailable"
+    assert result.permanent is False  # never trips the circuit breaker for a sibling item
+    assert len(client.calls) == 5
+
+
+def test_a_genuinely_dead_endpoint_still_fails_fast_under_the_larger_retry_budget(monkeypatch):
+    """`ModelUnavailable(permanent=True)` -- a 403/disabled/no-such-endpoint
+    -- never enters the RateLimited/TransientModelError backoff loop at
+    all, so raising `max_transport_attempts` to 5 and
+    `retry_backoff_max_s` to 75s changes nothing about how fast this
+    fails: one call, no sleep."""
+    persistence = _persistence()
+    client = FakeModelClient(responses={
+        "databricks-gpt-oss-120b": ModelUnavailable("ep", "rate limit of 0", permanent=True),
+    })
+    slept: list[float] = []
+    monkeypatch.setattr("orchestrator.llm.gateway.time.sleep", lambda s: slept.append(s))
+    gw = _gateway(
+        client, persistence=persistence,
+        max_transport_attempts=5, retry_backoff_s=5.0, retry_backoff_max_s=75.0,
+    )
+    result = gw.call(task="classify", seq=1, messages=[], desired_params={}, ctx=_ctx())
+    assert result.status == "unavailable"
+    assert result.permanent is True
+    assert len(client.calls) == 1
+    assert slept == []
+
+
 # ── error_status_code: HTTP status carried onto llm_calls (quality review
 # 2026-09-25 -- this column was always logged null, even for a real HTTP
 # error, because the status was read to CHOOSE a typed exception and then
