@@ -1024,11 +1024,11 @@ class _WithLedgerAndAppSchemas(_FakeWorkspaceClient):
 
     class _Schemas:
         def list(self, catalog_name):
-            return [_FakeNamed("audit_ledger"), _FakeNamed("app_probe"), _FakeNamed("tne_source")]
+            return [_FakeNamed("ledger_schema"), _FakeNamed("app_probe"), _FakeNamed("tne_source")]
 
     class _Tables:
         def list(self, catalog_name, schema_name):
-            if schema_name == "audit_ledger":
+            if schema_name == "ledger_schema":
                 return [_FakeTable("controls", None, ["control_id"])]
             if schema_name == "app_probe":
                 return [_FakeTable("heartbeat", None, ["ts"])]
@@ -1038,21 +1038,21 @@ class _WithLedgerAndAppSchemas(_FakeWorkspaceClient):
 def test_list_tables_default_enumeration_excludes_the_ledger_schema():
     settings = Settings(
         host="https://x.cloud.databricks.com", warehouse_http_path="/sql/1.0/warehouses/abc",
-        catalog="orchestrationsuite", schema="audit_ledger",
+        catalog="orchestrationsuite", schema="ledger_schema",
     )
     ds = UCTableDataSource(settings, {}, workspace_client_factory=_WithLedgerAndAppSchemas)
 
     results = ds.list_tables()
 
     schemas_seen = {r.get("schema") for r in results if not r.get("restricted")}
-    assert "audit_ledger" not in schemas_seen
-    assert not any(r.get("fqn", "").startswith("orchestrationsuite.audit_ledger.") for r in results)
+    assert "ledger_schema" not in schemas_seen
+    assert not any(r.get("fqn", "").startswith("orchestrationsuite.ledger_schema.") for r in results)
 
 
 def test_list_tables_configured_exclusion_list_hides_other_internal_schemas():
     settings = Settings(
         host="https://x.cloud.databricks.com", warehouse_http_path="/sql/1.0/warehouses/abc",
-        catalog="orchestrationsuite", schema="audit_ledger",
+        catalog="orchestrationsuite", schema="ledger_schema",
         excluded_schemas=("orchestrationsuite.app_probe",),
     )
     ds = UCTableDataSource(settings, {}, workspace_client_factory=_WithLedgerAndAppSchemas)
@@ -1066,7 +1066,7 @@ def test_list_tables_configured_exclusion_list_hides_other_internal_schemas():
 def test_list_tables_source_schemas_allowlist_narrows_to_only_those_schemas():
     settings = Settings(
         host="https://x.cloud.databricks.com", warehouse_http_path="/sql/1.0/warehouses/abc",
-        catalog="orchestrationsuite", schema="audit_ledger",
+        catalog="orchestrationsuite", schema="ledger_schema",
         source_schemas=("orchestrationsuite.tne_source",),
     )
     ds = UCTableDataSource(settings, {}, workspace_client_factory=_WithLedgerAndAppSchemas)
@@ -1097,7 +1097,7 @@ def test_list_tables_source_schemas_allowlist_narrows_which_catalogs_are_walked(
     _CountingSchemas.call_count = 0
     settings = Settings(
         host="https://x.cloud.databricks.com", warehouse_http_path="/sql/1.0/warehouses/abc",
-        catalog="orchestrationsuite", schema="audit_ledger",
+        catalog="orchestrationsuite", schema="ledger_schema",
         source_schemas=("orchestrationsuite.tne_source",),
     )
     ds = UCTableDataSource(settings, {}, workspace_client_factory=_TwoCatalogWorkspaceClient)
@@ -1116,19 +1116,19 @@ def test_list_tables_explicit_schema_bypasses_ledger_exclusion():
     out, so this never blocks a legitimate need to read the ledger."""
     settings = Settings(
         host="https://x.cloud.databricks.com", warehouse_http_path="/sql/1.0/warehouses/abc",
-        catalog="orchestrationsuite", schema="audit_ledger",
+        catalog="orchestrationsuite", schema="ledger_schema",
     )
     ds = UCTableDataSource(settings, {}, workspace_client_factory=_WithLedgerAndAppSchemas)
 
-    results = ds.list_tables(catalog="orchestrationsuite", schema="audit_ledger")
+    results = ds.list_tables(catalog="orchestrationsuite", schema="ledger_schema")
 
-    assert any(r.get("fqn") == "orchestrationsuite.audit_ledger.controls" for r in results)
+    assert any(r.get("fqn") == "orchestrationsuite.ledger_schema.controls" for r in results)
 
 
 def test_list_tables_explicit_schema_bypasses_source_schemas_allowlist():
     settings = Settings(
         host="https://x.cloud.databricks.com", warehouse_http_path="/sql/1.0/warehouses/abc",
-        catalog="orchestrationsuite", schema="audit_ledger",
+        catalog="orchestrationsuite", schema="ledger_schema",
         source_schemas=("orchestrationsuite.tne_source",),
     )
     ds = UCTableDataSource(settings, {}, workspace_client_factory=_WithLedgerAndAppSchemas)
