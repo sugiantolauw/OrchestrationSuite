@@ -58,6 +58,16 @@ class Settings:
     model_gpt_oss: str | None = None
     executor: str = "thread"
     max_concurrent_runs: int = 2
+    # DeltaPersistence's bounded connection pool (P3/P4 perf gap review
+    # 2026-09-25, bounded-pool follow-up): Werkzeug's threaded dev server
+    # (app.yaml's `threaded=True`) spawns a new OS thread per HTTP request, so
+    # a per-thread connection would open a fresh Databricks SQL session
+    # (~1s+, session churn) on every render/poll, unbounded under concurrent
+    # load. A pool of at most this many connections, reused across requests
+    # and executor threads, bounds how many sessions this process ever holds
+    # against the warehouse. Operational knob, not computation -- excluded
+    # from the runtime config hash below, same as max_concurrent_runs.
+    max_connections: int = 6
     demo_mode: bool = False
     code_revision: str | None = None
     mlflow_tracking_uri: str | None = None
@@ -225,6 +235,7 @@ def load_settings(env: dict | None = None) -> Settings:
         model_gpt_oss=env.get("MODEL_GPT_OSS") or None,
         executor=env.get("EXECUTOR") or "thread",
         max_concurrent_runs=_parse_int(env.get("MAX_CONCURRENT_RUNS"), 2),
+        max_connections=_parse_int(env.get("DBX_MAX_CONNECTIONS"), 6),
         demo_mode=_parse_bool(env.get("DEMO_MODE"), False),
         code_revision=env.get("CODE_REVISION") or None,
         admission_max_attempts=_parse_int(env.get("ADMISSION_MAX_ATTEMPTS"), 20),
@@ -280,7 +291,7 @@ def load_settings(env: dict | None = None) -> Settings:
 # runs configured identically except for these should share a fingerprint (CLAUDE.md
 # §4.1, non-blocking item).
 _RUNTIME_HASH_EXCLUDED_FIELDS = frozenset({
-    "max_concurrent_runs", "executor", "mlflow_tracking_uri", "mlflow_experiment_path",
+    "max_concurrent_runs", "max_connections", "executor", "mlflow_tracking_uri", "mlflow_experiment_path",
     "admission_max_attempts", "admission_backoff_base_s", "admission_backoff_max_s",
     "executor_active_poll_interval_s", "executor_idle_poll_interval_s",
     # PPTX template path changes the export's appearance only -- never a

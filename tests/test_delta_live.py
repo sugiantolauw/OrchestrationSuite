@@ -15,9 +15,13 @@ from tests.conftest import canonical_ts
 # Delta-only live concurrency checks (CLAUDE.md §9C "Concurrency model", P1A gate
 # review). These skip entirely unless RUN_DELTA_TESTS=1 -- there is nothing to check
 # against local_memory/local_file, which are single-connection by construction. Every
-# test here opens its OWN DeltaPersistence instance(s) (own connection) per actor, since
-# a shared instance would serialise through its internal connection lock and defeat the
-# point of the test.
+# test here opens its OWN DeltaPersistence instance(s) (own bounded connection pool) per
+# actor: a shared instance's pool (P3/P4 perf gap review, bounded-pool follow-up) no
+# longer serialises concurrent callers the way the original single shared connection
+# did, but its size is still bounded (DBX_MAX_CONNECTIONS) and shared across whatever
+# else is using that instance -- separate instances keep each actor's concurrency
+# genuinely independent of the others' and of the pool's own size, rather than coupling
+# this test's pass/fail to a config value.
 
 
 def _fingerprint(fp_id):

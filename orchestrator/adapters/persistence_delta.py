@@ -13,6 +13,7 @@ from orchestrator.config import Settings
 from orchestrator.errors import (
     AttemptAlreadyClosed,
     AttemptNotFound,
+    ConnectionPoolExhausted,
     FindingNotFound,
     FingerprintConflict,
     InvalidReviewStateTransition,
@@ -485,25 +486,51 @@ class DeltaPersistence:
         *,
         ddl_dir: Path | None = None,
         connection_factory: Callable[[], object] | None = None,
+        pool_checkout_timeout_s: float | None = None,
     ):
         settings.require("catalog", "schema", "warehouse_http_path", "host")
         self.settings = settings
         self.ddl_dir = Path(ddl_dir) if ddl_dir else _DEFAULT_DDL_DIR
         self._connection_factory = connection_factory or self._default_connection_factory
         self._prefix = f"{settings.catalog}.{settings.schema}"
-        self._conn_lock = threading.Lock()
-        self._conn = None
-        # P3 gap-audit review follow-up (RUN-5E0D4353A7BB, 2026-09-25): lease
-        # operations (acquire_lease/renew_lease/release_lease/expired_leases)
-        # get their OWN connection and lock, never `_conn`/`_conn_lock`. A
-        # single DeltaPersistence instance is shared by a whole process
-        # (ThreadExecutor and every node it runs), so the SAME `_conn_lock`
-        # previously serialised a heartbeat thread's renew_lease behind
-        # whatever the pipeline thread's own node output writes were doing on
-        # the main connection (write_flagged_rows/write_run_metrics loop over
-        # hundreds of batched MERGEs, each a live round trip) -- a long single
-        # node call could starve this run's own lease renewal for its whole
-        # duration. Renewal must never queue behind a node's own writes.
+        # P3/P4 perf gap review (2026-09-25), bounded-pool follow-up: an
+        # earlier fix on this same branch gave every calling THREAD its own
+        # connection (threading.local). That removed the original problem --
+        # one shared connection behind one lock making every reader/writer
+        # on the process queue behind whichever thread held it, one
+        # statement at a time, each 2-8s against a live warehouse -- but
+        # introduced a new one: app.yaml's `python app/app.py` runs
+        # Werkzeug's dev server with `threaded=True`, which spawns a NEW OS
+        # thread per HTTP request. A per-thread connection therefore opened
+        # a brand-new Databricks SQL session (~1s+ open cost, real session
+        # churn on the warehouse) on every single render/poll, with no bound
+        # on how many could pile up under concurrent requests. A live
+        # single-long-lived-thread measurement never exercised that.
+        #
+        # A bounded connection POOL fixes both: at most `max_connections`
+        # connections ever open at once (DBX_MAX_CONNECTIONS, default 6,
+        # config.py), lazily created and REUSED across every request/thread
+        # -- no per-request open, and a hard cap on warehouse sessions. A
+        # checkout beyond the pool's size waits (CLAUDE.md NN14: fails
+        # loudly via ConnectionPoolExhausted rather than hang forever).
+        #
+        # Leases (acquire_lease/renew_lease/release_lease/expired_leases)
+        # keep their OWN single dedicated connection, OUTSIDE the pool
+        # (`_lease_conn`/`_lease_conn_lock`, same shape as the original P3
+        # gap-audit fix, RUN-5E0D4353A7BB) -- the heartbeat thread's renewal
+        # must never wait for a pool slot behind a node's own batched
+        # writes, which is a real risk once the pool can be fully checked
+        # out by MAX_CONCURRENT_RUNS node threads plus concurrent web
+        # requests.
+        self._pool = _ConnectionPool(
+            self._connection_factory,
+            max_size=settings.max_connections,
+            checkout_timeout_s=(
+                pool_checkout_timeout_s
+                if pool_checkout_timeout_s is not None
+                else _DEFAULT_POOL_CHECKOUT_TIMEOUT_S
+            ),
+        )
         self._lease_conn_lock = threading.Lock()
         self._lease_conn = None
 
@@ -522,27 +549,23 @@ class DeltaPersistence:
     def _table(self, name: str) -> str:
         return f"{self._prefix}.{name}"
 
-    # One connection is opened lazily and reused for the life of this instance (a
-    # DeltaPersistence is expected to live for the process, not per-call) instead of
-    # opening a fresh one on every method call. On a connection-shaped error the
-    # connection is dropped and reopened exactly once before the statement is retried
-    # (CLAUDE.md §9C non-blocking item).
+    # A connection is checked out of the bounded pool for the duration of the
+    # `with` block and returned to the pool (never closed) on exit -- reused by
+    # the next caller, on any thread, rather than opened fresh per call/thread.
+    # On a connection-shaped error the broken connection is dropped from the
+    # pool entirely (never returned to it) and a replacement is checked out for
+    # the retry (CLAUDE.md §9C non-blocking item).
     def _cursor_ctx(self):
         return _CursorCtx(self)
 
-    # Runs exactly one statement under its own (short) acquire/release of the
-    # shared connection's lock, rather than a caller holding `_cursor_ctx()`
-    # across a whole batched write. A batched write can still be dozens of
-    # round trips for a large population (_MERGE_BATCH_SIZE's own docstring:
-    # a several-hundred-row write already needed this once for row-by-row
-    # MERGEs) -- holding the lock for the WHOLE write serialises every other
-    # thread's persistence call behind it, not just one statement of it,
-    # including a concurrent /run/<id> render's get_run/get_narration_review
-    # (P3/P4 perf gap review 2026-09-25: a single render measured 183.9s
-    # against the real warehouse under concurrent-run load). Delta statements
-    # here are individually atomic (no explicit BEGIN/COMMIT spans one), so
-    # releasing the lock between them changes only how long OTHER threads
-    # wait, never what this write itself commits.
+    # Runs exactly one statement via `_cursor_ctx()` rather than a caller holding
+    # one checked-out connection across a whole batched write -- a long write
+    # still checks a connection in and out per statement, so it can never hog a
+    # pool slot for its entire duration (CLAUDE.md build brief P3 §1 / the
+    # original P3/P4 perf gap review, still true under the pool: a several-
+    # hundred-row write is dozens of round trips, and holding one slot for all
+    # of them would starve other threads under a small pool just as badly as
+    # the original single shared connection did).
     def _exec1(self, sql_text: str, params: dict | None = None):
         with self._cursor_ctx() as conn:
             return self._execute(conn, sql_text, params)
@@ -550,35 +573,23 @@ class DeltaPersistence:
     def _exec1_typed(self, sql_text: str, params: dict | None = None):
         with self._cursor_ctx() as conn:
             return self._execute_typed(conn, sql_text, params)
-    # Lease operations' own connection/lock -- see the docstring on
-    # self._lease_conn_lock in __init__. Same lazy-open-once-reuse and
-    # reconnect-on-connection-error shape as the main connection, just kept
-    # structurally separate so it is never blocked by it.
+
+    # Lease operations' own connection -- see the docstring on
+    # self._lease_conn_lock in __init__. Same lazy-open-once-reuse shape as
+    # the pool, just a single dedicated connection so it can never wait on a
+    # pool slot.
     def _lease_cursor_ctx(self):
-        return _CursorCtx(self, lease=True)
+        return _LeaseCursorCtx(self)
 
-    def _get_connection_locked(self, *, lease: bool = False):
-        if lease:
-            if self._lease_conn is None:
-                self._lease_conn = self._connection_factory()
-            return self._lease_conn
-        if self._conn is None:
-            self._conn = self._connection_factory()
-        return self._conn
-
-    def _execute(self, conn, sql_text: str, params: dict | None = None, *, lease: bool = False):
+    def _execute(self, conn, sql_text: str, params: dict | None = None):
         try:
-            cur = conn.cursor()
+            cur = conn.raw.cursor()
             cur.execute(sql_text, params or {})
             return cur
         except Exception as exc:
             if _is_connection_error(exc):
-                if lease:
-                    self._lease_conn = None
-                else:
-                    self._conn = None
-                conn = self._get_connection_locked(lease=lease)
-                cur = conn.cursor()
+                conn.replace_broken()
+                cur = conn.raw.cursor()
                 cur.execute(sql_text, params or {})
                 return cur
             raise
@@ -599,17 +610,33 @@ class DeltaPersistence:
     def _execute_typed(self, conn, sql_text: str, params: dict | None = None):
         prepared = _typed_params(params)
         try:
-            cur = conn.cursor()
+            cur = conn.raw.cursor()
             cur.execute(sql_text, prepared)
             return cur
         except Exception as exc:
             if _is_connection_error(exc):
-                self._conn = None
-                conn = self._get_connection_locked()
-                cur = conn.cursor()
+                conn.replace_broken()
+                cur = conn.raw.cursor()
                 cur.execute(sql_text, prepared)
                 return cur
             raise
+
+    def close(self) -> None:
+        """Idempotent, deterministic close of the pool (every connection it
+        currently owns, idle or checked out) and the dedicated lease
+        connection. Safe to call from any thread; calling it again is a
+        no-op. Intended for a clean process shutdown -- not for closing
+        connections still in active use elsewhere (a checked-out connection
+        closed mid-statement by another thread is a caller error, not
+        something this method guards against)."""
+        self._pool.close()
+        with self._lease_conn_lock:
+            conn, self._lease_conn = self._lease_conn, None
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
     # ── migrations ───────────────────────────────────────────────────────────
 
@@ -2409,14 +2436,15 @@ class DeltaPersistence:
                 "WHEN NOT MATCHED THEN INSERT (run_id, claimed_by, claimed_at, heartbeat_at, "
                 "lease_expires_at) VALUES (:run_id, :claimed_by, :now, :now, :expires_at)",
                 {"run_id": run_id, "claimed_by": worker_id, "now": now, "expires_at": expires_at},
-                lease=True,
             )
             return _num_affected_rows(cur) > 0
 
     def renew_lease(self, run_id: str, worker_id: str, *, ttl_s: float, now: str) -> bool:
-        # P3 gap-audit review follow-up (RUN-5E0D4353A7BB): its own connection
-        # (see __init__ / _lease_cursor_ctx) -- this must never queue behind a
-        # long node-output write sharing the main connection/lock.
+        # P3 gap-audit review follow-up (RUN-5E0D4353A7BB), bounded-pool
+        # follow-up: this must never queue behind a long node-output write --
+        # nor behind a full connection pool (MAX_CONCURRENT_RUNS node threads
+        # plus concurrent web requests can exhaust it). Its own dedicated
+        # connection, outside the pool (`_lease_cursor_ctx`), guarantees both.
         expires_at = _add_seconds(now, ttl_s)
         with self._lease_cursor_ctx() as conn:
             cur = self._execute(
@@ -2424,7 +2452,6 @@ class DeltaPersistence:
                 f"UPDATE {self._table('run_leases')} SET heartbeat_at = :now, "
                 "lease_expires_at = :expires_at WHERE run_id = :run_id AND claimed_by = :claimed_by",
                 {"now": now, "expires_at": expires_at, "run_id": run_id, "claimed_by": worker_id},
-                lease=True,
             )
             return _num_affected_rows(cur) > 0
 
@@ -2434,7 +2461,6 @@ class DeltaPersistence:
                 conn,
                 f"DELETE FROM {self._table('run_leases')} WHERE run_id = :run_id AND claimed_by = :claimed_by",
                 {"run_id": run_id, "claimed_by": worker_id},
-                lease=True,
             )
 
     def expired_leases(self, now: str) -> list[str]:
@@ -2443,7 +2469,6 @@ class DeltaPersistence:
                 conn,
                 f"SELECT run_id FROM {self._table('run_leases')} WHERE lease_expires_at <= :now",
                 {"now": now},
-                lease=True,
             )
             return [r["run_id"] for r in _fetchall_dicts(cur)]
 
@@ -2460,17 +2485,194 @@ def _trace_event_ui_shape(row: dict) -> dict:
     return row
 
 
+_DEFAULT_POOL_CHECKOUT_TIMEOUT_S = 30.0
+
+
+# Placeholder held in `_ConnectionPool._all` while a slot is reserved but the
+# actual (slow, blocking) connection open for it is still in flight -- see
+# `checkout()`. A plain sentinel object, never a real connection.
+_POOL_RESERVED = object()
+
+
+class _ConnectionPool:
+    """Bounded pool of lazily-created connections shared by every thread that
+    calls into one `DeltaPersistence` instance (P3/P4 perf gap review
+    2026-09-25, bounded-pool follow-up -- see the docstring on
+    `DeltaPersistence.__init__`). At most `max_size` connections are ever
+    open at once; a checkout beyond that waits for one to be returned, up to
+    `checkout_timeout_s`, then raises `ConnectionPoolExhausted` (CLAUDE.md
+    NN14 -- fail loudly, never hang forever or silently proceed without a
+    connection)."""
+
+    def __init__(self, factory: Callable[[], object], *, max_size: int, checkout_timeout_s: float):
+        self._factory = factory
+        self._max_size = max(1, max_size)
+        self._checkout_timeout_s = checkout_timeout_s
+        self._cond = threading.Condition()
+        self._idle: list = []
+        # Every connection this pool currently owns, idle or checked out --
+        # NOT just the idle ones -- plus a `_POOL_RESERVED` placeholder for
+        # each slot whose connection is still being opened (see checkout()).
+        # Used to decide whether a new connection may be opened
+        # (len(_all) < max_size) and to close everything on close().
+        self._all: list = []
+        self._closed = False
+
+    def checkout(self):
+        # A connection's actual open (self._factory(), a live databricks-sql
+        # sql.connect() -- measured live at ~5-6s, real network/auth/session
+        # I/O) must NEVER run while holding `self._cond`'s lock: doing so
+        # serialises every other thread's checkout() behind it one at a
+        # time, defeating the entire point of a pool sized > 1 (found live,
+        # 2026-09-25 bounded-pool follow-up review: a burst of concurrent
+        # checkouts against a cold pool showed a MINIMUM latency of ~19-20s
+        # -- several 5-6s opens happening in series, not in parallel, plus
+        # every other thread blocked trying to acquire the lock itself
+        # rather than properly parked on the condition variable). The slot
+        # is reserved (a `_POOL_RESERVED` placeholder appended to `_all`,
+        # counting against `max_size` exactly like a real connection would)
+        # BEFORE releasing the lock, so no other thread can also decide
+        # there is room and open one too many; the slow `_factory()` call
+        # then happens with the lock released, so up to `max_size` opens
+        # can genuinely proceed concurrently.
+        deadline = time.monotonic() + self._checkout_timeout_s
+        while True:
+            with self._cond:
+                if self._idle:
+                    return self._idle.pop()
+                if len(self._all) < self._max_size:
+                    self._all.append(_POOL_RESERVED)
+                    break
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise ConnectionPoolExhausted(self._max_size, self._checkout_timeout_s)
+                self._cond.wait(remaining)
+        try:
+            conn = self._factory()
+        except Exception:
+            with self._cond:
+                self._all.remove(_POOL_RESERVED)
+                self._cond.notify()
+            raise
+        with self._cond:
+            if self._closed:
+                # Closed while this connection was opening -- never hand out
+                # a connection from a closed pool. Drop the reservation and
+                # close what we just opened instead of returning it.
+                self._all.remove(_POOL_RESERVED)
+                self._cond.notify()
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+                raise ConnectionPoolExhausted(self._max_size, self._checkout_timeout_s)
+            self._all[self._all.index(_POOL_RESERVED)] = conn
+        return conn
+
+    def checkin(self, conn) -> None:
+        with self._cond:
+            if self._closed or conn not in self._all:
+                # Closed, or this connection was drop()ped as broken --
+                # either way it must never be resurrected into `_idle`.
+                return
+            self._idle.append(conn)
+            self._cond.notify()
+
+    def drop(self, conn) -> None:
+        # Removes a broken connection entirely (never returned to `_idle`)
+        # and frees its slot so a waiting checkout() can open a replacement.
+        with self._cond:
+            if conn in self._all:
+                self._all.remove(conn)
+            self._cond.notify()
+
+    def close(self) -> None:
+        with self._cond:
+            if self._closed:
+                return
+            self._closed = True
+            # `_POOL_RESERVED` placeholders (an open in flight when close()
+            # was called) are never real connections -- skip them here; the
+            # in-flight checkout() itself closes its connection once its
+            # factory() call returns and it sees `_closed` (above).
+            conns = [c for c in self._all if c is not _POOL_RESERVED]
+            self._all.clear()
+            self._idle.clear()
+            self._cond.notify_all()
+        for c in conns:
+            try:
+                c.close()
+            except Exception:
+                pass
+
+    def size(self) -> int:
+        with self._cond:
+            return len(self._all)
+
+
+class _PooledConn:
+    """Handed to a caller by `_CursorCtx.__enter__` for the life of one `with`
+    block. `.raw` is the actual driver connection; `replace_broken()` drops it
+    from the pool and checks out a fresh one for `_execute`'s reconnect-once
+    retry, updating `.raw` in place so the SAME object the caller (and
+    `_CursorCtx.__exit__`) holds always refers to a live connection."""
+
+    __slots__ = ("raw", "_pool")
+
+    def __init__(self, raw, pool: _ConnectionPool):
+        self.raw = raw
+        self._pool = pool
+
+    def replace_broken(self) -> None:
+        self._pool.drop(self.raw)
+        self.raw = self._pool.checkout()
+
+
 class _CursorCtx:
-    def __init__(self, persistence: DeltaPersistence, *, lease: bool = False):
+    def __init__(self, persistence: DeltaPersistence):
         self._p = persistence
-        self._lease = lease
-        self._lock = None
+        self._holder: _PooledConn | None = None
 
     def __enter__(self):
-        self._lock = self._p._lease_conn_lock if self._lease else self._p._conn_lock
-        self._lock.acquire()
-        return self._p._get_connection_locked(lease=self._lease)
+        raw = self._p._pool.checkout()
+        self._holder = _PooledConn(raw, self._p._pool)
+        return self._holder
 
     def __exit__(self, exc_type, exc, tb):
-        self._lock.release()
+        self._p._pool.checkin(self._holder.raw)
+        return False
+
+
+class _LeaseConn:
+    """The lease path's equivalent of `_PooledConn`, for the single dedicated
+    connection in `DeltaPersistence._lease_conn` -- never pool-backed, so
+    `replace_broken()` just reopens that one connection in place rather than
+    checking one out of a pool."""
+
+    __slots__ = ("raw", "_persistence")
+
+    def __init__(self, raw, persistence: DeltaPersistence):
+        self.raw = raw
+        self._persistence = persistence
+
+    def replace_broken(self) -> None:
+        with self._persistence._lease_conn_lock:
+            self._persistence._lease_conn = self._persistence._connection_factory()
+            self.raw = self._persistence._lease_conn
+
+
+class _LeaseCursorCtx:
+    def __init__(self, persistence: DeltaPersistence):
+        self._p = persistence
+
+    def __enter__(self):
+        with self._p._lease_conn_lock:
+            if self._p._lease_conn is None:
+                self._p._lease_conn = self._p._connection_factory()
+            raw = self._p._lease_conn
+        return _LeaseConn(raw, self._p)
+
+    def __exit__(self, exc_type, exc, tb):
+        # The dedicated lease connection is never checked in/out -- it just
+        # stays open, reused by the next lease call.
         return False
