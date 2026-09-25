@@ -2488,6 +2488,12 @@ def _trace_event_ui_shape(row: dict) -> dict:
 _DEFAULT_POOL_CHECKOUT_TIMEOUT_S = 30.0
 
 
+# Placeholder held in `_ConnectionPool._all` while a slot is reserved but the
+# actual (slow, blocking) connection open for it is still in flight -- see
+# `checkout()`. A plain sentinel object, never a real connection.
+_POOL_RESERVED = object()
+
+
 class _ConnectionPool:
     """Bounded pool of lazily-created connections shared by every thread that
     calls into one `DeltaPersistence` instance (P3/P4 perf gap review
@@ -2505,25 +2511,63 @@ class _ConnectionPool:
         self._cond = threading.Condition()
         self._idle: list = []
         # Every connection this pool currently owns, idle or checked out --
-        # NOT just the idle ones. Used to decide whether a new connection may
-        # be opened (len(_all) < max_size) and to close everything on close().
+        # NOT just the idle ones -- plus a `_POOL_RESERVED` placeholder for
+        # each slot whose connection is still being opened (see checkout()).
+        # Used to decide whether a new connection may be opened
+        # (len(_all) < max_size) and to close everything on close().
         self._all: list = []
         self._closed = False
 
     def checkout(self):
+        # A connection's actual open (self._factory(), a live databricks-sql
+        # sql.connect() -- measured live at ~5-6s, real network/auth/session
+        # I/O) must NEVER run while holding `self._cond`'s lock: doing so
+        # serialises every other thread's checkout() behind it one at a
+        # time, defeating the entire point of a pool sized > 1 (found live,
+        # 2026-09-25 bounded-pool follow-up review: a burst of concurrent
+        # checkouts against a cold pool showed a MINIMUM latency of ~19-20s
+        # -- several 5-6s opens happening in series, not in parallel, plus
+        # every other thread blocked trying to acquire the lock itself
+        # rather than properly parked on the condition variable). The slot
+        # is reserved (a `_POOL_RESERVED` placeholder appended to `_all`,
+        # counting against `max_size` exactly like a real connection would)
+        # BEFORE releasing the lock, so no other thread can also decide
+        # there is room and open one too many; the slow `_factory()` call
+        # then happens with the lock released, so up to `max_size` opens
+        # can genuinely proceed concurrently.
         deadline = time.monotonic() + self._checkout_timeout_s
-        with self._cond:
-            while True:
+        while True:
+            with self._cond:
                 if self._idle:
                     return self._idle.pop()
                 if len(self._all) < self._max_size:
-                    conn = self._factory()
-                    self._all.append(conn)
-                    return conn
+                    self._all.append(_POOL_RESERVED)
+                    break
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise ConnectionPoolExhausted(self._max_size, self._checkout_timeout_s)
                 self._cond.wait(remaining)
+        try:
+            conn = self._factory()
+        except Exception:
+            with self._cond:
+                self._all.remove(_POOL_RESERVED)
+                self._cond.notify()
+            raise
+        with self._cond:
+            if self._closed:
+                # Closed while this connection was opening -- never hand out
+                # a connection from a closed pool. Drop the reservation and
+                # close what we just opened instead of returning it.
+                self._all.remove(_POOL_RESERVED)
+                self._cond.notify()
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+                raise ConnectionPoolExhausted(self._max_size, self._checkout_timeout_s)
+            self._all[self._all.index(_POOL_RESERVED)] = conn
+        return conn
 
     def checkin(self, conn) -> None:
         with self._cond:
@@ -2547,7 +2591,11 @@ class _ConnectionPool:
             if self._closed:
                 return
             self._closed = True
-            conns = list(self._all)
+            # `_POOL_RESERVED` placeholders (an open in flight when close()
+            # was called) are never real connections -- skip them here; the
+            # in-flight checkout() itself closes its connection once its
+            # factory() call returns and it sees `_closed` (above).
+            conns = [c for c in self._all if c is not _POOL_RESERVED]
             self._all.clear()
             self._idle.clear()
             self._cond.notify_all()

@@ -869,6 +869,49 @@ def test_pool_bound_respected_extra_checkout_waits_then_proceeds():
     assert factory_calls["n"] == 2  # the waiter reused a returned connection, never a 3rd
 
 
+def test_pool_opens_concurrent_connections_in_parallel_not_serially():
+    """Regression test for a real defect found live (2026-09-25, bounded-pool
+    follow-up review): checkout() used to call the slow, blocking
+    `_factory()` (a real connection open measured at ~5-6s against the live
+    warehouse) WHILE HOLDING the pool's lock, serialising every concurrent
+    checkout behind it one open at a time -- a burst of concurrent checkouts
+    against a cold pool showed a MINIMUM latency of ~19-20s, consistent with
+    several 5-6s opens happening in series rather than in parallel. The fix
+    reserves a slot (a `_POOL_RESERVED` placeholder) before releasing the
+    lock, so up to `max_size` opens can genuinely proceed at once. Simulates
+    the slow open with a sleeping factory and asserts N concurrent checkouts
+    against a cold pool of size N take roughly ONE open's worth of time, not
+    N of them."""
+    open_delay_s = 0.2
+    n_concurrent = 4
+
+    def factory():
+        time.sleep(open_delay_s)
+        return FakeConnection({})
+
+    p = DeltaPersistence(_settings(max_connections=n_concurrent), connection_factory=factory)
+
+    def _checkout_and_return():
+        with p._cursor_ctx():
+            pass
+
+    threads = [threading.Thread(target=_checkout_and_return) for _ in range(n_concurrent)]
+    start = time.monotonic()
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=5)
+    total_elapsed = time.monotonic() - start
+
+    # Serialised (the bug): ~n_concurrent * open_delay_s (0.8s for 4 x 0.2s).
+    # Parallel (the fix): ~one open_delay_s (0.2s), regardless of n_concurrent.
+    assert total_elapsed < open_delay_s * (n_concurrent / 2), (
+        f"{n_concurrent} concurrent checkouts against a cold pool took {total_elapsed:.3f}s "
+        f"for a {open_delay_s}s-per-open factory -- looks like opens are serialised, not parallel"
+    )
+    assert p._pool.size() == n_concurrent  # all N connections genuinely opened
+
+
 def test_pool_checkout_times_out_loudly_when_never_released():
     """CLAUDE.md NN14: an exhausted pool that never frees up must fail
     loudly with a clear error, not hang forever or silently proceed with no
