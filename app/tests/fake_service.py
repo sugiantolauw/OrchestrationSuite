@@ -127,6 +127,11 @@ def get_skill(ctx, skill_id: str):
     return {
         **_SKILL, "tests": _TEST_CATALOGUE, "flag_to_test": _FLAG_TO_TEST,
         "thresholds": _THRESHOLDS, "risk_control": _RISK_CONTROL,
+        # Matches orchestrator.service.get_skill's `version_history_rows`
+        # (BUG-SKILLDETAIL-1) -- src/platform/methodology.py reads this key
+        # off whatever get_skill() returned instead of a second
+        # list_skill_versions(skill_id) call.
+        "version_history_rows": list(_SKILL_VERSIONS),
     }
 
 
@@ -168,7 +173,7 @@ def list_data_asset_cards(ctx, query: str = "", limit=None) -> list:
     return cards
 
 
-def suggest_bindings(ctx, skill_id: str) -> dict:
+def suggest_bindings(ctx, skill_id: str, *, skill: dict | None = None) -> dict:
     return {"expense_report": "test_catalog.tne_source.expense_report", "attendee_validity": None}
 
 
@@ -418,6 +423,16 @@ def list_management_actions(ctx, filters=None) -> list:
         if run_id:
             out = [a for a in out if a.get("run_id") == run_id]
     return out
+
+
+def get_actions_page_data(ctx, filters=None):
+    """Fake counterpart to orchestrator.service.get_actions_page_data
+    (BUG-ACTIONS-3) -- this fake has no per-call SQL round trip to dedupe,
+    so it is just the same two calls management_actions_page() used to make
+    directly, kept here only so adapters.get_actions_page_data(...) (which
+    always calls service.get_actions_page_data, real or fake) has something
+    to call under app/tests' monkeypatch."""
+    return list_management_actions(ctx, filters=filters), list_runs(ctx)
 
 
 def update_management_action(ctx, action_id, *, owner, status, target_date, response, actor) -> dict:

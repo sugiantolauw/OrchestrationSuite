@@ -395,9 +395,13 @@ def _auto_bind(skill_id: str) -> tuple[dict[str, str], list[str]]:
     Returns (bindings, missing_source_names). A source with neither is left
     out of `bindings` and named in `missing_source_names` -- the caller
     blocks the run rather than starting one with an incomplete contract."""
+    # BUG-STARTRUN-1 (P3/P4 perf gap review 2026-09-25, live pass): fetched
+    # once and threaded into suggest_bindings -- it used to call get_skill
+    # AGAIN internally, a second skill_versions + list_runs round trip for
+    # the exact same skill card, right on this callback's synchronous path.
     skill = adapters.get_skill(skill_id) or {}
     source_names = [s.get("source") for s in (skill.get("sources") or [])]
-    suggested = adapters.suggest_bindings(skill_id) or {}
+    suggested = adapters.suggest_bindings(skill_id, skill=skill) or {}
 
     current_owner = _request_owner()
     uploads_by_stem: dict[str, dict] = {}

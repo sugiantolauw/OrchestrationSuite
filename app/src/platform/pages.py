@@ -219,7 +219,12 @@ def platform_trace_page(run_id: str | None = None) -> html.Div:
 # ─── Management Actions page (cross-Skill) ──────────────────────────────────
 
 def management_actions_page() -> html.Div:
-    actions = adapters.list_management_actions()
+    # BUG-ACTIONS-3 (P3/P4 perf gap review 2026-09-25, live pass): this used
+    # to call adapters.list_management_actions() and adapters.
+    # list_audit_runs() separately below, each independently issuing its own
+    # full, unfiltered ctx.persistence.list_runs() round trip -- one shared
+    # read now, via get_actions_page_data.
+    actions, runs = adapters.get_actions_page_data()
     skills_for_filter = sorted(set(a.get("skill_name", "") for a in actions))
 
     # CLAUDE.md §0.3: findings' potential_exposure figures overlap the same
@@ -241,7 +246,7 @@ def management_actions_page() -> html.Div:
     # summed across overlapping periods -- the latest run's own figure (or
     # "—", never a fabricated $0) stands in when it can't state an honest
     # total.
-    total_exposure = cross_run_totals(adapters.list_audit_runs())["total_exposure"]
+    total_exposure = cross_run_totals(runs)["total_exposure"]
     # "Under Review" (title-cased) is what orchestrator.service.
     # list_management_actions() actually produces from the persisted
     # "under_review" status (str.replace("_", " ").title()) -- the prototype's

@@ -107,8 +107,11 @@ def list_governed_tables() -> list[dict]:
     return service.list_governed_tables(get_context())
 
 
-def suggest_bindings(skill_id: str) -> dict:
-    return service.suggest_bindings(get_context(), skill_id)
+def suggest_bindings(skill_id: str, *, skill: dict | None = None) -> dict:
+    """`skill`, when given, is an already-fetched `get_skill(skill_id)`
+    result -- see `orchestrator.service.suggest_bindings`'s own docstring
+    (BUG-STARTRUN-1)."""
+    return service.suggest_bindings(get_context(), skill_id, skill=skill)
 
 
 def search_governed_data(query: str, limit: int | None = None) -> list[dict]:
@@ -582,6 +585,14 @@ def list_audit_runs(filters: dict | None = None) -> list[dict]:
 
 def list_management_actions(filters: dict | None = None) -> list[dict]:
     return service.list_management_actions(get_context(), filters=filters)
+
+
+def get_actions_page_data(filters: dict | None = None) -> tuple[list[dict], list[dict]]:
+    """`management_actions_page()`'s (src/platform/pages.py) single read for
+    both the action table and `cross_run_totals`' Total-exposure KPI --
+    see `orchestrator.service.get_actions_page_data`'s own docstring
+    (BUG-ACTIONS-3)."""
+    return service.get_actions_page_data(get_context(), filters=filters)
 
 
 def update_management_action(
