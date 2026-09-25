@@ -40,10 +40,12 @@ from orchestrator.errors import (
 from orchestrator.explorer.edit import apply_plan_edits
 from orchestrator.explorer.materialise import materialise
 from orchestrator.fingerprint import hash_skill_content_entries
+from orchestrator.llm.errors import LLMConfigError
 from orchestrator.llm.gateway import LLMGateway
 from orchestrator.llm.prompts import FilePromptRepository
 from orchestrator.nodes.context import NodeContext
 from orchestrator.nodes.fieldwork import _plan_explorer
+from orchestrator.pipeline import run_phase
 from tests.conftest import canonical_ts
 
 AUDIT_PERIOD = ("2026-01-01", "2026-02-28")
@@ -304,6 +306,69 @@ def test_plan_never_a_third_call_when_repair_also_fails(local_persistence):
     assert result.plan["status"] == "no_valid_tests"
     assert result.plan["validation"]["tests"]["t1"]["valid"] is False
     assert len(client.calls) == 2
+
+
+def test_repair_config_error_fails_the_run_cleanly_through_the_real_pipeline(local_persistence):
+    """A `plan_repair` call that raises `LLMConfigError` (orchestrator.
+    llm.errors.LLMConfigError: "a request this code built incorrectly ...
+    Fails the node; retrying would not help") is NOT swallowed and turned
+    into a graceful "planner's proposal stands" degradation the way an
+    ordinary `unavailable` repair outcome is (docs/specs/
+    P6_P8_explorer_llm_design.md §3.8's "plan_repair unavailable: the
+    planner's proposal stands" is for ModelUnavailable/transport failures,
+    never for a 400 the code itself caused) -- it propagates out of the
+    node, and CLAUDE.md's "fail loudly rather than proceed on a guess"
+    applies: `orchestrator.pipeline.run_phase`'s own generic node-failure
+    handling (already exercised by test_pipeline.py) must be what catches
+    it, not `_plan_explorer` swallowing it. This is the decision the P8
+    repair-schema fix's DO item 4 asked for, made explicit here rather than
+    only implied by leaving the exception unhandled: the run ends up
+    `failed`, with a reason naming the node and the error, every
+    node_attempts/llm_calls row present, and the state still cleanly
+    reloadable -- never a silent crash or a half-written run."""
+    state = _plan_state(local_persistence)
+    fingerprint = local_persistence.get_fingerprint(state.fingerprint_id)
+    client = FakeModelClient(responses={
+        SONNET_ENDPOINT: _model_response(_wire_proposal(t1_column="Amountx"), served_model_version="sonnet-v1"),
+        GPT_OSS_ENDPOINT: LLMConfigError(
+            "model endpoint 'fake-gptoss-endpoint' rejected the request (400): "
+            "schema has too many properties maximum allowed is 128"
+        ),
+    })
+    ctx = _plan_ctx(local_persistence, client=client)
+
+    def plan_node(skill, run_state):
+        return _plan_explorer(ctx, run_state)
+
+    nodes_for = {"fieldwork": {"plan": [("plan", plan_node)], "execute": [], "export": []}}
+
+    final = run_phase(
+        local_persistence, state.run_id, nodes_for=nodes_for, skill=None,
+        clock=lambda: canonical_ts(3), current_fingerprint=fingerprint,
+    )
+
+    assert final.status == "failed"
+    assert "plan" in (final.status_reason or "")
+    assert "LLMConfigError" in (final.status_reason or "")
+    assert final.plan is None  # the node's partial work never landed in persisted state
+
+    attempts = local_persistence.list_node_attempts(state.run_id)
+    assert len(attempts) == 1
+    assert attempts[0]["node_name"] == "plan"
+    assert attempts[0]["outcome"] == "failed"
+    assert "LLMConfigError" in attempts[0]["error_detail"]
+
+    # NN7: the repair call's own row is logged (outcome bad_request) before
+    # the exception propagates, next to the planner's own succeeded row --
+    # nothing about this failure is unlogged.
+    calls = local_persistence.list_llm_calls(state.run_id)
+    outcomes = sorted(c["outcome"] for c in calls)
+    assert outcomes == ["bad_request", "succeeded"]
+
+    # The run is cleanly reloadable -- no corrupted/half-written state.
+    reloaded = local_persistence.load_state(state.run_id)
+    assert reloaded.status == "failed"
+    assert reloaded.state_version == final.state_version
 
 
 # ── planner cannot emit code (node level) ──────────────────────────────────
