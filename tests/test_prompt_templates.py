@@ -441,7 +441,12 @@ _GOLDEN_PAYLOADS: dict[str, dict] = {
 _GOLDEN_PROMPT_SHA256: dict[str, str] = {
     "profile": "69a093a88ada84a5c2244a06701698ea8b154e3dba38012d2203f0bac32ca3da",
     "find": "74ce514d5e7a2c21438c1e7d58d873aa7f16f55311da53c2cdf8409ecbf3f536",
-    "find_synthesis": "b2e0026bb3acb37d3a983a491ef38c1aead66000db63c56754ab4b9ef3289bef",
+    # Updated 2026-09-25 (quality review, category (c) prompt fix): synthesis_user.md's
+    # IDENTIFIERS line now spells out that a test_id must be copied in full including any
+    # suffix, and that a finding's `key` is never a valid identifier -- see
+    # tests/test_narration_validate_quality_regression.py for the real-data regression this
+    # closes (a bare "T6.1d" used instead of the run's actual "T6.1d_dom").
+    "find_synthesis": "2234f45cc967cb3c2c58d311b895412ba48b9b4804aaac02deae6c7f7bfed98b",
     "find_candidates": "fd0c9c52b79eb138d98bcf25b5892f4d3eae15f1065cacd995a76e5bbb9c84ea",
     "prioritise": "328d869d1804fb1e4224150318f97a4c4472e3cb9fe0076d8dffe218248b6fce",
     "act": "e03ad52c8d57fcc357de8ff803f4b631b8da3e047705d3d96137aea9812e4589",

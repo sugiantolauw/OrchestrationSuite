@@ -1,0 +1,517 @@
+{
+  "synthetic_recording": false,
+  "note": "Real model output recorded live 2026-09-25 (quality review, RUN-89AF157ED704, databricks-gpt-oss-120b -- the dev-workspace MODEL_SONNET override, CLAUDE.md \u00a76): the full SKILL-001 fieldwork run's `narrate` node, sequential baseline (before the P6 narration concurrency work), captured from llm_calls/narratives (local sqlite). Unaltered except for reformatting to JSON; nothing here was hand-edited. Consumed by tests/test_narration_validate_quality_regression.py.",
+  "prioritise": {
+    "tables_by_key": {
+      "T4_2": {
+        "att_missing_count": {
+          "unit": "count",
+          "value": 198
+        },
+        "att_missing_high_pct": {
+          "unit": "%",
+          "value": 20.0
+        },
+        "att_missing_pct": {
+          "unit": "%",
+          "value": 84.6
+        },
+        "att_total": {
+          "unit": "count",
+          "value": 234
+        },
+        "run_audit_period_end": {
+          "unit": "date",
+          "value": "2026-04-30"
+        },
+        "run_audit_period_start": {
+          "unit": "date",
+          "value": "2025-01-01"
+        }
+      },
+      "T5_2": {
+        "duplicate_amount": {
+          "unit": "AUD",
+          "value": 1994.79
+        },
+        "duplicate_groups": {
+          "unit": "count",
+          "value": 29
+        },
+        "duplicate_high_count": {
+          "unit": "count",
+          "value": 10
+        },
+        "duplicate_lines": {
+          "unit": "count",
+          "value": 60
+        },
+        "duplicate_oop_card_groups": {
+          "unit": "count",
+          "value": 1
+        },
+        "exposure_amount": {
+          "unit": "AUD",
+          "value": 1994.79
+        },
+        "run_audit_period_end": {
+          "unit": "date",
+          "value": "2026-04-30"
+        },
+        "run_audit_period_start": {
+          "unit": "date",
+          "value": "2025-01-01"
+        }
+      },
+      "T6_1a": {
+        "approver_count": {
+          "unit": "count",
+          "value": 11
+        },
+        "approver_instant_high_pct": {
+          "unit": "%",
+          "value": 40.0
+        },
+        "approver_instant_pct": {
+          "unit": "%",
+          "value": 4.1
+        },
+        "approver_no_receipt_high_pct": {
+          "unit": "%",
+          "value": 30.0
+        },
+        "approver_no_receipt_pct": {
+          "unit": "%",
+          "value": 82.7
+        },
+        "approver_total_reports": {
+          "unit": "count",
+          "value": 799
+        },
+        "approver_worst_case_n": {
+          "unit": "count",
+          "value": 1
+        },
+        "approver_worst_case_pct": {
+          "unit": "%",
+          "value": 0.1
+        },
+        "run_audit_period_end": {
+          "unit": "date",
+          "value": "2026-04-30"
+        },
+        "run_audit_period_start": {
+          "unit": "date",
+          "value": "2025-01-01"
+        }
+      },
+      "T3_1a": {
+        "exposure_amount": {
+          "unit": "AUD",
+          "value": 182552.32
+        },
+        "preapproval_employees": {
+          "unit": "count",
+          "value": 10
+        },
+        "preapproval_unlinked_amount": {
+          "unit": "AUD",
+          "value": 182552.32
+        },
+        "preapproval_unlinked_count": {
+          "unit": "count",
+          "value": 85
+        },
+        "run_audit_period_end": {
+          "unit": "date",
+          "value": "2026-04-30"
+        },
+        "run_audit_period_start": {
+          "unit": "date",
+          "value": "2025-01-01"
+        }
+      },
+      "T4_4": {
+        "exposure_amount": {
+          "unit": "AUD",
+          "value": 318785.6
+        },
+        "hv_amount": {
+          "unit": "AUD",
+          "value": 318785.6
+        },
+        "hv_count": {
+          "unit": "count",
+          "value": 38
+        },
+        "hv_employees": {
+          "unit": "count",
+          "value": 10
+        },
+        "run_audit_period_end": {
+          "unit": "date",
+          "value": "2026-04-30"
+        },
+        "run_audit_period_start": {
+          "unit": "date",
+          "value": "2025-01-01"
+        }
+      },
+      "T6_1c": {
+        "att_hierarchy_invalid": {
+          "unit": "count",
+          "value": 3
+        },
+        "att_hierarchy_total": {
+          "unit": "count",
+          "value": 4
+        },
+        "run_audit_period_end": {
+          "unit": "date",
+          "value": "2026-04-30"
+        },
+        "run_audit_period_start": {
+          "unit": "date",
+          "value": "2025-01-01"
+        }
+      },
+      "T6_1d": {
+        "daily_over_amount_dom": {
+          "unit": "AUD",
+          "value": 446.4
+        },
+        "daily_over_amount_int": {
+          "unit": "AUD",
+          "value": 998.53
+        },
+        "daily_over_count_dom": {
+          "unit": "count",
+          "value": 2
+        },
+        "daily_over_count_int": {
+          "unit": "count",
+          "value": 2
+        },
+        "daily_over_high_count": {
+          "unit": "count",
+          "value": 50
+        },
+        "daily_over_max_dom": {
+          "unit": "AUD",
+          "value": 437.92
+        },
+        "daily_over_max_int": {
+          "unit": "AUD",
+          "value": 814.25
+        },
+        "exposure_amount": {
+          "unit": "AUD",
+          "value": 1444.93
+        },
+        "run_audit_period_end": {
+          "unit": "date",
+          "value": "2026-04-30"
+        },
+        "run_audit_period_start": {
+          "unit": "date",
+          "value": "2025-01-01"
+        }
+      },
+      "T3_1b": {
+        "no_preapproval_bookings": {
+          "unit": "count",
+          "value": 8
+        },
+        "no_preapproval_employees": {
+          "unit": "count",
+          "value": 2
+        },
+        "run_audit_period_end": {
+          "unit": "date",
+          "value": "2026-04-30"
+        },
+        "run_audit_period_start": {
+          "unit": "date",
+          "value": "2025-01-01"
+        },
+        "t31b_employee_medium_count": {
+          "unit": "count",
+          "value": 5
+        },
+        "t31b_name_match_rate": {
+          "unit": "%",
+          "value": 33.3
+        }
+      },
+      "T3_2a": {
+        "pref_dom_airline": {
+          "unit": "count",
+          "value": 1
+        },
+        "pref_dom_car": {
+          "unit": "count",
+          "value": 1
+        },
+        "pref_int_airline": {
+          "unit": "count",
+          "value": 20
+        },
+        "pref_int_car": {
+          "unit": "count",
+          "value": 0
+        },
+        "pref_supplier_medium_count": {
+          "unit": "count",
+          "value": 20
+        },
+        "run_audit_period_end": {
+          "unit": "date",
+          "value": "2026-04-30"
+        },
+        "run_audit_period_start": {
+          "unit": "date",
+          "value": "2025-01-01"
+        }
+      },
+      "T3_3b": {
+        "ent_assessed": {
+          "unit": "count",
+          "value": 4
+        },
+        "ent_over_amount": {
+          "unit": "AUD",
+          "value": 1384.27
+        },
+        "ent_over_external_count": {
+          "unit": "count",
+          "value": 1
+        },
+        "ent_over_internal_count": {
+          "unit": "count",
+          "value": 0
+        },
+        "exposure_amount": {
+          "unit": "AUD",
+          "value": 1384.27
+        },
+        "run_audit_period_end": {
+          "unit": "date",
+          "value": "2026-04-30"
+        },
+        "run_audit_period_start": {
+          "unit": "date",
+          "value": "2025-01-01"
+        }
+      },
+      "T4_1": {
+        "exposure_amount": {
+          "unit": "AUD",
+          "value": 1009.26
+        },
+        "missing_receipt_amount": {
+          "unit": "AUD",
+          "value": 1009.26
+        },
+        "missing_receipt_count": {
+          "unit": "count",
+          "value": 27
+        },
+        "missing_receipt_high_pct": {
+          "unit": "%",
+          "value": 10.0
+        },
+        "missing_receipt_medium_pct": {
+          "unit": "%",
+          "value": 5.0
+        },
+        "missing_receipt_no_affidavit_count": {
+          "unit": "count",
+          "value": 0
+        },
+        "missing_receipt_pct": {
+          "unit": "%",
+          "value": 0.7
+        },
+        "run_audit_period_end": {
+          "unit": "date",
+          "value": "2026-04-30"
+        },
+        "run_audit_period_start": {
+          "unit": "date",
+          "value": "2025-01-01"
+        },
+        "t41_auto_reject_amount": {
+          "unit": "AUD",
+          "value": 50.0
+        }
+      }
+    },
+    "generate_rationale_by_key": {
+      "T4_2": "The high severity of missing attendee details, shown by {pct:att_missing_pct} of claims ({count:att_missing_count} cases) exceeding the analyst\u2011set high threshold of {pct:att_missing_high_pct}, warrants audit committee attention to ensure completeness of claim documentation.",
+      "T5_2": "The high severity of duplicate expense claims, with an exposure of {money:exposure_amount}, indicates possible over\u2011payment and therefore requires audit committee oversight.",
+      "T6_1a": "The high severity of inadequate approver review is evident from {pct:approver_no_receipt_pct} of reports lacking receipt verification ({count:approver_total_reports} total reports), signalling a control weakness for the audit committee to address.",
+      "T3_1a": "The medium severity of unlinked travel requests, with an exposure of {money:exposure_amount}, highlights a risk of unsupported expense reimbursement for audit committee review.",
+      "T4_4": "The medium severity of high\u2011value reimbursements, amounting to {money:exposure_amount}, calls for audit committee consideration of enhanced scrutiny procedures.",
+      "T6_1c": "The medium severity of attendee hierarchy validity exceptions, where {count:att_hierarchy_invalid} of {count:att_hierarchy_total} records are invalid, informs the audit committee of data integrity concerns.",
+      "T6_1d": "The medium severity of daily spend limit exceedances, with a combined exposure of {money:exposure_amount}, alerts the audit committee to potential breaches of spend controls.",
+      "T3_1b": "The low severity of claims without pre\u2011approval is shown by {count:no_preapproval_bookings} bookings representing {pct:t31b_name_match_rate} of submissions, a matter for audit committee awareness.",
+      "T3_2a": "The low severity of non\u2011preferred supplier usage is indicated by {count:pref_dom_airline} domestic airline and {count:pref_int_airline} international airline selections, prompting audit committee monitoring of procurement compliance.",
+      "T3_3b": "The low severity of entertainment spend exceeding per\u2011head thresholds, with an exposure of {money:exposure_amount}, should be noted by the audit committee to maintain policy adherence.",
+      "T4_1": "The low severity of missing receipt documentation, representing an exposure of {money:exposure_amount} across {count:missing_receipt_count} transactions, is relevant for the audit committee to ensure documentation standards."
+    },
+    "repair_rationale_by_key": {
+      "T4_2": "The high severity of missing attendee details, indicated by {pct:att_missing_pct} of claims ({count:att_missing_count} cases) above the analyst\u2011set high threshold of {pct:att_missing_high_pct}, requires audit committee attention to maintain claim completeness.",
+      "T5_2": "The high severity of duplicate expense claims, with an exposure of {money:exposure_amount}, indicates possible over\u2011payment and therefore requires audit committee oversight.",
+      "T6_1a": "The high severity of inadequate approver review is evident from {pct:approver_no_receipt_pct} of reports lacking receipt verification ({count:approver_total_reports} total reports), indicating a control weakness for audit committee action.",
+      "T3_1a": "The medium severity of unlinked travel requests, with an exposure of {money:exposure_amount}, highlights a risk of unsupported expense reimbursement for audit committee review.",
+      "T4_4": "The medium severity of high\u2011value reimbursements, amounting to {money:exposure_amount}, calls for audit committee consideration of enhanced scrutiny procedures.",
+      "T6_1c": "The medium severity of attendee hierarchy validity exceptions, where {count:att_hierarchy_invalid} of {count:att_hierarchy_total} records are invalid, informs the audit committee of data integrity concerns.",
+      "T6_1d": "The medium severity of daily spend limit exceedances, with a combined exposure of {money:exposure_amount}, alerts the audit committee to potential exceedances of spend controls.",
+      "T3_1b": "The low severity of claims without pre\u2011approval is shown by {count:no_preapproval_bookings} bookings representing {pct:t31b_name_match_rate} of submissions, a matter for audit committee awareness.",
+      "T3_2a": "The low severity of non\u2011preferred supplier usage is indicated by {count:pref_dom_airline} domestic airline and {count:pref_int_airline} international airline selections, prompting audit committee monitoring of procurement compliance.",
+      "T3_3b": "The low severity of entertainment spend exceeding per\u2011head thresholds, with an exposure of {money:exposure_amount}, should be noted by the audit committee to maintain policy adherence.",
+      "T4_1": "The low severity of missing receipt documentation, representing an exposure of {money:exposure_amount} across {count:missing_receipt_count} transactions, is relevant for the audit committee to ensure documentation standards."
+    }
+  },
+  "profile": {
+    "table": {
+      "nulls_approval_aging_all_entry_receipts_viewed": {
+        "unit": "count",
+        "value": 0
+      },
+      "nulls_approval_aging_approved_date_time": {
+        "unit": "count",
+        "value": 0
+      },
+      "nulls_approval_aging_approver_id": {
+        "unit": "count",
+        "value": 0
+      },
+      "nulls_approval_aging_approver_name": {
+        "unit": "count",
+        "value": 0
+      },
+      "nulls_approval_aging_approver_received_date": {
+        "unit": "count",
+        "value": 0
+      },
+      "nulls_approval_aging_minutes_of_approval_from_receipt_view": {
+        "unit": "count",
+        "value": 0
+      },
+      "nulls_approval_aging_receipts_viewed_date": {
+        "unit": "count",
+        "value": 20134
+      },
+      "nulls_approval_aging_reimbursement_currency_3": {
+        "unit": "count",
+        "value": 0
+      },
+      "nulls_approval_aging_report_id": {
+        "unit": "count",
+        "value": 0
+      },
+      "nulls_approval_aging_report_receipt_viewed": {
+        "unit": "count",
+        "value": 0
+      },
+      "nulls_approval_aging_step": {
+        "unit": "count",
+        "value": 0
+      },
+      "nulls_attendee_validity_attendee_name": {
+        "unit": "count",
+        "value": 0
+      },
+      "nulls_attendee_validity_company": {
+        "unit": "count",
+        "value": 1394
+      },
+      "nulls_attendee_validity_employee_id_2": {
+        "unit": "count",
+        "value": 0
+      },
+      "nulls_attendee_validity_entry_amount": {
+        "unit": "count",
+        "value": 0
+      },
+      "nulls_attendee_validity_expense_type_2": {
+        "unit": "count",
+        "value": 0
+      },
+      "nulls_attendee_validity_external_id": {
+        "unit": "count",
+        "value": 0
+      },
+      "nulls_expense_report_city_location": {
+        "unit": "count",
+        "value": 35462
+      },
+      "nulls_expense_report_employee_id_cross_change_approver": {
+        "unit": "count",
+        "value": 295
+      },
+      "nulls_expense_report_vendor": {
+        "unit": "count",
+        "value": 10
+      },
+      "rows_approval_aging": {
+        "unit": "count",
+        "value": 29103
+      },
+      "rows_attendee_validity": {
+        "unit": "count",
+        "value": 1394
+      },
+      "rows_booking_detail": {
+        "unit": "count",
+        "value": 7019
+      },
+      "rows_expense_report": {
+        "unit": "count",
+        "value": 92798
+      },
+      "rows_missing_receipt": {
+        "unit": "count",
+        "value": 871
+      },
+      "rows_per_diem_rates": {
+        "unit": "count",
+        "value": 205
+      },
+      "rows_travel_request_segment": {
+        "unit": "count",
+        "value": 16747
+      },
+      "rows_travel_requests_no_expense": {
+        "unit": "count",
+        "value": 4784
+      }
+    },
+    "generate_paragraphs": [
+      "The data profile includes the following source record volumes: approval_aging contains {count:rows_approval_aging} rows; attendee_validity contains {count:rows_attendee_validity} rows; booking_detail contains {count:rows_booking_detail} rows; expense_report contains {count:rows_expense_report} rows; missing_receipt contains {count:rows_missing_receipt} rows; per_diem_rates contains {count:rows_per_diem_rates} rows; travel_request_segment contains {count:rows_travel_request_segment} rows; travel_requests_no_expense contains {count:rows_travel_requests_no_expense} rows.",
+      "Null values are observed in multiple columns. In approval_aging, the column 'Receipts Viewed Date' has {count:nulls_approval_aging_receipts_viewed_date} missing entries while the other listed columns each have {count:nulls_approval_aging_all_entry_receipts_viewed} missing entries. In attendee_validity, the column 'Company' has {count:nulls_attendee_validity_company} missing entries and the other listed columns each have {count:nulls_attendee_validity_attendee_name} missing entries. In expense_report, the columns 'City/Location', 'Employee ID(Cross Change Approver)' and 'Vendor' have {count:nulls_expense_report_city_location}, {count:nulls_expense_report_employee_id_cross_change_approver} and {count:nulls_expense_report_vendor} missing entries respectively."
+    ]
+  },
+  "synthesis": {
+    "test_id_by_key": {
+      "T4_2": "T4.2",
+      "T5_2": "T5.2",
+      "T6_1a": "T6.1a",
+      "T3_1a": "T3.1a",
+      "T4_4": "T4.4",
+      "T6_1c": "T6.1c",
+      "T6_1d": "T6.1d_dom",
+      "T3_1b": "T3.1b",
+      "T3_2a": "T3.2a_air_dom",
+      "T3_3b": "T3.3b",
+      "T4_1": "T4.1"
+    },
+    "repair_review_observations": [
+      "The pattern spans tests T4_2, T4_1 and T6_1a, each highlighting missing supporting details",
+      "Findings T5_2 and T6_1d both identify monetary exposures that surpass configured thresholds",
+      "Tests T3_1a, T3_1b and T3_2a each reveal instances where required approvals or supplier selections were not followed",
+      "Both T4_4 and T3_3b report expenses that cross defined monetary thresholds"
+    ]
+  }
+}

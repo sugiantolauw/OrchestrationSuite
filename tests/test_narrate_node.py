@@ -11,6 +11,7 @@ from orchestrator.llm.errors import ModelUnavailable
 from orchestrator.nodes.narration import narrate
 from tests.narration_test_support import (
     MARKER_FIND_T1,
+    MARKER_PRIORITY,
     DispatchingModelClient,
     happy_responses,
     make_narration_harness,
@@ -181,3 +182,65 @@ def test_idempotent_reexecution_produces_the_same_rows(local_persistence, tmp_pa
         assert row["origin"] == after[narrative_id]["origin"]
     assert len(themes_before) == len(themes_after) == 1
     assert h.ctx.model_client.calls == []  # every second-pass call was a cache hit
+
+
+def _priority_response(t1_rationale: str, t2_rationale: str):
+    return resp(
+        {
+            "schema_version": "priority-rationale/1",
+            "items": [
+                {"key": "T1", "rationale": t1_rationale},
+                {"key": "T2", "rationale": t2_rationale},
+            ],
+        }
+    )
+
+
+def test_one_bad_item_in_a_batch_call_does_not_discard_its_clean_batchmate(local_persistence, tmp_path):
+    """Quality review 2026-09-25: `prioritise` (and `act`) answer for every
+    finding in ONE call. Before this fix, `_generate_item`'s all-or-nothing
+    contract meant T1's own violation (a literal digit -- N-D1) made the
+    WHOLE batch `fallback_invalid`, discarding T2's perfectly clean text
+    too. T2 must keep its model-written text; only T1, which never becomes
+    valid even after the one repair round, falls back."""
+    responses = happy_responses()
+    # Generate: T1 has a literal digit (N-D1); T2 is clean. Repair: the
+    # model "fixes" nothing about T1 (still a literal digit) but T2 stays
+    # clean -- proving repair's own JSON is what T2's kept text comes from.
+    responses[MARKER_PRIORITY] = [
+        _priority_response(
+            "This matter has recurred 3 times and carries a High severity rating.",
+            "This matter carries a Low severity rating in this run.",
+        ),
+        _priority_response(
+            "This matter has recurred 3 times in this jurisdiction and carries a High severity rating.",
+            "This matter carries a Low severity rating in this run, unchanged from the prior period.",
+        ),
+    ]
+    client = DispatchingModelClient(responses)
+    h = make_narration_harness(local_persistence, tmp_path, model_client=client)
+    state = run_to_narrate_input(h)
+    narrate(h.ctx, state)
+
+    findings = {f["rule_id"].rsplit(".", 1)[-1]: f["finding_id"] for f in local_persistence.list_findings(state.run_id)}
+    narratives = {
+        (r["target_id"], r["field"]): r
+        for r in local_persistence.get_narratives(state.run_id)
+        if r["target_kind"] == "finding" and r["field"] == "rationale"
+    }
+
+    t1_row = narratives[(findings["T1"], "rationale")]
+    assert t1_row["origin"] == "fallback_invalid"
+    assert t1_row["template_text"] is None
+    assert t1_row["violations"] is not None
+
+    t2_row = narratives[(findings["T2"], "rationale")]
+    assert t2_row["origin"] == "model_repaired"
+    assert t2_row["template_text"] is not None
+    assert "unchanged from the prior period" in t2_row["template_text"]
+    assert t2_row["violations"] is None
+
+    # Exactly the batch's own two logical calls (generate + repair) -- T2's
+    # recovered text did not cost an extra call.
+    priority_calls = [c for c in local_persistence.list_llm_calls(state.run_id) if c["task"] == "prioritise"]
+    assert len(priority_calls) == 2

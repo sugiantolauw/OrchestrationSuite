@@ -44,9 +44,11 @@ from orchestrator.narration.lexicon import (
 )
 from orchestrator.narration.placeholders import (
     PLACEHOLDER_CLASSES,
+    NarrationConfigError,
     PlaceholderEntry,
     PlaceholderSpan,
     class_for_unit,
+    render,
     scan_placeholders,
     strip_placeholder_spans,
 )
@@ -377,12 +379,6 @@ def validate_prose(
     violations: list[Violation] = []
     allowed_ids = frozenset(allowed_identifiers)
 
-    cap = FIELD_LENGTH_CAPS.get(field)
-    if cap is not None and len(text) > cap:
-        violations.append(
-            Violation("N-L1", f"{field!r} is {len(text)} characters, over the {cap}-character cap")
-        )
-
     spans = scan_placeholders(text)
 
     if field in TITLE_FIELDS and spans:
@@ -393,6 +389,36 @@ def validate_prose(
 
     span_violations, used_placeholders = _check_placeholder_spans(text, spans, table)
     violations.extend(span_violations)
+
+    # N-L1 (quality review 2026-09-25): measures what an auditor actually
+    # reads -- the RENDERED text -- not the model's typed placeholder
+    # source. `{pct:att_missing_pct}` alone is 21 raw characters for a
+    # value that renders to e.g. "12.3%", 5 -- measuring the unrendered
+    # form systematically starved the real prose budget on
+    # placeholder-heavy fields (found live: every `priority rationale` in
+    # two full runs failed this cap, both before and after its one repair,
+    # because 2-3 typed placeholders alone can eat half of it). This never
+    # loosens what a placeholder may say (§3.3-3.4's other rules, N-G3,
+    # N-D1 etc. are unchanged and still run on the raw/stripped text below)
+    # -- it only changes which string N-L1's own len() is measured against,
+    # using the SAME render() a valid item's text is stored/shown with.
+    # When a span is itself invalid, `_check_placeholder_spans` above
+    # already raised its own violation for it (and `render()` would raise
+    # trying to resolve it) -- the raw text is measured instead, exactly
+    # the OLD behaviour, only for that already-flagged case.
+    cap = FIELD_LENGTH_CAPS.get(field)
+    if cap is not None:
+        if span_violations:
+            length_text = text
+        else:
+            try:
+                length_text = render(text, table)
+            except NarrationConfigError:
+                length_text = text
+        if len(length_text) > cap:
+            violations.append(
+                Violation("N-L1", f"{field!r} is {len(length_text)} characters (rendered), over the {cap}-character cap")
+            )
 
     stripped = strip_placeholder_spans(text, spans)
 

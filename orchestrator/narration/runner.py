@@ -189,6 +189,22 @@ class NarrationOutcome:
     call_ids: list[str]
     served_model_version: str | None
     violations_payload: list[dict] | None
+    # Quality review 2026-09-25: for a BATCHED task (`narrate_priority`,
+    # `narrate_remediation` -- one call answers for every item at once),
+    # `origin`/`parsed` above describe the call as a WHOLE: a single item's
+    # violation makes the whole batch "fallback_invalid" and discards
+    # `parsed` entirely, which would needlessly throw away every OTHER
+    # item's perfectly valid text. These three fields carry the last
+    # structurally-parseable JSON response (whichever of generate/repair
+    # produced it) even when the batch as a whole still fails, so a batched
+    # caller can re-validate each item's own text against its own table and
+    # keep the ones that are individually clean. A single-item caller
+    # (`narrate_finding`, `narrate_profile`, ...) ignores these three --
+    # `parsed`/`origin` alone already give it the right all-or-nothing
+    # answer for its one target.
+    attempted_parsed: dict | None = None
+    attempted_served_model_version: str | None = None
+    attempted_origin: str | None = None  # "model" | "model_repaired", whichever round attempted_parsed came from
 
 
 def _generation_line(generation: int) -> str:
@@ -258,10 +274,19 @@ def _generate_item(
         return NarrationOutcome("fallback_unavailable", None, [result.call_id], None, None)
 
     call_ids = [result.call_id]
+    # Best structurally-parseable response seen so far -- kept even once a
+    # later round fails, so a batched caller can still re-validate each
+    # item's own text if every round from here on turns out invalid.
+    attempted_parsed: dict | None = None
+    attempted_served_model_version: str | None = None
+    attempted_origin: str | None = None
     if result.status == "ok":
         is_valid, violations = validate_fn(result.parsed)
         if is_valid:
             return NarrationOutcome("model", result.parsed, call_ids, result.served_model_version, None)
+        attempted_parsed, attempted_served_model_version, attempted_origin = (
+            result.parsed, result.served_model_version, "model",
+        )
     else:
         violations = [{"rule_id": "N-SCHEMA", "field": None, "excerpt": (result.error or "")[:80]}]
 
@@ -285,10 +310,18 @@ def _generate_item(
                 "model_repaired", repair_result.parsed, call_ids, repair_result.served_model_version, None,
             )
         violations = violations2
+        attempted_parsed, attempted_served_model_version, attempted_origin = (
+            repair_result.parsed, repair_result.served_model_version, "model_repaired",
+        )
     else:
         violations = [{"rule_id": "N-SCHEMA", "field": None, "excerpt": (repair_result.error or "")[:80]}]
 
-    return NarrationOutcome("fallback_invalid", None, call_ids, None, violations)
+    return NarrationOutcome(
+        "fallback_invalid", None, call_ids, None, violations,
+        attempted_parsed=attempted_parsed,
+        attempted_served_model_version=attempted_served_model_version,
+        attempted_origin=attempted_origin,
+    )
 
 
 def _used_placeholder_names(texts: list[str], table: dict[str, PlaceholderEntry]) -> set[str]:
@@ -520,6 +553,60 @@ def _keyed_ids_by_target(items: list[dict]) -> dict[str, str]:
     return {finding_key(it): (it.get("finding_id") or it.get("candidate_id") or finding_key(it)) for it in items}
 
 
+def _persist_batch_items(
+    rc: RunnerContext, *, keyed_targets: dict[str, str], tables: dict[str, dict[str, PlaceholderEntry]],
+    outcome: NarrationOutcome, response_field: str, target_field: str, validate_field_name: str,
+) -> dict[str, str]:
+    """Shared persistence for a BATCHED narration call (`narrate_priority`,
+    `narrate_remediation`): one gateway call answers for every item, so
+    `outcome.origin`/`outcome.parsed` describe the call as a whole -- a
+    single item's own violation makes `_generate_item` discard the WHOLE
+    batch (§ `NarrationOutcome.attempted_parsed`'s own docstring). When that
+    happens here, re-validate each item's own text against its own table:
+    an item that is clean on its own keeps the model's text (origin =
+    whichever round -- generate or repair -- `attempted_parsed` came from);
+    only an item that is STILL wrong on its own falls back to template text.
+    This never loosens what counts as a violation -- `_validate_field` is
+    the exact same check `validate_fn` already ran; it only stops one bad
+    item from discarding every good one."""
+    out: dict[str, str] = {}
+    if outcome.origin == "fallback_invalid" and outcome.attempted_parsed:
+        entries_by_key = {e.get("key"): e for e in outcome.attempted_parsed.get("items", [])}
+        for key, target_id in keyed_targets.items():
+            entry = entries_by_key.get(key)
+            if entry is None:
+                out[target_id] = _persist(
+                    rc, target_kind="finding", target_id=target_id, field=target_field, origin="fallback_invalid",
+                    table={}, text=None, call_ids=outcome.call_ids, served_model_version=None,
+                    violations_payload=[{"rule_id": "N-X1", "field": "items", "excerpt": f"missing key {key!r}"[:80]}],
+                )
+                continue
+            text = entry.get(response_field, "")
+            item_violations = _validate_field(text, tables.get(key, {}), field=validate_field_name)
+            if item_violations:
+                out[target_id] = _persist(
+                    rc, target_kind="finding", target_id=target_id, field=target_field, origin="fallback_invalid",
+                    table={}, text=None, call_ids=outcome.call_ids, served_model_version=None,
+                    violations_payload=item_violations,
+                )
+            else:
+                out[target_id] = _persist(
+                    rc, target_kind="finding", target_id=target_id, field=target_field, origin=outcome.attempted_origin,
+                    table=tables.get(key, {}), text=text, call_ids=outcome.call_ids,
+                    served_model_version=outcome.attempted_served_model_version, violations_payload=None,
+                )
+        return out
+
+    by_key = {e["key"]: e.get(response_field) for e in (outcome.parsed or {}).get("items", [])} if outcome.parsed else {}
+    for key, target_id in keyed_targets.items():
+        out[target_id] = _persist(
+            rc, target_kind="finding", target_id=target_id, field=target_field, origin=outcome.origin,
+            table=tables.get(key, {}), text=by_key.get(key), call_ids=outcome.call_ids,
+            served_model_version=outcome.served_model_version, violations_payload=outcome.violations_payload,
+        )
+    return out
+
+
 def narrate_priority(rc: RunnerContext, items: list[dict], *, skill, period: tuple[str, str] | None) -> dict[str, str]:
     if not items:
         return {}
@@ -543,15 +630,10 @@ def narrate_priority(rc: RunnerContext, items: list[dict], *, skill, period: tup
         return not violations, violations
 
     outcome = _generate_item(rc, task="prioritise", payload=payload, schema=schema, extra_params={}, validate_fn=validate_fn)
-    by_key = {e["key"]: e.get("rationale") for e in (outcome.parsed or {}).get("items", [])} if outcome.parsed else {}
-    out: dict[str, str] = {}
-    for key, target_id in _keyed_ids_by_target(items).items():
-        out[target_id] = _persist(
-            rc, target_kind="finding", target_id=target_id, field="rationale", origin=outcome.origin,
-            table=tables.get(key, {}), text=by_key.get(key), call_ids=outcome.call_ids,
-            served_model_version=outcome.served_model_version, violations_payload=outcome.violations_payload,
-        )
-    return out
+    return _persist_batch_items(
+        rc, keyed_targets=_keyed_ids_by_target(items), tables=tables, outcome=outcome,
+        response_field="rationale", target_field="rationale", validate_field_name="rationale",
+    )
 
 
 def narrate_remediation(rc: RunnerContext, items: list[dict], *, skill, period: tuple[str, str] | None) -> dict[str, str]:
@@ -581,15 +663,10 @@ def narrate_remediation(rc: RunnerContext, items: list[dict], *, skill, period: 
         return not violations, violations
 
     outcome = _generate_item(rc, task="act", payload=payload, schema=schema, extra_params={}, validate_fn=validate_fn)
-    by_key = {e["key"]: e.get("remediation") for e in (outcome.parsed or {}).get("items", [])} if outcome.parsed else {}
-    out: dict[str, str] = {}
-    for key, target_id in _keyed_ids_by_target(items).items():
-        out[target_id] = _persist(
-            rc, target_kind="finding", target_id=target_id, field="remediation", origin=outcome.origin,
-            table=tables.get(key, {}), text=by_key.get(key), call_ids=outcome.call_ids,
-            served_model_version=outcome.served_model_version, violations_payload=outcome.violations_payload,
-        )
-    return out
+    return _persist_batch_items(
+        rc, keyed_targets=_keyed_ids_by_target(items), tables=tables, outcome=outcome,
+        response_field="remediation", target_field="remediation", validate_field_name="recommendation",
+    )
 
 
 def narrate_exec_summary(
