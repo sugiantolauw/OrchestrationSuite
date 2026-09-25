@@ -1975,6 +1975,14 @@ Asked how much the model should decide about findings at run time, the user chos
 - **The auditor sets the severity of an accepted proposal** with a dropdown. The model's proposed severity and reason are shown and stored alongside the decision.
 - **Auditors edit model text freely, but every typed number must equal a figure the finding cites**, or the edit is refused. Every edit is recorded (who, when, before/after).
 
+### Run start opens the run page at once (user decision, 2026-09-25)
+
+Measured live, "Start audit analysis" needed about 10 s once connections were warm, and about 20 s for the first run after an App start. Most of that is three Delta writes that must run in sequence. The user chose to open the run page at once:
+- The button navigates to `/run/<id>` within about 1 s, and the run record is written in the background.
+- Until the record exists, the page shows the existing "Queued" status. No new element is added.
+- If the App dies before the record is written, the click is lost and nothing is created. This is acceptable because no evidence exists yet.
+- A creation failure (contract, bindings, fingerprint) must still reach the user visibly on that page. It is never silent.
+
 ### Paused runs across a code deploy (user decision, 2026-09-24)
 
 A run pins the code revision it started on. When new code is deployed:
