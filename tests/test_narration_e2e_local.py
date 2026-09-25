@@ -300,6 +300,14 @@ def test_full_narration_e2e_accept_reject_edit_signoff_finalise_export(tmp_path)
         assert ai_row["decided_severity"] == "Medium"
         t1_row = next(r for r in findings_rows if r["test_id"] == "T1")
         assert "worth" in t1_row["observation"] and "total exposure" in t1_row["observation"]
+        # BUG-6 (independent review, 2026-09-25): sign-off already walked
+        # every rule finding's review_state to 'approved' before finalise
+        # ever ran (it is the first export-phase node); the accepted
+        # AI-proposed finding, materialised into `findings` for the first
+        # time by finalise, must carry the same review_state -- in Delta AND
+        # in this exported XLSX -- never the un-reviewed-looking 'draft'.
+        assert t1_row["review_state"] == "approved"
+        assert ai_row["review_state"] == "approved"
         xlsx_text = json.dumps([r for r in findings_rows], default=str)
         for sheet_name in wb.sheetnames:
             ws = wb[sheet_name]

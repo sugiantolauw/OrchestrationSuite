@@ -26,7 +26,7 @@ from __future__ import annotations
 import json
 
 from orchestrator.errors import NarrativeVersionMismatch
-from orchestrator.narration.placeholders import PlaceholderEntry, class_for_unit, render
+from orchestrator.narration.placeholders import NarrationConfigError, PlaceholderEntry, class_for_unit, render
 
 __all__ = [
     "LABEL_LLM_UNAVAILABLE",
@@ -115,10 +115,28 @@ def effective_prose(
         template_text = row.get("template_text")
         if template_text is None:  # defensive only (CLAUDE.md NN14) -- see module docstring
             return {"text": fallback_text, "status": "fallback_unavailable", "label": LABEL_LLM_UNAVAILABLE, "sources": []}
-        if is_list:
-            text = [render(item, table) for item in json.loads(template_text)]
-        else:
-            text = render(template_text, table)
+        try:
+            if is_list:
+                text = [render(item, table) for item in json.loads(template_text)]
+            else:
+                text = render(template_text, table)
+        except NarrationConfigError as exc:
+            # Defence in depth (independent review, 2026-09-25, BUG-4/BUG-4b):
+            # `render()` is only ever supposed to fail on text that skipped
+            # validation (its own docstring) -- reaching this means the
+            # CALLER's `table` does not match the one generation validated
+            # this row's `template_text` against (the actual bug lives
+            # wherever that table was built, and must be fixed there too).
+            # Regardless, a stored row must never crash a reader: show the
+            # reviewed template fallback and the existing NN13
+            # "model text failed validation" label, never the raw,
+            # un-renderable template_text and never a silent substitution
+            # (CLAUDE.md non-negotiable 14) -- `render_error` records what
+            # broke, visibly, for whoever reads this result.
+            return {
+                "text": fallback_text, "status": "render_error", "label": LABEL_MODEL_TEXT_INVALID,
+                "sources": [], "render_error": str(exc),
+            }
         return {"text": text, "status": origin, "label": accepted_label, "sources": row.get("sources") or []}
 
     label = _FALLBACK_LABELS.get(origin, LABEL_LLM_UNAVAILABLE)

@@ -311,7 +311,17 @@ def _candidate_to_finding(
         "exposure_amount": exposure_amount,
         "exposure_basis": exposure_basis,
         "theme_id": None,
-        "review_state": "draft",
+        # BUG-6 (independent review, 2026-09-25): `finalise` is the first
+        # EXPORT-phase node -- it runs only after `orchestrator.runs.
+        # sign_off` has already walked every RULE finding's review_state to
+        # 'approved' (`_advance_findings_to_approved`). An accepted
+        # AI-proposed candidate materialises into `findings` here for the
+        # first time, on that same signed-off run, so it must carry the
+        # SAME review_state a rule finding already has -- never the DDL's
+        # bare 'draft' default, which left it looking un-reviewed in Delta,
+        # the XLSX and the PPTX despite having been part of the sign-off
+        # that produced this export.
+        "review_state": "approved",
         "analyst_set_severity": True,
         "severity_basis": "ai_proposed",
         "monetary_basis": candidate.get("monetary_basis"),

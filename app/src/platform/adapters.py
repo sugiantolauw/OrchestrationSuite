@@ -256,6 +256,7 @@ def get_narration_review(run_id: str) -> dict | None:
     from orchestrator.catalogue_counts import catalogue_tests_for_skill
     from orchestrator.errors import RunNotFound
     from orchestrator.narration import resolve as narration_resolve
+    from orchestrator.narration.payloads import build_finding_table, build_theme_table
     from orchestrator.narration.run_values import run_values as narration_run_values
 
     ctx = get_context()
@@ -274,21 +275,35 @@ def get_narration_review(run_id: str) -> dict | None:
     narratives_by_target = {
         (r["target_kind"], r["target_id"], r["field"]): r for r in persistence.get_narratives(run_id)
     }
-    # One shared placeholder table for every resolution call below (see the
-    # docstring): every run metric by name, plus the `run_*` derived
-    # entries (finding/test counts, the exposure headline, the audit
-    # period) that only the exec summary cites -- `run_values` needs this
-    # run's Skill only to compute test counts at catalogue grain rather
-    # than the plan's larger sub-test grain; `[]` (no Skill resolved, e.g.
-    # an unconfirmed Explorer run) still gives a correct, just coarser,
-    # count.
+    # Base placeholder table, for targets whose citations are exactly this
+    # run's persisted metrics plus the `run_*` derived entries (the exec
+    # summary, and a candidate -- a candidate's own metrics_cited is always
+    # drawn straight from run_metrics, orchestrator.narration.payloads.
+    # build_candidates_payload). `run_values` needs this run's Skill only to
+    # compute test counts at catalogue grain rather than the plan's larger
+    # sub-test grain; `[]` (no Skill resolved, e.g. an unconfirmed Explorer
+    # run) still gives a correct, just coarser, count.
+    #
+    # A rule finding or a theme may ALSO cite a threshold_refs entry or
+    # exposure_amount (orchestrator.narration.payloads.build_finding_table) --
+    # names this base table does not carry. Independent review, 2026-09-25
+    # (BUG-4): rendering a legitimately-generated finding observation that
+    # cited a threshold against this base table alone raised an uncaught
+    # NarrationConfigError, taking down this whole read. Each finding/theme
+    # below therefore gets its OWN table, built the SAME way generation
+    # (orchestrator.narration.runner) built it -- the "same per-item table"
+    # rule orchestrator.service._narrative_table already follows for these
+    # two target kinds.
     skill = service.resolve_run_skill(ctx, state)
     catalogue_tests = catalogue_tests_for_skill(skill) if skill else []
     run_table = narration_run_values(state, findings, metrics, catalogue_tests=catalogue_tests)
-    table = {**narration_resolve.metrics_placeholder_table(list(metrics.keys()), metrics), **run_table}
+    base_table = {**narration_resolve.metrics_placeholder_table(list(metrics.keys()), metrics), **run_table}
+    period = tuple(state.audit_period) if state.audit_period else None
     generation = int((state.options or {}).get("narration_generation", 0) or 0)
 
-    def _resolve(*, target_kind: str, target_id: str, field: str, fallback_text=None, is_list: bool = False) -> dict:
+    def _resolve(
+        *, target_kind: str, target_id: str, field: str, table: dict, fallback_text=None, is_list: bool = False,
+    ) -> dict:
         row = narratives_by_target.get((target_kind, target_id, field))
         resolved = narration_resolve.effective_prose(
             target_kind=target_kind, target_id=target_id, field=field,
@@ -300,9 +315,10 @@ def get_narration_review(run_id: str) -> dict | None:
 
     findings_out = []
     for f in findings:
+        finding_table = build_finding_table(f, skill=skill, period=period) if skill is not None else base_table
         resolved = _resolve(
             target_kind="finding", target_id=f["finding_id"], field="observation",
-            fallback_text=f.get("observation"),
+            table=finding_table, fallback_text=f.get("observation"),
         )
         findings_out.append({
             "finding_id": f["finding_id"], "title": f.get("title"), "severity": f.get("severity"),
@@ -314,29 +330,34 @@ def get_narration_review(run_id: str) -> dict | None:
     for theme in themes_rows:
         if theme.get("generation") != generation or theme.get("superseded"):
             continue
-        title = _resolve(target_kind="theme", target_id=theme["theme_id"], field="title")
+        members = [findings_by_id[fid] for fid in theme.get("finding_ids", []) if fid in findings_by_id]
+        theme_table = build_theme_table(members, skill=skill) if skill is not None else base_table
+        title = _resolve(target_kind="theme", target_id=theme["theme_id"], field="title", table=theme_table)
         if title["text"] is None:
             continue
-        summary = _resolve(target_kind="theme", target_id=theme["theme_id"], field="summary")
+        summary = _resolve(target_kind="theme", target_id=theme["theme_id"], field="summary", table=theme_table)
         if summary["text"] is None:
             continue
-        root_cause = _resolve(target_kind="theme", target_id=theme["theme_id"], field="root_cause")
+        root_cause = _resolve(target_kind="theme", target_id=theme["theme_id"], field="root_cause", table=theme_table)
         review_observations = _resolve(
             target_kind="theme", target_id=theme["theme_id"], field="review_observations",
-            fallback_text=[], is_list=True,
+            table=theme_table, fallback_text=[], is_list=True,
         )
-        members = [findings_by_id[fid] for fid in theme.get("finding_ids", []) if fid in findings_by_id]
         themes_out.append({
             "theme_id": theme["theme_id"], "title": title, "summary": summary,
             "root_cause": root_cause, "review_observations": review_observations,
             "members": [{"severity": m.get("severity"), "title": m.get("title")} for m in members],
         })
 
-    exec_summary = _resolve(target_kind="run", target_id="run", field="exec_summary", fallback_text=[], is_list=True)
+    exec_summary = _resolve(
+        target_kind="run", target_id="run", field="exec_summary", table=base_table, fallback_text=[], is_list=True,
+    )
 
     candidates_out = []
     for c in candidates:
-        observation = _resolve(target_kind="candidate", target_id=c["candidate_id"], field="observation")
+        observation = _resolve(
+            target_kind="candidate", target_id=c["candidate_id"], field="observation", table=base_table,
+        )
         candidates_out.append({
             "candidate_id": c["candidate_id"], "rule_id": c.get("rule_id"), "title": c.get("title"),
             "proposed_severity": c.get("proposed_severity"), "severity_reason": c.get("severity_reason"),
