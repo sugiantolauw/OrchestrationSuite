@@ -51,6 +51,7 @@ FULL_STATE_KWARGS = dict(
     plan_confirmed=True,
     plan_edits=[{"field": "threshold", "old": 10, "new": 20}],
     confirmed_plan_hash="a" * 64,
+    review={"stage": "review", "prepared": {"actor": "alice", "at": "2026-02-01T00:00:00.000000Z", "role_source": "config"}},
     test_results=[{"test_id": "T5.1", "exceptions": 12}],
     flagged_table="run_1234_flags",
     reconciliation={"rows": 4200, "sum": 123456.78},

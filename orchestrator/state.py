@@ -95,6 +95,15 @@ class RunState:
     # and for an Explorer run before confirmation.
     confirmed_plan_hash: str | None = None
 
+    # P7 review workflow (docs/specs/P7_mapping_authoring_design.md §3.4): stage
+    # tracking for the preparer -> reviewer -> approver workflow that runs INSIDE
+    # awaiting_signoff (the status/phase state machine is unchanged -- this is a
+    # lifecycle field, not a status). Default None so a pre-P7 RunState JSON loads
+    # unchanged (from_json's **data omits the key entirely for an old row, and the
+    # dataclass default applies). Shape: {stage, prepared: {actor, at, role_source},
+    # reviewed: {...}, returns: [{actor, at, reason}]}.
+    review: dict | None = None
+
     # results — REFS AND SCALARS ONLY, never DataFrames
     test_results: list[dict] = field(default_factory=list)
     flagged_table: str | None = None
@@ -185,6 +194,7 @@ LIFECYCLE: frozenset[str] = frozenset(
         "plan_confirmed",
         "plan_edits",
         "confirmed_plan_hash",
+        "review",
         "signoff",
         "status_reason",
         "status",

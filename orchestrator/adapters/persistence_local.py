@@ -982,6 +982,91 @@ class LocalPersistence:
             updated["updated_at"] = now
         return _finding_dict_from_row(updated)
 
+    # ── P7 review workflow (docs/specs/P7_mapping_authoring_design.md §3.4) ─
+
+    def append_review_step(self, row: dict) -> None:
+        with self._writer() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO review_steps (step_id, run_id, engagement_id, action, actor, "
+                "role, matched_group, role_source, sod_mode, reason, theme_generation, "
+                "narration_generation, state_version, at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    row["step_id"], row["run_id"], row.get("engagement_id"), row["action"], row["actor"],
+                    row["role"], row.get("matched_group"), row["role_source"], row["sod_mode"],
+                    row.get("reason"), row.get("theme_generation"), row.get("narration_generation"),
+                    row["state_version"], row["at"],
+                ),
+            )
+
+    def list_review_steps(self, run_id: str) -> list[dict]:
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM review_steps WHERE run_id = ? ORDER BY at", (run_id,)
+            ).fetchall()
+        finally:
+            self._release(conn)
+        return [dict(r) for r in rows]
+
+    def add_review_note(self, row: dict) -> dict:
+        with self._writer() as conn:
+            conn.execute(
+                "INSERT INTO review_notes (note_id, engagement_id, run_id, finding_id, raised_by, "
+                "raised_at, body, state, raised_role, cleared_by, cleared_at, response, "
+                "responded_by, responded_at, cleared_role) "
+                "VALUES (?,?,?,?,?,?,?,'open',?,NULL,NULL,NULL,NULL,NULL,NULL)",
+                (
+                    row["note_id"], row.get("engagement_id"), row["run_id"], row.get("finding_id"),
+                    row["raised_by"], row["raised_at"], row["body"], row.get("raised_role"),
+                ),
+            )
+        return {
+            "note_id": row["note_id"], "engagement_id": row.get("engagement_id"), "run_id": row["run_id"],
+            "finding_id": row.get("finding_id"), "raised_by": row["raised_by"], "raised_at": row["raised_at"],
+            "body": row["body"], "state": "open", "raised_role": row.get("raised_role"),
+            "cleared_by": None, "cleared_at": None, "response": None, "responded_by": None,
+            "responded_at": None, "cleared_role": None,
+        }
+
+    def respond_review_note(
+        self, note_id: str, *, response: str, actor: str, role: str, now: str
+    ) -> bool:
+        with self._writer() as conn:
+            cur = conn.execute(
+                "UPDATE review_notes SET response = ?, responded_by = ?, responded_at = ? "
+                "WHERE note_id = ? AND state = 'open'",
+                (response, actor, now, note_id),
+            )
+            return cur.rowcount > 0
+
+    def clear_review_note(self, note_id: str, *, actor: str, role: str, now: str) -> bool:
+        with self._writer() as conn:
+            cur = conn.execute(
+                "UPDATE review_notes SET state = 'cleared', cleared_by = ?, cleared_at = ?, "
+                "cleared_role = ? WHERE note_id = ? AND state = 'open' AND response IS NOT NULL",
+                (actor, now, role, note_id),
+            )
+            return cur.rowcount > 0
+
+    def list_review_notes(self, run_id: str) -> list[dict]:
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM review_notes WHERE run_id = ? ORDER BY raised_at", (run_id,)
+            ).fetchall()
+        finally:
+            self._release(conn)
+        return [dict(r) for r in rows]
+
+    def reset_findings_review_state(self, run_id: str, *, actor: str, now: str) -> int:
+        with self._writer() as conn:
+            cur = conn.execute(
+                "UPDATE findings SET review_state = 'draft', updated_at = ? "
+                "WHERE run_id = ? AND review_state != 'approved'",
+                (now, run_id),
+            )
+            return cur.rowcount
+
     # ── node attempts ────────────────────────────────────────────────────────
 
     def begin_node_attempt(

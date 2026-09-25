@@ -340,6 +340,57 @@ class PersistenceAdapter(Protocol):
     def set_finding_review_state(self, finding_id: str, *, to_state: str, actor: str, now: str) -> dict:
         ...
 
+    # ── P7 review workflow (docs/specs/P7_mapping_authoring_design.md §3.4) ─
+
+    def append_review_step(self, row: dict) -> None:
+        """Idempotent insert by deterministic `step_id`
+        (`sha256(run_id:action:state_version)`, `orchestrator.runs`) into the
+        append-only `review_steps` evidence trail -- a replayed click under
+        the same CAS `state_version` is a no-op, never a duplicate row (the
+        same discipline `append_trace_event`/`append_narrative_edit` use)."""
+        ...
+
+    def list_review_steps(self, run_id: str) -> list[dict]:
+        ...
+
+    def add_review_note(self, row: dict) -> dict:
+        """Inserts one `review_notes` row (`note_id` supplied by the caller,
+        `orchestrator.runs`, the same `_trace_event_id`-style deterministic
+        hash pattern) with `state='open'`. Returns the inserted row."""
+        ...
+
+    def respond_review_note(
+        self, note_id: str, *, response: str, actor: str, role: str, now: str
+    ) -> bool:
+        """§3.3 "Respond to note": a conditional `UPDATE ... WHERE note_id = ?
+        AND state = 'open'` that sets `response`/`responded_by`/`responded_at`
+        -- the note stays `open` (only `clear_review_note` moves it to
+        `cleared`). Zero rows affected (already cleared, or a racing
+        response) returns False; the caller turns that into
+        ReviewActionRefused."""
+        ...
+
+    def clear_review_note(self, note_id: str, *, actor: str, role: str, now: str) -> bool:
+        """§3.3 "Clear note": a conditional `UPDATE ... WHERE note_id = ? AND
+        state = 'open' AND response IS NOT NULL` (a note must be responded
+        before it can be cleared) -- `state='cleared'`,
+        `cleared_by`/`cleared_at`/`cleared_role`. Zero rows affected (no
+        response yet, already cleared, or a racing clear) returns False."""
+        ...
+
+    def list_review_notes(self, run_id: str) -> list[dict]:
+        ...
+
+    def reset_findings_review_state(self, run_id: str, *, actor: str, now: str) -> int:
+        """§3.3 "Return to preparer": the ONLY backwards move in the
+        review_state lifecycle (draft/prepared/reviewed/approved) --
+        every one of this run's findings not already `approved` is reset to
+        `draft`, regardless of which state it was in, bypassing
+        `set_finding_review_state`'s forward-only single-step check
+        entirely. Candidate decisions are untouched (§3.3: "stand"). Returns
+        the number of findings reset."""
+        ...
+
     # ── P3 run outputs (CLAUDE.md §4.2, §9C) ────────────────────────────────
 
     def write_flagged_rows(self, run_id: str, rows: list[dict]) -> None:

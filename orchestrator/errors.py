@@ -559,3 +559,35 @@ class ConnectionPoolExhausted(TransientInfrastructureError):
             f"connection pool exhausted: no connection became available within "
             f"{timeout_s}s (pool max_size={max_size}, DBX_MAX_CONNECTIONS)"
         )
+
+
+class RoleLookupFailed(Exception):
+    """P7 review workflow (docs/specs/P7_mapping_authoring_design.md §3.5): the
+    configured `RoleResolver` could not determine this identity's roles -- the
+    SCIM lookup failed (network, permission, user not found) or the config
+    file is missing/malformed. Never falls back to another source (CLAUDE.md
+    NN14): the caller (orchestrator.runs review actions) turns this into a
+    ReviewActionRefused with the UI-R6 "Could not verify group membership"
+    message, never a silently-granted or silently-denied action."""
+
+    def __init__(self, email: str, detail: str):
+        self.email = email
+        self.detail = detail
+        super().__init__(f"could not resolve roles for {email!r}: {detail}")
+
+
+class ReviewActionRefused(Exception):
+    """P7 review workflow §3.3/§3.8 UI-R6: a preparer/reviewer/approver action
+    (edit, decide a candidate, mark prepared/reviewed, raise/respond/clear a
+    note, return, sign off) was refused -- wrong stage, wrong role, a
+    segregation-of-duties conflict, open notes outstanding, or a role lookup
+    failure. `reason` is always one of the exact UI-R6 strings the run page
+    renders through `_error_panel`, so the service layer never re-words it.
+    Every refusal is also recorded as a `review_action_refused` trace event
+    (§3.3) by the caller before this is raised to the web tier."""
+
+    def __init__(self, run_id: str, action: str, reason: str):
+        self.run_id = run_id
+        self.action = action
+        self.reason = reason
+        super().__init__(f"{action} refused for {run_id!r}: {reason}")

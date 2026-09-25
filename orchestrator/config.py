@@ -251,6 +251,25 @@ class Settings:
     # allow-list narrowing (falls back to walking every catalog/schema this
     # identity can read, minus the exclusions below) -- never a silent
     # narrowing nobody configured.
+    # P7 review workflow (docs/specs/P7_mapping_authoring_design.md §3.6):
+    # code default is "enforced" -- there is no environment where sign-off is
+    # silently unguarded unless a deployment explicitly opts into "labelled"
+    # (the dev-workspace override, D-P7-7). "labelled" still runs every role
+    # check; it only waives the distinct-person rule and labels the result.
+    review_sod_mode: str = "enforced"
+    review_role_source: str = "workspace_groups"
+    # Comma-separated exact workspace group display names (D-P7-6). Empty
+    # (the code default) means "not configured" -- orchestrator.identity's
+    # build_role_resolver refuses to build a workspace_groups resolver in
+    # enforced mode with any of these unset (ConfigError), rather than
+    # silently admitting every identity to every role.
+    review_preparer_groups: tuple[str, ...] = ()
+    review_reviewer_groups: tuple[str, ...] = ()
+    review_approver_groups: tuple[str, ...] = ()
+    # Gitignored YAML path, {email: [role, ...]} -- required iff
+    # review_role_source == "config" (orchestrator.identity.build_role_resolver
+    # raises ConfigError otherwise). Local backend / e2e tests only (§3.5).
+    review_role_assignments_path: str | None = None
     source_schemas: tuple[str, ...] = ()
     # A configurable exclusion list, same `catalog.schema` shape, for any
     # other internal/app schema that should never appear in source discovery
@@ -376,6 +395,12 @@ def load_settings(env: dict | None = None) -> Settings:
         pii_tag_names=_parse_csv(env.get("PII_TAG_NAMES")),
         source_schemas=_parse_csv(env.get("DBX_SOURCE_SCHEMAS")),
         excluded_schemas=_parse_csv(env.get("DBX_EXCLUDED_SCHEMAS")),
+        review_sod_mode=env.get("REVIEW_SOD_MODE") or "enforced",
+        review_role_source=env.get("REVIEW_ROLE_SOURCE") or "workspace_groups",
+        review_preparer_groups=_parse_csv(env.get("REVIEW_PREPARER_GROUPS")),
+        review_reviewer_groups=_parse_csv(env.get("REVIEW_REVIEWER_GROUPS")),
+        review_approver_groups=_parse_csv(env.get("REVIEW_APPROVER_GROUPS")),
+        review_role_assignments_path=env.get("REVIEW_ROLE_ASSIGNMENTS") or None,
     )
 
 
@@ -408,6 +433,18 @@ _RUNTIME_HASH_EXCLUDED_FIELDS = frozenset({
     # fingerprint (same reasoning as source_bindings_path above).
     "source_schemas",
     "excluded_schemas",
+    # P7 review workflow (§3.6): the review policy never changes a number or
+    # a finding, only who may act and when -- hashing it would make
+    # verify_fingerprint (run at every executor pass) refuse to export a
+    # paused run after a policy/group-name change with no effect on what was
+    # computed. The policy actually in force is instead recorded on every
+    # review_steps row and in RunState.signoff.
+    "review_sod_mode",
+    "review_role_source",
+    "review_preparer_groups",
+    "review_reviewer_groups",
+    "review_approver_groups",
+    "review_role_assignments_path",
 })
 
 
