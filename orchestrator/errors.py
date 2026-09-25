@@ -521,7 +521,29 @@ class MissingSeverityProvenance(Exception):
         )
 
 
-class ConnectionPoolExhausted(Exception):
+class TransientInfrastructureError(Exception):
+    """BUG-FINALISE-CONCURRENCY-1 (independent review round 3, 2026-09-25):
+    marks a failure as TRANSIENT infrastructure trouble that survived every
+    retry the persistence/data-source layer already attempts -- a Delta
+    concurrency conflict, a connection that could not be recovered, a
+    warehouse that could not be reached to open a new connection, or a
+    connection-pool checkout that timed out -- as distinct from a
+    deterministic failure (a contract violation, a validation error, a code
+    bug) that would fail again identically on retry.
+
+    orchestrator.pipeline's node-failure handling checks
+    `isinstance(exc, TransientInfrastructureError)` to route a node's own
+    exception to `interrupted` (resumable via the existing Resume action,
+    CLAUDE.md §2.3 rule 2's reaper/Resume machinery, orchestrator/status.py)
+    rather than `failed` (terminal, no outbound transition). Never raised
+    directly on its own -- every raise site wraps the underlying driver/
+    adapter exception via `from exc`, so the original message and traceback
+    are never lost, and every OTHER existing `except <SpecificType>` /
+    `_is_concurrency_error(...)`-style check elsewhere keeps working exactly
+    as before (this is an ADDITIONAL base class, not a replacement)."""
+
+
+class ConnectionPoolExhausted(TransientInfrastructureError):
     """CLAUDE.md NN14 (no silent defaults for missing data / fail loudly rather
     than guess): DeltaPersistence's connection pool (P3/P4 perf gap review
     2026-09-25, bounded-pool follow-up) has `max_size` connections all checked

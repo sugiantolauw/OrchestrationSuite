@@ -3,6 +3,8 @@ from __future__ import annotations
 import dataclasses
 
 from orchestrator import runs
+from orchestrator.contract import ContractViolation
+from orchestrator.errors import TransientInfrastructureError
 from orchestrator.pipeline import run_phase
 
 # B1/B2 pipeline-level behaviour: node output ownership, fingerprint verification on
@@ -247,3 +249,88 @@ def test_node_completed_trace_event_carries_the_nodes_own_message(local_persiste
     events = [e for e in persistence.list_trace_events(state.run_id) if e["node_name"] == "discover"]
     by_type = {e["event_type"]: e for e in events}
     assert by_type["node_completed"]["message"] == "3 source(s) bound"
+
+
+# ── BUG-FINALISE-CONCURRENCY-1 (independent review round 3, 2026-09-25) ────
+# transient infrastructure failures interrupt (resumable) rather than fail
+# (terminal) a run; deterministic failures still fail it.
+
+
+def test_transient_infrastructure_error_interrupts_the_run_and_resume_completes_it(local_persistence, clock):
+    persistence = local_persistence
+    fp = _fingerprint()
+    state = _create(persistence, clock, fp)
+
+    calls = {"n": 0}
+
+    def flaky_finalise(skill, state):
+        calls["n"] += 1
+        raise TransientInfrastructureError(
+            "Delta concurrency conflict persisted after 4 attempts: "
+            "[DELTA_CONCURRENT_APPEND.ROW_LEVEL_CHANGES] Transaction conflict detected"
+        )
+
+    nodes_for = {"fieldwork": {"plan": [], "execute": [], "export": [("finalise", flaky_finalise)]}}
+
+    # Force the run into the export phase, already signed off -- the exact
+    # shape the reported bug occurred in (finalise's own MERGE into
+    # `findings`, after sign-off already recorded).
+    loaded = persistence.load_state(state.run_id)
+    forced = dataclasses.replace(
+        loaded, phase="export", phase_epoch=loaded.state_version + 1, status="running",
+        next_node_index=0, signoff={"approver": "alice", "at": clock(), "self_approved": True},
+    )
+    state = persistence.save_state(forced)
+
+    final = run_phase(persistence, state.run_id, nodes_for=nodes_for, clock=clock, current_fingerprint=fp)
+
+    # interrupted, never failed -- CLAUDE.md §2.3 rule 2/§9C: failed is
+    # terminal (orchestrator/status.py ALLOWED_TRANSITIONS["failed"] == set()),
+    # which would strand this already-signed-off run forever.
+    assert final.status == "interrupted"
+    assert calls["n"] == 1
+    assert final.phase == "export"
+    assert final.next_node_index == 0  # finalise never advanced -- Resume re-attempts it, not the whole phase
+    assert final.signoff == {"approver": "alice", "at": final.signoff["at"], "self_approved": True}
+
+    attempts = [a for a in persistence.list_node_attempts(state.run_id) if a["node_name"] == "finalise"]
+    assert attempts[-1]["outcome"] == "interrupted"
+
+    # Resume: status.py's interrupted -> queued is allowed in every phase,
+    # including export after sign-off, and never re-does sign-off or
+    # changes any number already fixed by execute.
+    resumed = runs.resume(persistence, state.run_id, actor="alice", now=clock(), current_fingerprint=fp)
+    assert resumed.status == "queued"
+    assert resumed.signoff == final.signoff
+    assert resumed.phase == "export"
+    assert resumed.next_node_index == 0
+
+    # This time finalise succeeds (the transient conflict cleared) -- the
+    # run completes normally, exactly as if it had never been interrupted.
+    def working_finalise(skill, state):
+        calls["n"] += 1
+        return state
+
+    nodes_for["fieldwork"]["export"] = [("finalise", working_finalise)]
+    completed = run_phase(persistence, state.run_id, nodes_for=nodes_for, clock=clock, current_fingerprint=fp)
+    assert completed.status == "completed"
+    assert calls["n"] == 2
+    assert completed.signoff == final.signoff  # untouched throughout
+
+
+def test_deterministic_contract_violation_still_fails_the_run(local_persistence, clock):
+    persistence = local_persistence
+    fp = _fingerprint()
+
+    def bad_node(skill, state):
+        raise ContractViolation(["missing required column 'Employee ID'"])
+
+    nodes_for = {"fieldwork": {"plan": [("discover", bad_node)], "execute": [], "export": []}}
+    state = _create(persistence, clock, fp)
+
+    final = run_phase(persistence, state.run_id, nodes_for=nodes_for, clock=clock, current_fingerprint=fp)
+
+    assert final.status == "failed"
+    assert "ContractViolation" in (final.status_reason or "")
+    attempts = persistence.list_node_attempts(state.run_id)
+    assert attempts[0]["outcome"] == "failed"

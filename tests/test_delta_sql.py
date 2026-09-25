@@ -16,6 +16,7 @@ from orchestrator.errors import (
     RunAlreadyExists,
     RunNotFound,
     StaleStateError,
+    TransientInfrastructureError,
 )
 from orchestrator.state import RunState
 from tests.conftest import canonical_ts
@@ -246,6 +247,89 @@ def test_cas_retries_concurrency_error_when_version_unchanged_then_succeeds():
     result = p.save_state(_state(state_version=1))
     assert result.state_version == 2
     assert counters["update_attempts"] == 3
+
+
+# ── BUG-FINALISE-CONCURRENCY-1 (independent review round 3, 2026-09-25) ────
+# statement-level concurrency retry for a write OTHER than the run_state CAS
+# above -- e.g. `finalise`'s own MERGE into `findings`, reproduced here via
+# the simpler append_trace_event write path (same MERGE shape).
+
+
+def test_write_retries_a_concurrency_error_once_then_succeeds_no_exception():
+    calls = {"n": 0}
+
+    class Cur:
+        def execute(self, sql_text, params=None):
+            if sql_text.startswith("MERGE INTO cat1.sch1.trace_events"):
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    raise Exception(
+                        "[DELTA_CONCURRENT_APPEND.ROW_LEVEL_CHANGES] Transaction conflict "
+                        "detected. Please retry the operation."
+                    )
+            return self
+
+        def fetchone(self):
+            return None
+
+        def fetchall(self):
+            return []
+
+        def close(self):
+            pass
+
+    class Conn:
+        def cursor(self):
+            return Cur()
+
+        def close(self):
+            pass
+
+    p = DeltaPersistence(_settings(), connection_factory=lambda: Conn())
+    # No exception at all -- the caller never sees the transient conflict.
+    p.append_trace_event(
+        {
+            "event_id": "E1", "run_id": "RUN-1", "event_type": "node_completed", "event_time": canonical_ts(1),
+            "stage": "Exports", "status": "complete", "message": "done", "actor": "pipeline",
+        }
+    )
+    assert calls["n"] == 2  # failed once, succeeded on retry
+
+
+def test_write_wraps_persistent_concurrency_error_as_transient_infrastructure_error():
+    class Cur:
+        def execute(self, sql_text, params=None):
+            if sql_text.startswith("MERGE INTO cat1.sch1.trace_events"):
+                raise Exception(
+                    "[DELTA_CONCURRENT_APPEND.ROW_LEVEL_CHANGES] Transaction conflict "
+                    "detected. Please retry the operation."
+                )
+            return self
+
+        def fetchone(self):
+            return None
+
+        def fetchall(self):
+            return []
+
+        def close(self):
+            pass
+
+    class Conn:
+        def cursor(self):
+            return Cur()
+
+        def close(self):
+            pass
+
+    p = DeltaPersistence(_settings(), connection_factory=lambda: Conn())
+    with pytest.raises(TransientInfrastructureError, match="DELTA_CONCURRENT_APPEND"):
+        p.append_trace_event(
+            {
+                "event_id": "E1", "run_id": "RUN-1", "event_type": "node_completed", "event_time": canonical_ts(1),
+                "stage": "Exports", "status": "complete", "message": "done", "actor": "pipeline",
+            }
+        )
 
 
 def test_non_concurrency_exception_propagates():

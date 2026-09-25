@@ -652,6 +652,7 @@ class ThreadExecutor:
         logger.error("run_id=%s: admission exhausted after %d attempts, marked failed", run_id, attempts)
 
     def _run_one(self, run_id: str) -> None:
+        ctx = None
         try:
             ctx = self._ctx_factory(run_id)
             fingerprint = self._fingerprint_factory(run_id)
@@ -671,6 +672,26 @@ class ThreadExecutor:
             # failure-injection: "two resume requests racing on the same run --
             # exactly one must succeed, the other must get a CAS rejection").
             logger.info("run_id=%s: stale state on admission, skipping (another worker won)", run_id)
+        finally:
+            # BUG-UCPOOL-1 (independent review round 3, 2026-09-25) belt and
+            # braces: this NodeContext's data_source is built fresh by
+            # `self._ctx_factory` for EVERY executor pass (once per phase),
+            # and nothing else in the pipeline ever closes it. The pool fix
+            # in orchestrator.adapters.datasource_uc means a connection is
+            # never held across calls any more, so this is no longer
+            # load-bearing for leak prevention on its own -- but it is the
+            # one place that reliably runs after every pass (success,
+            # failure, or a HITL pause) and, for a caller with no shared
+            # pool (a private-pool UCTableDataSource, or a future data
+            # source implementation that DOES hold a per-instance
+            # connection), it is what actually releases it.
+            data_source = getattr(ctx, "data_source", None)
+            close = getattr(data_source, "close", None)
+            if close is not None:
+                try:
+                    close()
+                except Exception:
+                    logger.exception("run_id=%s: data_source.close() failed", run_id)
 
     def _on_done(self, run_id: str, future) -> None:
         with self._lock:
