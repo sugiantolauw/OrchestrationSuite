@@ -259,6 +259,67 @@ _EMPTY_NARRATION_REVIEW = {
 }
 
 
+def _read_narration_sources(ctx, persistence, run_id: str):
+    """The 5 independent per-run reads `get_narration_review` needs --
+    findings/run_metrics/candidates/themes/narratives -- each filters its own
+    table by `run_id` with no dependency on the others' results, so they were
+    5 sequential round trips for no reason: measured live (P3/P4 perf gap
+    review 2026-09-25, bounded-pool follow-up) at ~0.44-0.65s each, ~3.3s
+    total on top of the 1 `load_state` read -- well past CLAUDE.md §2.1's
+    "nothing over a couple of seconds ... runs in a callback". Run
+    concurrently via a small `ThreadPoolExecutor` instead, capped at the
+    number of reads (5) and never more than the persistence layer's own
+    connection pool (`max_connections`) -- launching more threads than the
+    pool can hand out connections to at once would just have them queue at
+    `checkout()`, not actually run any faster.
+
+    Results are assembled in the SAME fixed order as `reads` below,
+    regardless of which future finishes first -- deterministic output, not
+    a race. A failure in any read surfaces exactly as it would have
+    sequentially: nothing here catches or swallows a future's exception, so
+    the first `.result()` call that reaches a failed read re-raises it
+    synchronously, and the caller (and so the page) fails loudly rather
+    than assembling a partial result.
+
+    LocalPersistence (sqlite) keeps its EXACT current sequential behaviour
+    instead of parallelising. Its read methods (list_findings et al.) take
+    no lock of their own, and its `:memory:` mode (used by tests) shares
+    ONE `sqlite3.Connection` across every caller with no lock guarding
+    reads -- running 5 of them concurrently against that single shared
+    connection from different threads would be a new, unreviewed
+    thread-safety risk this change has no business introducing. Only the
+    Delta backend -- whose `DeltaPersistence` already hands each caller its
+    own connection from a bounded pool -- parallelises.
+
+    Checked by the PERSISTENCE INSTANCE's own type, not `ctx.backend`:
+    that field is a display/routing label ("local" | "uc") that several
+    real test fixtures build an `AppContext` around a real
+    `LocalPersistence` without bothering to set (it then defaults to "uc",
+    orchestrator/service.py's AppContext.backend), which would have made
+    this check parallelise against sqlite in exactly the harness this
+    docstring says must stay sequential -- found reviewing
+    app/tests/test_run_status_narration.py's `real_run` fixture, the one
+    behind the "still 6 statements" regression test below."""
+    from orchestrator.adapters.persistence_local import LocalPersistence
+
+    reads = (
+        persistence.list_findings,
+        persistence.get_run_metrics,
+        persistence.list_candidates,
+        persistence.list_themes,
+        persistence.get_narratives,
+    )
+    if isinstance(persistence, LocalPersistence):
+        return tuple(fn(run_id) for fn in reads)
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    max_workers = min(len(reads), max(1, getattr(ctx.settings, "max_connections", len(reads))))
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = [pool.submit(fn, run_id) for fn in reads]
+        return tuple(f.result() for f in futures)
+
+
 def get_narration_review(run_id: str, *, state=None) -> dict | None:
     """Resolves this run's model-written text and AI-proposed candidates for
     the `/run/<id>` review panel (UI-1/UI-2/UI-7). No `orchestrator.service`
@@ -308,12 +369,11 @@ def get_narration_review(run_id: str, *, state=None) -> dict | None:
         except RunNotFound:
             return None
 
-    findings = persistence.list_findings(run_id)
-    metrics = persistence.get_run_metrics(run_id)
-    candidates = persistence.list_candidates(run_id)
-    themes_rows = persistence.list_themes(run_id)
+    findings, metrics, candidates, themes_rows, narratives_rows = _read_narration_sources(
+        ctx, persistence, run_id
+    )
     narratives_by_target = {
-        (r["target_kind"], r["target_id"], r["field"]): r for r in persistence.get_narratives(run_id)
+        (r["target_kind"], r["target_id"], r["field"]): r for r in narratives_rows
     }
     # Base placeholder table, for targets whose citations are exactly this
     # run's persisted metrics plus the `run_*` derived entries (the exec
