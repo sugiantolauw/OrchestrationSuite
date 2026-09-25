@@ -645,3 +645,76 @@ def test_management_action_edit_survives_a_fresh_bundle_load_against_real_local_
         run_ctx.executor.stop()
         adapters._ctx = None
         workspace_tne._CACHE.clear()
+
+
+# ── CLAUDE.md §11 "Run cards on /runs (user decision, 2026-09-25)" View —
+# checked directly against a real backend rather than assumed ─────────────
+
+def test_workspace_layout_renders_an_awaiting_signoff_run_with_no_status_gate(monkeypatch, tmp_path):
+    """runs_page._view_target routes a SKILL-001-shaped run (has_workspace)
+    to /workspace/tne?run_id=<id> for BOTH Awaiting Signoff and Completed --
+    the task this test was written for required checking, not assuming,
+    that tne_workspace_layout actually renders an awaiting_signoff run
+    correctly (rather than only a completed one, which would have meant
+    routing Awaiting Signoff to /run/<id> instead). find/prioritise/act have
+    all run by this point (CLAUDE.md gap #6's own _ELIGIBLE_STATUSES_FOR_
+    TOTALS rationale: "a run in Awaiting Signoff has already run every test
+    and computed every number -- only export is outstanding") and
+    _load_bundle/get_run_payload (src/workspace_tne.py) build from whatever
+    a run has persisted so far with no status check at all -- confirmed here
+    against the REAL LocalPersistence backend, never fake_service.py."""
+    import time
+    from pathlib import Path as _Path
+
+    from orchestrator import service as real_service
+
+    repo_root = _Path(__file__).resolve().parents[2]
+    mini_skill_dir = repo_root / "tests" / "fixtures" / "skills" / "mini"
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    _write_tiny_mini_data(data_dir)
+
+    env = {
+        "ORCH_BACKEND": "local",
+        "ORCH_LOCAL_DB": str(tmp_path / "orch.db"),
+        "ORCH_LOCAL_DATA_ROOT": str(data_dir),
+        "ORCH_LOCAL_EXPORT_ROOT": str(tmp_path / "exports"),
+        "SKILLS_DIR": str(mini_skill_dir.parent),
+        "CODE_REVISION": "test-fixed-revision",
+    }
+    monkeypatch.setattr(adapters, "service", real_service)
+    adapters._ctx = None
+    original_build = real_service.build_app_context
+    monkeypatch.setattr(real_service, "build_app_context", lambda *a, **k: original_build(env))
+    workspace_tne._CACHE.clear()
+
+    run_ctx = adapters.get_context()
+    run_ctx.executor.start()
+    try:
+        bindings = real_service.suggest_bindings(run_ctx, "SKILL-MINI")
+        run_id = adapters.start_audit_run(
+            skill_id="SKILL-MINI", bindings=bindings, audit_period=("2026-01-01", "2026-02-28"),
+            objective="awaiting-signoff render check", run_owner="tester@example.com",
+        )
+
+        def _wait(statuses, timeout=15):
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                status = adapters.get_run(run_id)["status"]
+                if status in statuses:
+                    return status
+                time.sleep(0.05)
+            raise AssertionError(f"run {run_id} did not reach {statuses} in time")
+
+        status = _wait({"awaiting_signoff", "failed"})
+        assert status == "awaiting_signoff", adapters.get_run(run_id).get("status_reason")
+
+        layout = workspace_tne.tne_workspace_layout(run_id)
+        text = str(layout)
+        assert "could not be loaded" not in text
+        assert "No completed run yet" not in text
+        assert "Executive Brief" in text
+    finally:
+        run_ctx.executor.stop()
+        adapters._ctx = None
+        workspace_tne._CACHE.clear()

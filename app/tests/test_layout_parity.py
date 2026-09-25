@@ -141,6 +141,34 @@ def test_skill_library_page_matches_prototype(monkeypatch, reference_fixtures):
     assert _app_tree(skill_library_page()) == reference
 
 
+# Allow-list: CLAUDE.md §11 "Run cards on /runs (user decision, 2026-09-25)"
+# -- the run_card's Export and Trace buttons gain the same invisible
+# pattern-matching id treatment View already had (D2, docs/specs/P6_P8_
+# explorer_llm_design.md §12) so src/runs_page.py can wire them (no visible
+# change: tree.py's shape() ignores style entirely, and an id adds no new
+# element, text or className). One substitution pair per DEMO_AUDIT_RUNS
+# run_id, each anchored right after that run's own (already-present)
+# run-view-btn id so `_apply_allow_list`'s count==1 check stays meaningful
+# per run, rather than blindly replacing the first of several identical
+# "Button id=None class='ghost'" lines in the tree.
+def _run_card_export_trace_hidden_ids(reference_fixtures) -> list[tuple[str, str]]:
+    pairs = []
+    for run in reference_fixtures["DEMO_AUDIT_RUNS"]:
+        rid = run["run_id"]
+        old = (
+            f"Button id={{'type': 'run-view-btn', 'index': {rid!r}}} class=None\n"
+            "        Button id=None class='ghost'\n"
+            "        Button id=None class='ghost'"
+        )
+        new = (
+            f"Button id={{'type': 'run-view-btn', 'index': {rid!r}}} class=None\n"
+            f"        Button id={{'type': 'run-export-btn', 'index': {rid!r}}} class='ghost'\n"
+            f"        Button id={{'type': 'run-trace-btn', 'index': {rid!r}}} class='ghost'"
+        )
+        pairs.append((old, new))
+    return pairs
+
+
 def test_audit_runs_page_matches_prototype(monkeypatch, reference_fixtures):
     from src.platform import adapters
     from src.platform.pages import audit_runs_page
@@ -148,7 +176,8 @@ def test_audit_runs_page_matches_prototype(monkeypatch, reference_fixtures):
     monkeypatch.setattr(adapters, "list_audit_runs", lambda filters=None: reference_fixtures["DEMO_AUDIT_RUNS"])
     monkeypatch.setattr(adapters, "is_demo_mode", lambda: True)
 
-    assert _app_tree(audit_runs_page()) == _reference_tree("runs")
+    reference = _apply_allow_list(_reference_tree("runs"), _run_card_export_trace_hidden_ids(reference_fixtures))
+    assert _app_tree(audit_runs_page()) == reference
 
 
 def test_platform_trace_page_matches_prototype(monkeypatch, reference_fixtures):

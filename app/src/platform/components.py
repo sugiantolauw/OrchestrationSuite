@@ -162,9 +162,16 @@ def run_card(run: dict) -> html.Div:
         html.Div([
             html.Button("View", id={"type": "run-view-btn", "index": run["run_id"]},
                         style={"fontSize": 12, "padding": "4px 12px"}),
-            html.Button("Export", className="ghost",
+            # CLAUDE.md §11 "Run cards on /runs (user decision, 2026-09-25)":
+            # Export and Trace get the same invisible pattern-matching id
+            # treatment as View already had (D2, docs/specs/P6_P8_explorer_
+            # llm_design.md §12) so src/runs_page.py can wire them -- no
+            # visible change (tree.py's shape() -- tests/test_layout_
+            # parity.py -- ignores style entirely, and an id adds no new
+            # element, text or className).
+            html.Button("Export", className="ghost", id={"type": "run-export-btn", "index": run["run_id"]},
                         style={"fontSize": 12, "padding": "4px 12px", "width": "auto"}),
-            html.Button("Trace", className="ghost",
+            html.Button("Trace", className="ghost", id={"type": "run-trace-btn", "index": run["run_id"]},
                         style={"fontSize": 12, "padding": "4px 12px", "width": "auto"}),
         ], style={"display": "flex", "gap": 8, "marginTop": 10}),
     ], className="panel run-card")
