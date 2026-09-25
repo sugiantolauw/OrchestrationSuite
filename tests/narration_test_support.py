@@ -308,7 +308,15 @@ def happy_responses(*, model: str = "test-model-v1") -> dict[str, ModelResponse]
                 "schema_version": "exec-summary/1",
                 "paragraphs": [
                     "This run raised {count:run_finding_count} finding(s) across the tested population.",
-                    "The amount at risk this run identified totals {money:run_exposure_headline}.",
+                    # Round-5 narration-content review, item 2 (N-C1 on
+                    # exec_summary): this mini Skill's own two findings both
+                    # carry a real "spend" monetary_basis, so `run_values`
+                    # always resolves a real dominant contributor here --
+                    # the coverage rule now requires citing it by name and
+                    # amount, not only the headline total.
+                    "The amount at risk this run identified totals {money:run_exposure_headline}, "
+                    "driven mainly by {value:run_exposure_dominant_title}, which accounts for "
+                    "{money:run_exposure_dominant_amount} of that total.",
                 ],
             },
             model=model,

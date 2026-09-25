@@ -64,6 +64,7 @@ __all__ = [
     "validate_human_edit",
     "validate_id_set",
     "validate_themes",
+    "required_exec_summary_placeholders",
 ]
 
 # §3.4: "This is deterministic and documented in the validator constant
@@ -71,7 +72,7 @@ __all__ = [
 # lexicon addition, a coverage change, the sentence-split regex -- must bump
 # this, because it enters the run fingerprint's `prompt_template_version`
 # hash input (via the node that owns the fingerprint, outside N1's scope).
-NARRATION_VALIDATOR_VERSION = "2"
+NARRATION_VALIDATOR_VERSION = "3"
 
 # §3.4, the paragraph under the rule table: sentence boundaries for the
 # same-sentence exception in N-Q2, computed after placeholders have been
@@ -591,6 +592,36 @@ def validate_prose(
             violations.append(Violation("N-C1", f"missing required placeholder(s): {missing}"))
 
     return ValidationResult(valid=not violations, violations=tuple(violations), used_placeholders=frozenset(used_placeholders))
+
+
+def required_exec_summary_placeholders(table: Mapping[str, PlaceholderEntry]) -> frozenset[str]:
+    """N-C1, `exec_summary` only (round-5 narration-content review, item 2):
+    a live round-4 exec summary correctly cited `run_finding_count` and
+    `run_exposure_headline` but never said WHICH finding drives the
+    headline or how much of it -- it omitted `run_exposure_dominant_title`/
+    `run_exposure_dominant_amount` even though the payload declared them
+    (`orchestrator.narration.run_values._dominant_exposure_entries`) and
+    `exec_summary_user.md` explicitly asks the model to name them -- and
+    still passed, because `narrate_exec_summary`'s own coverage check never
+    looked at those two names. Same gating style as N-S5: a name is
+    required only when THIS item's own table actually declares it with a
+    real value (`entry.value is not None`) -- a clean run, or a run whose
+    exposure has no single dominant contributor, requires nothing extra,
+    and a finding-scoped table (which never carries these run-level names
+    at all, per `build_finding_table`) is unaffected. `run_finding_count`
+    is always required, matching the pre-existing behaviour this extends."""
+    required = {"run_finding_count"}
+    headline = table.get("run_exposure_headline")
+    if headline is not None and headline.value is not None:
+        required.add("run_exposure_headline")
+    dominant_amount = table.get("run_exposure_dominant_amount")
+    if dominant_amount is not None and dominant_amount.value is not None:
+        required.add("run_exposure_dominant_amount")
+        required.add("run_exposure_dominant_title")
+    approved_not_spent = table.get("run_approved_not_spent_total")
+    if approved_not_spent is not None and approved_not_spent.value is not None:
+        required.add("run_approved_not_spent_total")
+    return frozenset(required)
 
 
 def validate_human_edit(

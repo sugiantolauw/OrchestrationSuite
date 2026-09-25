@@ -75,7 +75,7 @@ from orchestrator.narration.schemas import (
     profile_narrative_schema,
     remediation_schema,
 )
-from orchestrator.narration.validate import validate_prose, validate_themes
+from orchestrator.narration.validate import required_exec_summary_placeholders, validate_prose, validate_themes
 
 __all__ = [
     "RunnerContext",
@@ -292,6 +292,7 @@ def _generate_item(
 
     repair_messages = rc.prompts.render_repair(
         task, violations_json=_canonical_json(violations), previous_output=result.text or "",
+        **extra_params,
     )
     repair_result = rc.gateway.call(
         task=task, seq=seq_repair, messages=repair_messages, desired_params=TASK_PROFILES[task].desired_params,
@@ -758,11 +759,7 @@ def narrate_exec_summary(
         for p in paragraphs:
             violations += _validate_field(p, table, field="exec_paragraph")
         used = _used_placeholder_names(paragraphs, table)
-        required = {"run_finding_count"}
-        headline = table.get("run_exposure_headline")
-        if headline is not None and headline.value is not None:
-            required.add("run_exposure_headline")
-        missing = required - used
+        missing = required_exec_summary_placeholders(table) - used
         if missing:
             violations.append({"rule_id": "N-C1", "field": "paragraphs", "excerpt": f"missing {sorted(missing)}"[:80]})
         return not violations, violations

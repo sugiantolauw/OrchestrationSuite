@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from orchestrator.narration.placeholders import PlaceholderEntry
 from orchestrator.narration.validate import (
+    required_exec_summary_placeholders,
     validate_human_edit,
     validate_id_set,
     validate_prose,
@@ -700,3 +701,107 @@ def test_n_h1_negative_percent_truncated_from_a_fraction_is_refused():
     mismatches = [v for v in r.violations if v.rule_id == "N-H1"]
     assert len(mismatches) == 1
     assert mismatches[0].text == "87%"
+
+
+# ---------------------------------------------------------------------------
+# N-C1, exec_summary only (round-5 narration-content review, item 2): a live
+# round-4 exec summary (RUN-05B9661A8D1A) correctly cited the finding count
+# and the exposure headline, but never said the amount-at-risk headline is
+# driven mainly by High-Value Claims ($318,785.60 of $324,614.65) -- and
+# still passed, because the coverage check never looked at
+# `run_exposure_dominant_title`/`_amount` even when the payload declared
+# them. `required_exec_summary_placeholders` (same gating style as N-S5:
+# required only when THIS item's own table declares a real value) closes
+# that gap. Text below is the real recorded prose (before_after.md, "AFTER
+# round 3"/"AFTER round 4"), placeholder-ized the way the model would have
+# written it, joined into one `validate_prose` call the same way
+# `narrate_exec_summary`'s own coverage check treats every paragraph
+# together.
+# ---------------------------------------------------------------------------
+EXEC_SUMMARY_TABLE = {
+    "run_finding_count": PlaceholderEntry("run_finding_count", "count", 11),
+    "run_exposure_headline": PlaceholderEntry("run_exposure_headline", "AUD", 324614.65),
+    "run_exposure_dominant_title": PlaceholderEntry(
+        "run_exposure_dominant_title", "value", "High-Value Claims Requiring Enhanced Scrutiny",
+    ),
+    "run_exposure_dominant_amount": PlaceholderEntry("run_exposure_dominant_amount", "AUD", 318785.60),
+    "run_exposure_dominant_basis": PlaceholderEntry("run_exposure_dominant_basis", "value", "spend"),
+    "run_approved_not_spent_total": PlaceholderEntry("run_approved_not_spent_total", "AUD", 182552.32),
+}
+
+
+def test_required_exec_summary_placeholders_requires_dominant_and_approved_not_spent_when_declared():
+    required = required_exec_summary_placeholders(EXEC_SUMMARY_TABLE)
+    assert required == frozenset(
+        {
+            "run_finding_count", "run_exposure_headline",
+            "run_exposure_dominant_amount", "run_exposure_dominant_title",
+            "run_approved_not_spent_total",
+        }
+    )
+
+
+def test_required_exec_summary_placeholders_omits_dominant_and_approved_not_spent_when_not_declared():
+    # A clean run's table, or a run with no single dominant contributor:
+    # `_dominant_exposure_entries` returns {} (payloads.py's own docstring),
+    # so neither name is present at all -- nothing extra is required, the
+    # same "omit rather than fabricate" no-op N-S5 already follows.
+    table = {"run_finding_count": PlaceholderEntry("run_finding_count", "count", 4)}
+    assert required_exec_summary_placeholders(table) == frozenset({"run_finding_count"})
+
+
+def test_required_exec_summary_placeholders_omits_dominant_when_its_value_is_none():
+    # `_money_passthrough_entry`-shaped: the placeholder NAME exists in the
+    # table (an unresolved run_metrics row) but its `value` is None -- still
+    # not required, matching every other rule's "never require citing a
+    # null value" behaviour (N-V1).
+    table = {
+        "run_finding_count": PlaceholderEntry("run_finding_count", "count", 4),
+        "run_exposure_dominant_amount": PlaceholderEntry("run_exposure_dominant_amount", "AUD", None),
+        "run_exposure_dominant_title": PlaceholderEntry("run_exposure_dominant_title", "value", None),
+        "run_approved_not_spent_total": PlaceholderEntry("run_approved_not_spent_total", "AUD", None),
+    }
+    assert required_exec_summary_placeholders(table) == frozenset({"run_finding_count"})
+
+
+ROUND_4_EXEC_SUMMARY_TEXT = (
+    "The audit identified duplicate expense claims, representing an amount at risk of "
+    "{money:dup_amount} across {count:dup_groups} groups of similar lines. This issue contributes "
+    "to the overall exposure headline of {money:run_exposure_headline} among "
+    "{count:run_finding_count} findings. Additionally, {money:run_approved_not_spent_total} was "
+    "approved but not spent and is reported separately."
+)
+
+
+def test_n_c1_negative_live_round4_exec_summary_omitting_the_dominant_contributor_is_flagged():
+    table = {
+        **EXEC_SUMMARY_TABLE,
+        "dup_amount": PlaceholderEntry("dup_amount", "AUD", 1994.79),
+        "dup_groups": PlaceholderEntry("dup_groups", "count", 29),
+    }
+    r = validate_prose(
+        ROUND_4_EXEC_SUMMARY_TEXT, table, field="exec_paragraph",
+        require_coverage=True, required_placeholders=required_exec_summary_placeholders(table),
+    )
+    hits = [v for v in r.violations if v.rule_id == "N-C1"]
+    assert len(hits) == 1
+    assert "run_exposure_dominant_amount" in hits[0].message
+    assert "run_exposure_dominant_title" in hits[0].message
+
+
+ROUND_3_EXEC_SUMMARY_TEXT = (
+    "Within the exposure headline of {money:run_exposure_headline} across "
+    "{count:run_finding_count} findings, the largest contributing finding is "
+    "{value:run_exposure_dominant_title}, accounting for {money:run_exposure_dominant_amount} "
+    "classified as {value:run_exposure_dominant_basis}. An additional amount of "
+    "{money:run_approved_not_spent_total} was approved but not spent and is reported separately "
+    "from the headline exposure."
+)
+
+
+def test_n_c1_positive_live_round3_exec_summary_naming_the_dominant_contributor_is_not_flagged():
+    r = validate_prose(
+        ROUND_3_EXEC_SUMMARY_TEXT, EXEC_SUMMARY_TABLE, field="exec_paragraph",
+        require_coverage=True, required_placeholders=required_exec_summary_placeholders(EXEC_SUMMARY_TABLE),
+    )
+    assert "N-C1" not in _rule_ids(r)
