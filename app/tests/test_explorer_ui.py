@@ -260,6 +260,8 @@ def test_full_explorer_flow_via_dash_callbacks(monkeypatch, real_ctx):
     """Start -> review rows (workflow_stage + include/exclude Checklist,
     D3/D4) -> exclude one test -> confirm -> run page, entirely through the
     registered Dash callbacks, against the real service/LocalPersistence."""
+    from src.run_setup import _explorer_source_options
+
     app = _make_app(real_ctx)
     flask_ctx = _fake_request(monkeypatch)
     try:
@@ -267,9 +269,16 @@ def test_full_explorer_flow_via_dash_callbacks(monkeypatch, real_ctx):
             responses={SONNET_ENDPOINT: _model_response(_wire_proposal(include_t2=True))}
         )
 
+        # D5a: the auditor ticks the checklist rather than anything being
+        # auto-picked -- this is the same option list
+        # refresh_explorer_source_checklist would have offered.
+        selected_sources = [opt["value"] for opt in _explorer_source_options("")]
+        assert selected_sources, "expected at least one governed source option"
+
         start_new_objective = _find_callback(app, inputs=[("explorer-start-btn", "n_clicks")])
         store_data, summary = start_new_objective(
             1, "Assess high value claims", AUDIT_PERIOD[0], AUDIT_PERIOD[1], None, None, None,
+            selected_sources,
         )
         assert store_data and store_data.get("run_id"), summary
         run_id = store_data["run_id"]
@@ -350,6 +359,8 @@ def test_explorer_degrades_gracefully_when_planner_unavailable(monkeypatch, tmp_
     FakeModelClient(responses={}) never actually needs an entry here --
     unlike a configured endpoint that the model genuinely fails to answer,
     which is a different (untested-here) failure shape."""
+    from src.run_setup import _explorer_source_options
+
     real_ctx = _real_ctx_for(monkeypatch, _build_real_service_env(tmp_path, model_sonnet=None))
     real_ctx.executor.start()
     app = _make_app(real_ctx)
@@ -357,9 +368,13 @@ def test_explorer_degrades_gracefully_when_planner_unavailable(monkeypatch, tmp_
     try:
         real_ctx.model_client = FakeModelClient(responses={})
 
+        selected_sources = [opt["value"] for opt in _explorer_source_options("")]
+        assert selected_sources, "expected at least one governed source option"
+
         start_new_objective = _find_callback(app, inputs=[("explorer-start-btn", "n_clicks")])
         store_data, summary = start_new_objective(
             1, "Assess high value claims", AUDIT_PERIOD[0], AUDIT_PERIOD[1], None, None, None,
+            selected_sources,
         )
         assert store_data and store_data.get("run_id"), summary
         run_id = store_data["run_id"]
@@ -471,15 +486,24 @@ def test_explorer_runs_are_listed_on_runs_trace_and_actions(monkeypatch, real_ct
     assert isinstance(actions, list)  # never crashes for a skill_id-less-in-repo Explorer run
 
 
-def test_explorer_source_candidates_reuses_governed_data_search(monkeypatch, real_ctx):
-    from src.run_setup import _explorer_source_candidates
+def test_explorer_source_options_reuses_governed_data_search(monkeypatch, real_ctx):
+    """(D5a) _explorer_source_options is the checklist's real options
+    builder -- it reuses adapters.search_governed_data the same way the old
+    auto-pick (_explorer_source_candidates) did, but returns every eligible
+    option for the auditor to tick rather than silently choosing for them."""
+    import json
+
+    from src.run_setup import _explorer_source_options
 
     flask_ctx = _fake_request(monkeypatch)
     try:
-        sources = _explorer_source_candidates()
+        options = _explorer_source_options("")
     finally:
         flask_ctx.pop()
-    assert {"kind": "local_file", "ref": "expense_report.csv"} in sources
+    decoded = [json.loads(opt["value"]) for opt in options]
+    assert {"kind": "local_file", "ref": "expense_report.csv"} in decoded
+    matching = [opt for opt in options if opt["label"] == "expense_report.csv"]
+    assert len(matching) == 1
 
 
 def test_landing_page_default_render_unchanged_by_explorer_wiring():
