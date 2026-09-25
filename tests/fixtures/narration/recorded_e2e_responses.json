@@ -1,0 +1,90 @@
+{
+  "synthetic_recording": true,
+  "note": "Recorded fixture, never a genuine model transcript (CLAUDE.md §6, 2026-09-23 recorded results: MODEL_SONNET is untestable in this workspace -- every call returns 403 rate-limit-0). Consumed only by tests/test_narration_e2e_local.py via DispatchingModelClient. Every placeholder below uses only the typed grammar (§3.1 of docs/specs/P6_narration_design.md) -- never a literal digit -- so it is schema- and validator-clean regardless of the run's own computed values.",
+  "responses": {
+    "find_t1": {
+      "schema_version": "finding-narration/1",
+      "finding_key": "T1",
+      "observation": "This run found {count:hv_count} high-value claim(s), totalling {money:hv_amount}.",
+      "recommendation": "Review high-value claims for legitimacy before reimbursement.",
+      "management_questions": ["What review step currently catches a claim like this before payment?"]
+    },
+    "find_t2": {
+      "schema_version": "finding-narration/1",
+      "finding_key": "T2",
+      "observation": "This run found {count:missing_count} claim(s) with no matching register entry, {pct:missing_pct} of the tested population.",
+      "recommendation": "Reconcile claims against the booking register before payment.",
+      "management_questions": ["What causes a claim to be missing its register match?"]
+    },
+    "synthesis": {
+      "schema_version": "finding-synthesis/1",
+      "themes": [
+        {
+          "title": "Expense review gaps",
+          "summary": "Both matters concern gaps in reviewing claims before they are reimbursed.",
+          "root_cause_hypothesis": "This pattern may reflect a review step that runs after payment rather than before it.",
+          "finding_keys": ["T1", "T2"],
+          "review_observations": []
+        }
+      ],
+      "severity_proposals": []
+    },
+    "priority": {
+      "schema_version": "priority-rationale/1",
+      "items": [
+        {"key": "T1", "rationale": "This matter carries a High severity rating in this run."},
+        {"key": "T2", "rationale": "This matter carries a Low severity rating in this run."}
+      ]
+    },
+    "remediation": {
+      "schema_version": "remediation/1",
+      "items": [
+        {"key": "T1", "remediation": "The travel and expense team should tighten review of high-value claims before reimbursement."},
+        {"key": "T2", "remediation": "The travel and expense team should reconcile claims against the booking register before payment."}
+      ]
+    },
+    "exec_summary": {
+      "schema_version": "exec-summary/1",
+      "paragraphs": [
+        "This run raised {count:run_finding_count} finding(s) across the tested population.",
+        "The amount at risk this run identified totals {money:run_exposure_headline}."
+      ]
+    },
+    "captions": {
+      "schema_version": "chart-captions/1",
+      "captions": [
+        {"chart_id": "severity_distribution", "caption": "This chart shows the count of findings at each severity level for this run."},
+        {"chart_id": "risk_and_exposure", "caption": "This chart shows the amount at risk identified by this run."}
+      ]
+    },
+    "profile": {
+      "schema_version": "profile-narrative/1",
+      "paragraphs": ["Source data completeness was reviewed for the sources used in this run."]
+    },
+    "candidates": {
+      "schema_version": "finding-candidates/1",
+      "candidates": [
+        {
+          "title": "Missing Register Match Amount",
+          "metrics_cited": ["missing_amount"],
+          "proposed_severity": "Low",
+          "severity_reason": "This is a modest amount relative to total spend.",
+          "rationale": "No rule finding currently writes up this test's dollar impact.",
+          "observation": "The claims missing a register match total {money:missing_amount} in this run.",
+          "recommendation": "Quantify the dollar impact of unmatched claims in the review.",
+          "management_questions": ["What is the dollar impact of claims missing a register match?"]
+        },
+        {
+          "title": "Missing Register Match Volume and Amount",
+          "metrics_cited": ["missing_amount", "missing_count"],
+          "proposed_severity": "Medium",
+          "severity_reason": "Combining count and amount together highlights both frequency and dollar impact.",
+          "rationale": "Citing both the count and the amount together may help gauge urgency.",
+          "observation": "This run found {count:missing_count} claim(s) missing a register match, totalling {money:missing_amount}.",
+          "recommendation": "Track both the count and the dollar impact of unmatched claims together.",
+          "management_questions": ["How many unmatched claims by dollar value should trigger escalation?"]
+        }
+      ]
+    }
+  }
+}
