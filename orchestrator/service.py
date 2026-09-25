@@ -122,9 +122,12 @@ from orchestrator.skills import Skill, load_skill, load_skill_from_ledger, plan_
 from orchestrator.source_bindings import (
     bindings_for_skill,
     load_source_bindings,
+    not_supplied_reasons,
     suggested_values,
     volume_file_paths,
 )
+from orchestrator.run_inputs import resolve_run_inputs
+from orchestrator.adapters.mapped_source import MappedDataSource
 from orchestrator.state import RunState, to_json
 from orchestrator.status import transition
 from orchestrator.timeutil import utc_now
@@ -227,6 +230,14 @@ def _local_data_source_factory(skills_dir: Path, data_root: Path) -> Callable[[d
 @functools.lru_cache(maxsize=8)
 def _load_source_bindings_cached(path: str) -> dict:
     return load_source_bindings(path)
+
+
+def not_supplied_sources_for_skill(ctx: AppContext, skill_id: str | None) -> dict[str, str]:
+    """`{source_name: reason}` for this Skill's configured `kind:
+    not_supplied` SOURCE_BINDINGS entries (independent review 2026-09-25
+    item 1, "run inputs") -- the set app/src/run_setup.py's `_auto_bind`
+    treats as bound (no physical value required) rather than missing."""
+    return not_supplied_reasons(configured_bindings_for_skill(ctx, skill_id))
 
 
 def configured_bindings_for_skill(ctx: AppContext, skill_id: str | None) -> dict[str, dict]:
@@ -580,14 +591,35 @@ def _describe_edit(edit: dict) -> str:
     return f"{op} edit"
 
 
+def _run_inputs_hash(run_inputs: dict) -> str | None:
+    """sha256 of the canonical JSON of a resolved run_inputs dict -- None
+    when there is nothing declared, so run_fingerprints.run_inputs_hash and
+    the fingerprint_id computation both stay untouched for the common case
+    of a run with no column mappings/parameters/unsupplied sources
+    (independent review 2026-09-25 item 1, docs/specs/
+    P7_mapping_authoring_design.md §1.3)."""
+    if not run_inputs or not (run_inputs.get("mappings") or run_inputs.get("not_supplied") or run_inputs.get("parameters")):
+        return None
+    payload = json.dumps(run_inputs, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def _compute_run_fingerprint(
     ctx: AppContext, skill_dir: Path, source_table_versions: dict[str, str],
     uploaded_file_hashes: dict[str, str] | None = None,
+    run_inputs: dict | None = None,
 ) -> dict:
     reference_dir = skill_dir / "reference"
     reference_files = (
         sorted(p for p in reference_dir.rglob("*") if p.is_file()) if reference_dir.is_dir() else []
     )
+    # Independent review 2026-09-25 item 1 (§1.3 "Fingerprint"): a run's own
+    # parameter files (population-of-interest overrides etc.) are pinned
+    # reference data too, so they join the Skill's own reference/ files in
+    # run_fingerprints.reference_data_hashes -- the same field the RBA
+    # exchange-rate snapshot, city->country and supplier lists already use.
+    for param in (run_inputs or {}).get("parameters", {}).values():
+        reference_files.append(Path(param["path"]))
     return compute_fingerprint(
         settings=ctx.settings,
         source_table_versions=source_table_versions,
@@ -597,6 +629,7 @@ def _compute_run_fingerprint(
         prompts_dirs=[skill_dir / "prompts"],
         reference_files=reference_files,
         code_revision=None,
+        run_inputs_hash=_run_inputs_hash(run_inputs or {}),
     )
 
 
@@ -618,8 +651,13 @@ def build_node_context(ctx: AppContext, state: RunState) -> NodeContext:
     if state.mode == "explorer":
         data_source = _build_explorer_data_source(ctx, state)
     else:
-        bindings = {b["source"]: b["table_fqn"] for b in state.data_assets}
+        # Independent review 2026-09-25 item 1: a not_supplied source has no
+        # table_fqn at all -- never handed to the factory as a binding.
+        bindings = {b["source"]: b["table_fqn"] for b in state.data_assets if b.get("table_fqn") is not None}
         data_source = ctx.data_source_factory(bindings, skill.contract.get("sources", {}), state.skill_id)
+        mappings = ((state.options or {}).get("run_inputs") or {}).get("mappings")
+        if mappings:
+            data_source = MappedDataSource(data_source, mappings)
 
     # §4.12 item 2: an Explorer run's plan node needs a live LLMGateway/
     # FilePromptRepository pair; Playbook's execute-phase nodes (unchanged
@@ -736,7 +774,12 @@ def build_run_fingerprint(ctx: AppContext, state: RunState) -> dict:
     uploaded_file_hashes = _flat_file_hashes(
         ctx, state.skill_id, {b["table_fqn"]: b["version"] for b in state.data_assets}
     )
-    return _compute_run_fingerprint(ctx, skill_dir, pinned_versions, uploaded_file_hashes)
+    # Independent review 2026-09-25 item 1 (§1.3 "At resume, the current
+    # fingerprint is recomputed from state.options['run_inputs'], never by
+    # re-reading the bindings file"): editing SOURCE_BINDINGS after this run
+    # started never affects a run in flight.
+    run_inputs = (state.options or {}).get("run_inputs")
+    return _compute_run_fingerprint(ctx, skill_dir, pinned_versions, uploaded_file_hashes, run_inputs=run_inputs)
 
 
 def build_app_context(env: dict | None = None) -> AppContext:
@@ -1445,25 +1488,41 @@ def start_audit_run(
     skill_dir = skill.skill_dir
 
     contract_sources = skill.contract.get("sources", {})
-    missing = sorted(set(contract_sources) - set(bindings))
+
+    # Independent review 2026-09-25 item 1 ("run inputs" -- docs/specs/
+    # P7_mapping_authoring_design.md §1.3): a source configured
+    # kind=not_supplied needs no caller-given binding at all -- only the
+    # REQUIRED (not not_supplied) sources are missing-checked below.
+    configured = configured_bindings_for_skill(ctx, skill_id)
+    not_supplied = not_supplied_reasons(configured)
+    required_sources = sorted(set(contract_sources) - set(not_supplied))
+    missing = sorted(set(required_sources) - set(bindings))
     if missing:
         raise ContractViolation([f"no binding supplied for contract source {s!r}" for s in missing])
 
     data_source = ctx.data_source_factory(bindings, contract_sources, skill_id)
 
-    # Resolve every source's version FIRST, before any read (CLAUDE.md §4.1
-    # TOCTOU ordering) -- these become both this run's pinned data_assets
-    # bindings and the fingerprint's source_table_versions.
-    #
-    # P3/P4 perf gap review (2026-09-25): resolve_source_versions (not a
-    # per-source resolve_version() loop) lets a UC-backed/Volume-aware data
-    # source resolve all of a Skill's sources concurrently, on a bounded pool
-    # of connections, instead of one DESCRIBE HISTORY/file-hash at a time --
-    # live measurement showed SKILL-001's 8 sources taking 13.0s resolved
-    # sequentially. Still resolved before any read either way; this only
-    # changes how the resolutions themselves run.
     try:
-        source_versions = data_source.resolve_source_versions(list(contract_sources))
+        # Resolve every source's version FIRST, before any read (CLAUDE.md
+        # §4.1 TOCTOU ordering) -- these become both this run's pinned
+        # data_assets bindings and the fingerprint's source_table_versions.
+        # Only required (supplied) sources are resolved: a not_supplied
+        # source has no binding to resolve against.
+        #
+        # P3/P4 perf gap review (2026-09-25): resolve_source_versions (not a
+        # per-source resolve_version() loop) lets a UC-backed/Volume-aware
+        # data source resolve all of a Skill's sources concurrently, on a
+        # bounded pool of connections, instead of one DESCRIBE HISTORY/file-
+        # hash at a time -- live measurement showed SKILL-001's 8 sources
+        # taking 13.0s resolved sequentially. Still resolved before any read
+        # either way; this only changes how the resolutions themselves run.
+        source_versions = data_source.resolve_source_versions(required_sources)
+
+        # Independent review 2026-09-25 item 1: validated on the SAME
+        # resolve-only, UNWRAPPED adapter -- a declared mapping's physical
+        # column name is checked against the source's real header, which a
+        # MappedDataSource wrapper would have already renamed away.
+        run_inputs = resolve_run_inputs(skill, configured, data_source, source_versions=source_versions)
     finally:
         # This resolve-only data source is never reused past this point
         # (a fresh instance is built for the run's own executor pass, via
@@ -1479,13 +1538,8 @@ def start_audit_run(
     # fingerprint records not just WHAT version was read but that it came
     # from a flat file, not a governed table.
     uploaded_file_hashes = _flat_file_hashes(
-        ctx, skill_id, {bindings[name]: source_versions[name] for name in contract_sources}
+        ctx, skill_id, {bindings[name]: source_versions[name] for name in required_sources}
     )
-
-    now = ctx.clock()
-    fingerprint = _compute_run_fingerprint(ctx, skill_dir, source_versions, uploaded_file_hashes)
-
-    _ensure_skill_registered(ctx, skill, run_owner, now)
 
     # data_assets is NODE_OWNED (the `discover` node's field), but bindings
     # must already be present for `discover` to validate against -- exactly
@@ -1498,10 +1552,28 @@ def start_audit_run(
     # (find_runs(["queued"])) the instant the row lands, and a second write
     # here racing that executor's own first CAS transition would lose --
     # StaleStateError, observed live against a real deployed App.
+    #
+    # A not_supplied source carries no table_fqn/version at all (independent
+    # review 2026-09-25 item 1 §1.3 "data_assets entry") -- never a
+    # fabricated binding for a source this run never reads.
     data_assets = [
-        {"source": name, "table_fqn": bindings[name], "version": source_versions[name]}
+        {"source": name, "table_fqn": bindings.get(name), "version": source_versions.get(name)}
+        if name not in not_supplied
+        else {"source": name, "table_fqn": None, "version": None, "not_supplied": not_supplied[name]}
         for name in contract_sources
     ]
+
+    now = ctx.clock()
+    # build_run_fingerprint (resume/verify) reconstructs source_table_versions
+    # from data_assets the SAME way -- {b["source"]: b["version"] for b in
+    # state.data_assets} -- so this must match it exactly, None for every
+    # not_supplied source included.
+    fingerprint_source_versions = {d["source"]: d["version"] for d in data_assets}
+    fingerprint = _compute_run_fingerprint(
+        ctx, skill_dir, fingerprint_source_versions, uploaded_file_hashes, run_inputs=run_inputs,
+    )
+
+    _ensure_skill_registered(ctx, skill, run_owner, now)
 
     # generate_management_actions/jira_preview_requested are recorded here,
     # real and visible on the run (RunState.options, never fabricated), but
@@ -1509,10 +1581,17 @@ def start_audit_run(
     # -- that is pipeline-node work this change does not make (see the UI
     # task's report). Recording them now means no run ever silently drops
     # what the auditor asked for; it is simply not enforced yet.
+    #
+    # review_plan_first is forced True whenever this run has any declared
+    # run input (independent review 2026-09-25 item 1 §1.3 "Mandatory plan
+    # confirmation") -- orchestrator.status's own phase-change gate enforces
+    # this independently, so this is belt-and-braces, not the only guard.
+    has_run_inputs = bool(run_inputs.get("mappings") or run_inputs.get("not_supplied") or run_inputs.get("parameters"))
     options = {
-        "auto_confirm_plan": not review_plan_first,
+        "auto_confirm_plan": not review_plan_first and not has_run_inputs,
         "generate_management_actions": generate_management_actions,
         "jira_preview_requested": jira_preview_requested,
+        "run_inputs": run_inputs,
     }
     state = runs_module.create_run(
         ctx.persistence,
@@ -1532,6 +1611,18 @@ def start_audit_run(
         fingerprint=fingerprint,
         now=now,
     )
+
+    if has_run_inputs:
+        n_mappings = len(run_inputs.get("mappings") or {})
+        n_parameters = len(run_inputs.get("parameters") or {})
+        n_not_supplied = len(run_inputs.get("not_supplied") or {})
+        message = (
+            f"{n_mappings} column mapping(s), {n_parameters} parameter(s), "
+            f"{n_not_supplied} source(s) not supplied"
+        )
+        runs_module._emit(
+            ctx.persistence, state, event_type="run_inputs_applied", actor=run_owner, message=message, now=now,
+        )
 
     if ctx.executor is not None:
         ctx.executor.start(state.run_id, state.phase)

@@ -11,7 +11,7 @@ from orchestrator.contract import ContractViolation, validate_contract
 from orchestrator.findings import build_findings
 from orchestrator.populations import PopulationContext, PopulationResult, build_populations
 from orchestrator.primitives import PRIMITIVES, PrimitiveContext, PrimitiveParamsError, run_primitive
-from orchestrator.skills import Skill
+from orchestrator.skills import Skill, _test_flag_names
 
 _FLAG_COLUMNS = ["__source", "__row_key", "flag", "group_id"]
 
@@ -180,6 +180,7 @@ def execute_skill(
     audit_period: tuple[str, str],
     run_context: dict,
     pinned_versions: dict[str, str] | None = None,
+    not_supplied: dict[str, str] | None = None,
 ) -> ExecutionResult:
     """The `execute` node's logic (CLAUDE.md §4.2): resolves every source version
     first, reads with that pinned version (TOCTOU ordering, §4.1), validates every
@@ -194,7 +195,15 @@ def execute_skill(
     gets read (CLAUDE.md §4.1 TOCTOU ordering, closing the exact gap this
     function's docstring used to name as a known one). When absent, the
     resolve-first behaviour is unchanged -- existing callers (Surface 2, the
-    engine's own tests) that never pinned a version keep working."""
+    engine's own tests) that never pinned a version keep working.
+
+    `not_supplied`, when given, is `{source: reason}` for a contract source
+    this run's declared run inputs marked not_supplied (independent review
+    2026-09-25 item 1, docs/specs/P7_mapping_authoring_design.md §1.3): that
+    source is never read, no population built on it exists, and every test
+    that depends on it (via `skill.test_sources`) becomes `not_testable`
+    with a reason naming it -- rather than crashing on a missing source."""
+    not_supplied = not_supplied or {}
     contract_sources = skill.contract.get("sources", {})
 
     # CLAUDE.md §0.5/NN14, independent test-gap audit #13/H9: an audit period
@@ -212,15 +221,16 @@ def execute_skill(
              "concept and cannot be evaluated without one (CLAUDE.md §0.5, NN14)"]
         )
 
+    required_sources = [name for name in contract_sources if name not in not_supplied]
     if pinned_versions is not None:
-        missing = sorted(set(contract_sources) - set(pinned_versions))
+        missing = sorted(set(required_sources) - set(pinned_versions))
         if missing:
             raise ValueError(f"pinned_versions is missing contract source(s): {missing}")
-        source_versions: dict[str, str] = {name: pinned_versions[name] for name in contract_sources}
+        source_versions: dict[str, str] = {name: pinned_versions[name] for name in required_sources}
     else:
-        source_versions = {name: data_source.resolve_version(name) for name in contract_sources}
+        source_versions = {name: data_source.resolve_version(name) for name in required_sources}
     raw_sources: dict[str, dict] = {}
-    for name in contract_sources:
+    for name in required_sources:
         df = data_source.read_population(name, version=source_versions[name], audit_timezone=audit_timezone)
         validate_contract(df, contract_sources[name])
         raw_sources[name] = {"df": df, "version": source_versions[name]}
@@ -232,7 +242,14 @@ def execute_skill(
         thresholds=skill.thresholds,
         custom_derivations=skill.custom_derivations,
     )
-    populations = build_populations(skill.plan.get("populations", {}), pop_ctx)
+    # A population built on a not_supplied source is never built at all --
+    # build_populations would otherwise raise PopulationError the instant it
+    # tries to look the source up in pop_ctx.sources.
+    all_populations_cfg = skill.plan.get("populations", {})
+    populations_cfg = {
+        name: cfg for name, cfg in all_populations_cfg.items() if cfg.get("source") not in not_supplied
+    }
+    populations = build_populations(populations_cfg, pop_ctx)
 
     prim_ctx = PrimitiveContext(
         populations=populations,
@@ -266,6 +283,23 @@ def execute_skill(
             # true null -- never 0 -- so a downstream renderer can tell "not
             # tested" apart from "tested and no breach".
             not_testable_flag_columns.update(test["not_testable"].get("flags", []))
+            continue
+
+        blocked_sources = sorted(skill.test_sources.get(test_id, set()) & set(not_supplied))
+        if blocked_sources:
+            reason = "; ".join(
+                f"source {s!r} not supplied for this run: {not_supplied[s]}" for s in blocked_sources
+            )
+            test_results.append(
+                {
+                    "test_id": test_id,
+                    "status": "not_testable",
+                    "reason": reason,
+                    "metric_names": [],
+                    "exception_units": 0,
+                }
+            )
+            not_testable_flag_columns.update(_test_flag_names(test))
             continue
 
         result = _run_test_primitive(skill, test["primitive"], prim_ctx, test["params"])

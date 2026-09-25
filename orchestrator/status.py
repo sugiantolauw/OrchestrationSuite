@@ -38,9 +38,22 @@ _PHASE_REQUIRED_FOR_STATUS: dict[str, str] = {
 # needs. Explorer mode can never satisfy the auto-confirm clause because it checks
 # `mode == "playbook"` explicitly -- Explorer can only pass via plan_confirmed, which
 # only the explicit confirm_plan() call sets.
+def _has_run_inputs(state: RunState) -> bool:
+    """Independent review 2026-09-25 item 1 ("run inputs"): a run with any
+    declared column mapping, parameter override or unsupplied source makes
+    plan confirmation mandatory even in Playbook -- the auditor confirms
+    what they can see (docs/specs/P7_mapping_authoring_design.md §1.3
+    "Mandatory plan confirmation"). start_audit_run also forces
+    auto_confirm_plan=False whenever this is true, so the state machine
+    enforces it independently of what the caller passed."""
+    run_inputs = (state.options or {}).get("run_inputs") or {}
+    return bool(run_inputs.get("mappings") or run_inputs.get("not_supplied") or run_inputs.get("parameters"))
+
+
 _PHASE_CHANGE_GATES: dict[tuple[str, str], Callable[[RunState], bool]] = {
     ("plan", "execute"): lambda s: bool(
-        s.plan_confirmed or (s.mode == "playbook" and bool(s.options.get("auto_confirm_plan")))
+        s.plan_confirmed
+        or (s.mode == "playbook" and bool(s.options.get("auto_confirm_plan")) and not _has_run_inputs(s))
     ),
     ("execute", "export"): lambda s: s.signoff is not None,
 }
