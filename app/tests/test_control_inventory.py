@@ -45,6 +45,7 @@ were, not a quiet fourth line here."""
 from __future__ import annotations
 
 import json
+import sys
 import time
 from pathlib import Path
 
@@ -66,6 +67,32 @@ from src.platform.pages import (
 )
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
+
+# tests/test_run_status_narration.py's own module docstring/comment explains
+# this in full: the bare name `tests` is a namespace package straddling both
+# app/tests/ (this directory) and the repo root's own tests/ (neither has an
+# __init__.py), and whichever directory sys.path favours first at the FIRST
+# `import tests.<something>` sticks as that namespace package's search order
+# for the rest of the process. Reordering the repo root ahead of app/ here,
+# before the `tests.n9_test_support`/`tests.narration_test_support` imports
+# below, is what makes `import tests.conftest` (pulled in transitively by
+# n9_test_support -> narration_test_support -> tests.conftest.canonical_ts)
+# resolve to the repo root's own tests/conftest.py rather than this
+# directory's own conftest.py (which has no canonical_ts). app/'s own path
+# stays on sys.path (just behind the repo root now), so `import src...`
+# elsewhere in this file is unaffected.
+_repo_root_str = str(_REPO_ROOT)
+if _repo_root_str in sys.path:
+    sys.path.remove(_repo_root_str)
+sys.path.insert(0, _repo_root_str)
+
+from tests.conftest import canonical_ts  # noqa: E402
+from tests.n9_test_support import FIELDWORK_NODES_FOR, app_context_for  # noqa: E402
+from tests.narration_test_support import (  # noqa: E402
+    DispatchingModelClient,
+    happy_responses,
+    make_narration_harness,
+)
 
 
 # ── Generic component-tree walker ────────────────────────────────────────
@@ -184,23 +211,10 @@ def _href_resolves(href: str | None, anchors: set[str]) -> bool:
 
 # ── (c) intentionally inert, with a reason ──────────────────────────────
 
-# CLAUDE.md §11 "UI is the prototype's, exactly" means these three controls
-# were ported faithfully from reference_app/src/platform/pages.py's own
-# Skill Library search/filter row -- but unlike /trace's `trace-run-filter`
-# (BUG-TRACE-1) and /runs' `runs-skill-filter`/`runs-status-filter`
-# (BUG-RUNS-1), which this build's own src/trace_page.py and
-# src/runs_page.py already wire, NOTHING in src/ or tests/ wires a callback
-# to any of these three -- confirmed here, not assumed, the same way
-# BUG-TRACE-1/BUG-RUNS-1 were confirmed before being fixed. This is a REAL,
-# UNFIXED GAP of the identical shape, found by this test and reported in
-# this phase's report rather than silently wired (out of this task's scope)
-# or silently dropped (this allow-list entry is what keeps that visible
-# instead of the test just going green with no record of it).
-_INTENTIONALLY_INERT: set[tuple[str, str]] = {
-    ("Input", "skill-search"),
-    ("Dropdown", "skill-domain-filter"),
-    ("Dropdown", "skill-status-filter"),
-}
+# BUG-SKILLS-1's fix (src/skills_page.py) wired the Skill Library's
+# search box and domain/status dropdowns to a real callback -- this
+# inventory is empty until a genuinely new, unexplained gap is found.
+_INTENTIONALLY_INERT: set[tuple[str, str]] = set()
 
 
 def _check_page(app, page_name: str, page) -> None:
@@ -384,6 +398,106 @@ def real_completed_tne_run(monkeypatch, tmp_path):
         adapters._ctx = None
 
 
+# ── /run/<id> narration-review controls (coverage gap) ───────────────────
+#
+# test_run_page_controls_for_each_status below walks every real run
+# STATUS, but every one of real_ctx's runs is a bare RunState -- none of
+# them has finding_narratives or AI-proposed candidates, so run_status.py's
+# _narration_review_panel/_candidates_panel (src/run_status.py) never emit
+# a single narrative-edit-textarea/-save-btn or candidate-accept-btn/
+# -reject-btn/-severity-dropdown/-reason-input control in that test: the
+# awaiting_signoff branch it walks has narration=None throughout. Those
+# controls -- and their real callbacks (src/run_status.py's
+# _save_narrative_edit/_accept_candidate/_reject_candidate) -- are
+# therefore never inventoried at all, a genuine coverage gap this task
+# closes by building a run that actually has them: the scripted fake-model
+# harness tests/test_run_status_narration.py itself uses
+# (tests/narration_test_support.py's make_narration_harness + DispatchingModelClient
+# + happy_responses, tests/n9_test_support.py's app_context_for/
+# FIELDWORK_NODES_FOR driving the real state machine via orchestrator.
+# pipeline.run_phase to a genuine awaiting_signoff), plus the same
+# hand-inserted, undecided AI-proposed candidate tests/test_run_status_narration.py's
+# own `real_run` fixture writes directly via persistence.write_candidates/
+# upsert_narrative (there is no live model here to propose one).
+
+def _narration_clock():
+    state = {"n": 0}
+
+    def _c() -> str:
+        state["n"] += 1
+        return canonical_ts(state["n"])
+
+    return _c
+
+
+def _narration_candidate_row(*, candidate_id: str, rule_id: str) -> dict:
+    return {
+        "candidate_id": candidate_id, "engagement_id": "ENG-DEFAULT", "skill_id": "SKILL-MINI",
+        "generation": 0, "rule_id": rule_id, "title": "An AI-proposed candidate finding",
+        "metrics_cited": ["hv_count"], "producing_test_ids": ["T1"], "proposed_severity": "Medium",
+        "severity_reason": "Model-proposed reason.", "rationale": "Model rationale.",
+        "monetary_basis": "none", "monetary_basis_note": "no declared monetary basis",
+        "exposure_amount": None, "headline_eligible": False,
+        "headline_ineligible_reason": "monetary_basis is none", "candidate_status": "candidate",
+        "call_id": f"CALL-{candidate_id}",
+    }
+
+
+def _narration_candidate_observation(candidate_id: str, *, now: str) -> dict:
+    return {
+        "narrative_id": f"NAR-{candidate_id}-observation", "run_id": "unused", "engagement_id": "ENG-DEFAULT",
+        "target_kind": "candidate", "target_id": candidate_id, "field": "observation",
+        "version": 1, "generation": 0, "origin": "model",
+        "template_text": "This AI-proposed finding notes an unusual pattern worth an auditor's review.",
+        "sources": [{"placeholder": "{count:hv_count}", "source_field": "run_metrics.hv_count", "unit": "count"}],
+        "call_ids": ["CALL-1"], "served_model_version": "test-model-v1", "violations": None,
+        "updated_by": "narrate", "updated_at": now,
+    }
+
+
+@pytest.fixture
+def real_narration_run(monkeypatch, tmp_path):
+    """A real, awaiting_signoff mini-Skill run (tests/narration_test_support.py's
+    fixture Skill) with real, resolved finding narratives (`happy_responses()`)
+    plus one hand-inserted, undecided AI-proposed candidate -- the exact
+    shape test_run_status_narration.py's own `real_run` fixture builds, kept
+    separate here (own tmp_path/persistence, not sharing `real_ctx`'s bare
+    runs) so run_status._render_body's awaiting_signoff branch has something
+    genuine to draw editable narratives and a candidate panel from. Points
+    adapters.service/adapters.get_context at this run's own AppContext for
+    the duration of the test, exactly as test_run_status_narration.py's
+    fixture does (monkeypatch reverts both on teardown; there is no
+    executor here to stop -- app_context_for always passes executor=None)."""
+    from orchestrator import service as real_narration_service
+    from orchestrator.adapters.persistence_local import LocalPersistence
+    from orchestrator.pipeline import run_phase
+
+    clock = _narration_clock()
+    persistence = LocalPersistence(str(tmp_path / "ledger.db"))
+    persistence.migrate()
+    client = DispatchingModelClient(happy_responses())
+    h = make_narration_harness(persistence, tmp_path, model_client=client)
+    fingerprint = h.persistence.get_fingerprint(h.state.fingerprint_id)
+    state = run_phase(
+        h.persistence, h.state.run_id, nodes_for=FIELDWORK_NODES_FOR, skill=h.ctx, clock=clock,
+        current_fingerprint=fingerprint,
+    )
+    assert state.status == "awaiting_signoff", state.status_reason
+    run_id = state.run_id
+
+    candidate_id = "C1"
+    h.persistence.write_candidates(
+        run_id, [_narration_candidate_row(candidate_id=candidate_id, rule_id="SKILL-MINI.ai.aaa")], now=clock(),
+    )
+    h.persistence.upsert_narrative(_narration_candidate_observation(candidate_id, now=clock()))
+
+    ctx_app = app_context_for(h, clock=clock)
+    monkeypatch.setattr(adapters, "service", real_narration_service)
+    monkeypatch.setattr(adapters, "get_context", lambda: ctx_app)
+
+    return run_id
+
+
 # ── Pages with no per-run data at all ────────────────────────────────────
 
 def test_landing_page_controls(app_entry, real_ctx):
@@ -429,6 +543,25 @@ def test_run_page_controls_for_each_status(app_entry, real_ctx, status_index):
     # real browser would actually show, so that is what this test walks.
     body = run_status._render_body(run, run_id, narration)
     _check_page(app_entry.app, f"/run/{run_id} (status={status})", body)
+
+
+def test_run_page_controls_with_narration_candidates(app_entry, real_narration_run):
+    """The coverage gap this WP closes -- see real_narration_run's own
+    docstring: a run whose narration actually has resolved finding
+    narratives and an undecided AI-proposed candidate, so the narrative
+    edit textarea/save and candidate accept/reject/severity/reason controls
+    genuinely render and are inventoried (proven wired, not merely proven
+    absent the way every status in test_run_page_controls_for_each_status
+    above does)."""
+    run_id = real_narration_run
+    run, narration = run_status._run_and_narration(run_id)
+    assert run is not None and run["status"] == "awaiting_signoff", run
+    assert narration is not None
+    assert any(f.get("narrative_id") for f in narration.get("findings", [])), narration
+    assert any(c.get("candidate_status") == "candidate" for c in narration.get("candidates", [])), narration
+
+    body = run_status._render_body(run, run_id, narration)
+    _check_page(app_entry.app, f"/run/{run_id} (narration candidates)", body)
 
 
 def test_actions_page_controls(app_entry, real_ctx):
