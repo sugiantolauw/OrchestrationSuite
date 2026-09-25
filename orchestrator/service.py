@@ -2539,6 +2539,18 @@ def _get_run_frames_from_sources(ctx: AppContext, state: RunState, skill) -> dic
     versions = {b["source"]: b["version"] for b in state.data_assets}
     data_source = ctx.data_source_factory(bindings, skill.contract.get("sources", {}), state.skill_id)
 
+    # CLAUDE.md §0.5/NN14: an audit period is a business-calendar concept in a
+    # stated timezone. This fallback path must thread the contract's declared
+    # timezone through read_population exactly as engine.py's execute_skill
+    # does, and fail loudly rather than let a Skill built without one silently
+    # fall back to a guess.
+    audit_timezone = skill.contract.get("timezone")
+    if not audit_timezone:
+        raise ContractViolation(
+            ["contract missing required 'timezone' -- an audit period is a business-calendar "
+             "concept and cannot be evaluated without one (CLAUDE.md §0.5, NN14)"]
+        )
+
     flagged_rows = ctx.persistence.list_flagged_rows(state.run_id)
     by_source: dict[str, list[dict]] = {}
     for r in flagged_rows:
@@ -2551,7 +2563,7 @@ def _get_run_frames_from_sources(ctx: AppContext, state: RunState, skill) -> dic
         version = versions.get(source)
         if version is None:
             continue
-        df = data_source.read_population(source, version=version)
+        df = data_source.read_population(source, version=version, audit_timezone=audit_timezone)
 
         rows = by_source.get(source, [])
         flags_present = sorted({r["flag"] for r in rows})
