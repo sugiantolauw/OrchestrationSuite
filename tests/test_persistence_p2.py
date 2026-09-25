@@ -193,6 +193,55 @@ def test_upsert_controls_insert_then_update(persistence, uid):
     assert rows[0]["created_at"] == canonical_ts(0)
 
 
+def test_upsert_risks_single_call_with_mixed_new_and_existing_rows(persistence, uid):
+    # P3/P4 perf gap review 2026-09-25: upsert_risks/upsert_controls now issue
+    # a single batched write per call rather than one per row -- this pins
+    # that a multi-row batch containing BOTH a pre-existing risk (must
+    # UPDATE, keep its created_at) and a brand-new one (must INSERT) is
+    # handled correctly in one call, not just the single-risk-per-call shape
+    # the other tests above exercise.
+    existing_id = f"RSK-{uid}-existing"
+    new_id = f"RSK-{uid}-new"
+    persistence.upsert_risks(
+        [{"risk_id": existing_id, "title": "Original", "status": "proposed", "source": "manual"}],
+        now=canonical_ts(0),
+    )
+    persistence.upsert_risks(
+        [
+            {"risk_id": existing_id, "title": "Updated", "status": "accepted", "source": "manual"},
+            {"risk_id": new_id, "title": "Brand new", "status": "proposed", "source": "manual"},
+        ],
+        now=canonical_ts(1),
+    )
+    rows = {r["risk_id"]: r for r in persistence.list_risks() if r["risk_id"] in (existing_id, new_id)}
+    assert rows[existing_id]["title"] == "Updated"
+    assert rows[existing_id]["status"] == "accepted"
+    assert rows[existing_id]["created_at"] == canonical_ts(0)  # sticky: first-seen timestamp
+    assert rows[new_id]["title"] == "Brand new"
+    assert rows[new_id]["created_at"] == canonical_ts(1)
+
+
+def test_upsert_controls_single_call_with_mixed_new_and_existing_rows(persistence, uid):
+    existing_id = f"CTL-{uid}-existing"
+    new_id = f"CTL-{uid}-new"
+    persistence.upsert_controls(
+        [{"control_id": existing_id, "title": "Original", "risk_id": f"RSK-{uid}"}], now=canonical_ts(0)
+    )
+    persistence.upsert_controls(
+        [
+            {"control_id": existing_id, "title": "Updated", "risk_id": f"RSK-{uid}", "type": "detective"},
+            {"control_id": new_id, "title": "Brand new", "risk_id": f"RSK-{uid}"},
+        ],
+        now=canonical_ts(1),
+    )
+    rows = {c["control_id"]: c for c in persistence.list_controls() if c["control_id"] in (existing_id, new_id)}
+    assert rows[existing_id]["title"] == "Updated"
+    assert rows[existing_id]["type"] == "detective"
+    assert rows[existing_id]["created_at"] == canonical_ts(0)
+    assert rows[new_id]["title"] == "Brand new"
+    assert rows[new_id]["created_at"] == canonical_ts(1)
+
+
 def test_list_risks_and_controls_scoped_to_engagement(persistence, uid):
     eng_a = f"ENG-{uid}-a"
     eng_b = f"ENG-{uid}-b"

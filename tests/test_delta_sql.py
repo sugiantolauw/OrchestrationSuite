@@ -12,6 +12,7 @@ from orchestrator.config import Settings
 from orchestrator.errors import (
     ConfigError,
     ConnectionPoolExhausted,
+    RiskStatusRegression,
     RunAlreadyExists,
     RunNotFound,
     StaleStateError,
@@ -569,6 +570,100 @@ def test_write_run_metrics_issues_one_select_then_one_merge_per_batch():
     merge_calls = [c for c in conn.calls if c[0].startswith("MERGE INTO cat1.sch1.run_metrics")]
     assert len(select_calls) == 1
     assert len(merge_calls) == 1
+
+
+# ── upsert_risks/upsert_controls: batched, not one SELECT+UPDATE/INSERT per
+# row (P3/P4 perf gap review 2026-09-25 -- register_skill's own dominant cost,
+# measured live at ~80s: 2 round trips PER risk/control, every single run,
+# even when nothing had changed) ────────────────────────────────────────────
+
+def _risk(risk_id: str, **overrides) -> dict:
+    row = {"risk_id": risk_id, "title": f"Risk {risk_id}", "status": "proposed", "source": "manual"}
+    row.update(overrides)
+    return row
+
+
+def _control(control_id: str, **overrides) -> dict:
+    row = {"control_id": control_id, "title": f"Control {control_id}", "risk_id": "RSK-1"}
+    row.update(overrides)
+    return row
+
+
+def test_upsert_risks_issues_one_batched_select_then_one_merge_per_batch():
+    handlers = {
+        "SELECT risk_id, status FROM cat1.sch1.risks": lambda s, p: (["risk_id", "status"], []),
+        "MERGE INTO cat1.sch1.risks": lambda s, p: ([], []),
+    }
+    conn = FakeConnection(handlers)
+    p = DeltaPersistence(_settings(), connection_factory=lambda: conn)
+
+    risks = [_risk(f"RSK-{i}") for i in range(14)]
+    p.upsert_risks(risks, now=canonical_ts(0))
+
+    select_calls = [c for c in conn.calls if c[0].startswith("SELECT risk_id, status FROM cat1.sch1.risks")]
+    merge_calls = [c for c in conn.calls if c[0].startswith("MERGE INTO cat1.sch1.risks")]
+    # One IN-list existence check for all 14 risks (not 14 separate SELECTs)
+    # and one batched multi-row MERGE (not 14 separate UPDATE/INSERTs) -- 14
+    # rows is well under _MERGE_BATCH_SIZE (250), so each is exactly one
+    # statement: a small constant number, not 2xN.
+    assert len(select_calls) == 1
+    assert len(merge_calls) == 1
+    assert len(select_calls[0][1]) == 14  # one bound risk_id per row in the IN-list
+    assert len(merge_calls[0][1]) == 14 * 13  # 13 params per risk row
+
+
+def test_upsert_risks_empty_list_issues_no_statements():
+    conn = FakeConnection({})
+    p = DeltaPersistence(_settings(), connection_factory=lambda: conn)
+    p.upsert_risks([], now=canonical_ts(0))
+    assert conn.calls == []
+
+
+def test_upsert_risks_status_regression_checked_before_any_write():
+    def _select_handler(sql_text, params):
+        assert set(params.values()) == {"RSK-1", "RSK-2"}
+        return (["risk_id", "status"], [("RSK-1", "accepted")])
+
+    handlers = {
+        "SELECT risk_id, status FROM cat1.sch1.risks": _select_handler,
+        "MERGE INTO cat1.sch1.risks": lambda s, p: ([], []),
+    }
+    conn = FakeConnection(handlers)
+    p = DeltaPersistence(_settings(), connection_factory=lambda: conn)
+
+    # RSK-1 already accepted; this call tries to move it back to proposed.
+    # RSK-2 has no regression -- but the whole batched call must still be
+    # rejected before any MERGE is issued (not just RSK-1's row), matching
+    # the single-item contract test_persistence_p2.py already pins.
+    risks = [_risk("RSK-1", status="proposed"), _risk("RSK-2", status="proposed")]
+    with pytest.raises(RiskStatusRegression):
+        p.upsert_risks(risks, now=canonical_ts(0))
+
+    merge_calls = [c for c in conn.calls if c[0].startswith("MERGE INTO cat1.sch1.risks")]
+    assert merge_calls == []
+
+
+def test_upsert_controls_issues_one_merge_per_batch_with_no_select():
+    handlers = {"MERGE INTO cat1.sch1.controls": lambda s, p: ([], [])}
+    conn = FakeConnection(handlers)
+    p = DeltaPersistence(_settings(), connection_factory=lambda: conn)
+
+    controls = [_control(f"CTL-{i}") for i in range(14)]
+    p.upsert_controls(controls, now=canonical_ts(0))
+
+    # Controls carry no status -- MERGE alone decides insert vs update, so no
+    # existence-check SELECT is needed at all, unlike risks.
+    assert len(conn.calls) == 1
+    merge_calls = [c for c in conn.calls if c[0].startswith("MERGE INTO cat1.sch1.controls")]
+    assert len(merge_calls) == 1
+    assert len(merge_calls[0][1]) == 14 * 11  # 11 params per control row
+
+
+def test_upsert_controls_empty_list_issues_no_statements():
+    conn = FakeConnection({})
+    p = DeltaPersistence(_settings(), connection_factory=lambda: conn)
+    p.upsert_controls([], now=canonical_ts(0))
+    assert conn.calls == []
 
 
 def test_slow_statement_on_one_thread_does_not_delay_a_statement_on_another():

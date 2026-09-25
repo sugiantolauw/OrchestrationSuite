@@ -36,7 +36,25 @@ def register_skill(skill: Skill, persistence, *, actor: str, now: str) -> dict[s
     skill_id+version with the same content hash (raises on a genuine content
     change under the same version -- CLAUDE.md §3 NN8, a Skill's content hash
     is what a run fingerprint pins to), and `upsert_risks`/`upsert_controls`
-    are themselves idempotent upserts keyed on risk_id/control_id."""
+    are themselves idempotent upserts keyed on risk_id/control_id.
+
+    P3/P4 perf gap review 2026-09-25: measured live at ~80s against the real
+    Delta warehouse EVEN WHEN NOTHING HAD CHANGED, because the old shape
+    always ran the full risk/control seeding pass regardless. This exact
+    (skill_id, version, content_hash) is already durably recorded once
+    `record_skill_version` has ever inserted it, so a ONE-query check here
+    -- persistence-level idempotence, correct across process restarts, unlike
+    service._ensure_skill_registered's in-process-only cache on top of this
+    -- lets a repeat call for unchanged content return without touching
+    risks/controls (or even calling record_skill_version) at all. A
+    genuinely new skill_id+version, or a changed content_hash under the same
+    skill_id+version, falls through to the normal path below unchanged:
+    record_skill_version's own check still raises SkillVersionConflict on a
+    real content change (CLAUDE.md §3 NN8), preserved exactly as before."""
+    existing = persistence.get_skill_version(skill.skill_id, skill.version)
+    if existing is not None and existing["content_hash"] == skill.content_hash:
+        return {"skill_version": existing, "risks_registered": 0, "controls_registered": 0}
+
     # P2/P3 gate review item 9: `files` is the FULL raw-text content this
     # Skill's skill_content_hash is built from (orchestrator.fingerprint.
     # skill_content_entries -- the single enumeration both this and the run
