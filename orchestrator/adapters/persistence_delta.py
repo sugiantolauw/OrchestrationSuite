@@ -493,6 +493,19 @@ class DeltaPersistence:
         self._prefix = f"{settings.catalog}.{settings.schema}"
         self._conn_lock = threading.Lock()
         self._conn = None
+        # P3 gap-audit review follow-up (RUN-5E0D4353A7BB, 2026-09-25): lease
+        # operations (acquire_lease/renew_lease/release_lease/expired_leases)
+        # get their OWN connection and lock, never `_conn`/`_conn_lock`. A
+        # single DeltaPersistence instance is shared by a whole process
+        # (ThreadExecutor and every node it runs), so the SAME `_conn_lock`
+        # previously serialised a heartbeat thread's renew_lease behind
+        # whatever the pipeline thread's own node output writes were doing on
+        # the main connection (write_flagged_rows/write_run_metrics loop over
+        # hundreds of batched MERGEs, each a live round trip) -- a long single
+        # node call could starve this run's own lease renewal for its whole
+        # duration. Renewal must never queue behind a node's own writes.
+        self._lease_conn_lock = threading.Lock()
+        self._lease_conn = None
 
     def _default_connection_factory(self):
         from databricks import sql
@@ -517,20 +530,34 @@ class DeltaPersistence:
     def _cursor_ctx(self):
         return _CursorCtx(self)
 
-    def _get_connection_locked(self):
+    # Lease operations' own connection/lock -- see the docstring on
+    # self._lease_conn_lock in __init__. Same lazy-open-once-reuse and
+    # reconnect-on-connection-error shape as the main connection, just kept
+    # structurally separate so it is never blocked by it.
+    def _lease_cursor_ctx(self):
+        return _CursorCtx(self, lease=True)
+
+    def _get_connection_locked(self, *, lease: bool = False):
+        if lease:
+            if self._lease_conn is None:
+                self._lease_conn = self._connection_factory()
+            return self._lease_conn
         if self._conn is None:
             self._conn = self._connection_factory()
         return self._conn
 
-    def _execute(self, conn, sql_text: str, params: dict | None = None):
+    def _execute(self, conn, sql_text: str, params: dict | None = None, *, lease: bool = False):
         try:
             cur = conn.cursor()
             cur.execute(sql_text, params or {})
             return cur
         except Exception as exc:
             if _is_connection_error(exc):
-                self._conn = None
-                conn = self._get_connection_locked()
+                if lease:
+                    self._lease_conn = None
+                else:
+                    self._conn = None
+                conn = self._get_connection_locked(lease=lease)
                 cur = conn.cursor()
                 cur.execute(sql_text, params or {})
                 return cur
@@ -2321,7 +2348,7 @@ class DeltaPersistence:
         # decided from num_affected_rows (this MERGE's own INSERT+UPDATE
         # count), never a separate SELECT after the write.
         expires_at = _add_seconds(now, ttl_s)
-        with self._cursor_ctx() as conn:
+        with self._lease_cursor_ctx() as conn:
             cur = self._execute(
                 conn,
                 f"MERGE INTO {self._table('run_leases')} t "
@@ -2332,34 +2359,41 @@ class DeltaPersistence:
                 "WHEN NOT MATCHED THEN INSERT (run_id, claimed_by, claimed_at, heartbeat_at, "
                 "lease_expires_at) VALUES (:run_id, :claimed_by, :now, :now, :expires_at)",
                 {"run_id": run_id, "claimed_by": worker_id, "now": now, "expires_at": expires_at},
+                lease=True,
             )
             return _num_affected_rows(cur) > 0
 
     def renew_lease(self, run_id: str, worker_id: str, *, ttl_s: float, now: str) -> bool:
+        # P3 gap-audit review follow-up (RUN-5E0D4353A7BB): its own connection
+        # (see __init__ / _lease_cursor_ctx) -- this must never queue behind a
+        # long node-output write sharing the main connection/lock.
         expires_at = _add_seconds(now, ttl_s)
-        with self._cursor_ctx() as conn:
+        with self._lease_cursor_ctx() as conn:
             cur = self._execute(
                 conn,
                 f"UPDATE {self._table('run_leases')} SET heartbeat_at = :now, "
                 "lease_expires_at = :expires_at WHERE run_id = :run_id AND claimed_by = :claimed_by",
                 {"now": now, "expires_at": expires_at, "run_id": run_id, "claimed_by": worker_id},
+                lease=True,
             )
             return _num_affected_rows(cur) > 0
 
     def release_lease(self, run_id: str, worker_id: str) -> None:
-        with self._cursor_ctx() as conn:
+        with self._lease_cursor_ctx() as conn:
             self._execute(
                 conn,
                 f"DELETE FROM {self._table('run_leases')} WHERE run_id = :run_id AND claimed_by = :claimed_by",
                 {"run_id": run_id, "claimed_by": worker_id},
+                lease=True,
             )
 
     def expired_leases(self, now: str) -> list[str]:
-        with self._cursor_ctx() as conn:
+        with self._lease_cursor_ctx() as conn:
             cur = self._execute(
                 conn,
                 f"SELECT run_id FROM {self._table('run_leases')} WHERE lease_expires_at <= :now",
                 {"now": now},
+                lease=True,
             )
             return [r["run_id"] for r in _fetchall_dicts(cur)]
 
@@ -2377,13 +2411,16 @@ def _trace_event_ui_shape(row: dict) -> dict:
 
 
 class _CursorCtx:
-    def __init__(self, persistence: DeltaPersistence):
+    def __init__(self, persistence: DeltaPersistence, *, lease: bool = False):
         self._p = persistence
+        self._lease = lease
+        self._lock = None
 
     def __enter__(self):
-        self._p._conn_lock.acquire()
-        return self._p._get_connection_locked()
+        self._lock = self._p._lease_conn_lock if self._lease else self._p._conn_lock
+        self._lock.acquire()
+        return self._p._get_connection_locked(lease=self._lease)
 
     def __exit__(self, exc_type, exc, tb):
-        self._p._conn_lock.release()
+        self._lock.release()
         return False
