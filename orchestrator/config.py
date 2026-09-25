@@ -126,6 +126,14 @@ class Settings:
     # call is retried, never what a node computes.
     llm_timeout_s: float = 180.0
     llm_retry_backoff_s: float = 5.0
+    # Perf review 2026-09-25 (found live: a 4-way concurrent narration run
+    # exhausted a single retry against the workspace's QPS limit and wrongly
+    # tripped the circuit breaker for sibling items). Operational knobs --
+    # excluded from the runtime config hash below, same reasoning as
+    # llm_retry_backoff_s: they change how a call is retried, never what a
+    # node computes.
+    llm_max_transport_attempts: int = 3
+    llm_retry_backoff_max_s: float = 30.0
     # Independent review item 4: T4.3 row-level classification via the
     # model client is BUILT but switched off by default -- while off, T4.3
     # stays `not_testable` ("awaiting governance approval to send expense
@@ -157,6 +165,37 @@ class Settings:
     # many items -- a hard ceiling on how many AI-proposed findings one run
     # can produce, never just a UI truncation.
     narration_max_candidates: int = 3
+    # Found-live perf review 2026-09-25: `narrate` was making its ~45+
+    # narration calls strictly sequentially, so a full SKILL-001 run against
+    # a reasoning model took 9+ minutes of an auditor's wait before
+    # sign-off, even though most of those calls have no data dependency on
+    # each other (orchestrator.nodes.narration.narrate runs its independent
+    # stage -- profile, one call per finding, synthesis, priority,
+    # remediation, candidates, captions -- through a bounded
+    # ThreadPoolExecutor of this size; exec_summary alone waits for
+    # synthesis's themes, so it always runs after). An operational knob --
+    # it changes how fast a run narrates, never what it computes or stores
+    # (results are still assembled in the SAME deterministic order
+    # regardless of completion order) -- so it is excluded from the runtime
+    # config hash below, same as the executor/admission knobs. 1 recovers
+    # the old fully-sequential behaviour.
+    #
+    # Default is 2, NOT 4 (re-measured live 2026-09-25, same method): this
+    # development workspace's shared MODEL_SONNET/MODEL_GPT_OSS endpoint has
+    # a low per-workspace QPS/output-tokens-per-minute ceiling (CLAUDE.md
+    # §6's own recorded override -- both roles point at the same
+    # `databricks-gpt-oss-120b` here). At 4, even with bounded retry
+    # (`llm_max_transport_attempts`) most single-call narration tasks and
+    # one finding still exhausted their retries against SUSTAINED
+    # contention -- not a blip a backoff can ride out, but four long
+    # completions steadily eating the same per-minute budget -- landing 28
+    # of the run's narratives on `fallback_unavailable`. At 2, only one task
+    # (`find_synthesis`, a single edge case) still did; every one of the
+    # 11 findings, and every other single-call task, completed as real
+    # model output. This is a property of THIS shared, rate-limited
+    # endpoint, not of the mechanism -- re-measure before raising it in a
+    # workspace with a dedicated or higher-throughput endpoint.
+    narration_max_parallel: int = 2
     # Explicit override of which repo Skills the planner sees as reference
     # examples (§4.4); empty means "the first two valid repo Skills sorted by
     # id" -- a later step's concern to resolve, this field only carries an
@@ -248,6 +287,8 @@ def load_settings(env: dict | None = None) -> Settings:
         readiness_cache_ttl_s=_parse_float(env.get("READINESS_CACHE_TTL_S"), 120.0),
         llm_timeout_s=_parse_float(env.get("LLM_TIMEOUT_S"), 180.0),
         llm_retry_backoff_s=_parse_float(env.get("LLM_RETRY_BACKOFF_S"), 5.0),
+        llm_max_transport_attempts=_parse_int(env.get("LLM_MAX_TRANSPORT_ATTEMPTS"), 3),
+        llm_retry_backoff_max_s=_parse_float(env.get("LLM_RETRY_BACKOFF_MAX_S"), 30.0),
         enable_row_level_llm=_parse_bool(env.get("ENABLE_ROW_LEVEL_LLM"), False),
         apps_python_version=env.get("DBX_APPS_PYTHON_VERSION") or "3.11",
         llm_monthly_token_budget=_parse_optional_int(env.get("LLM_MONTHLY_TOKEN_BUDGET")),
@@ -277,6 +318,7 @@ def load_settings(env: dict | None = None) -> Settings:
         narration_enabled=_parse_bool(env.get("NARRATION_ENABLED"), False),
         ai_proposed_findings_enabled=_parse_bool(env.get("AI_PROPOSED_FINDINGS_ENABLED"), False),
         narration_max_candidates=_parse_int(env.get("NARRATION_MAX_CANDIDATES"), 3),
+        narration_max_parallel=_parse_int(env.get("NARRATION_MAX_PARALLEL"), 2),
         explorer_reference_skill_ids=_parse_csv(env.get("EXPLORER_REFERENCE_SKILL_IDS")),
         explorer_category_max_distinct=_parse_int(env.get("EXPLORER_CATEGORY_MAX_DISTINCT"), 30),
         explorer_category_min_count=_parse_int(env.get("EXPLORER_CATEGORY_MIN_COUNT"), 5),
@@ -303,9 +345,12 @@ _RUNTIME_HASH_EXCLUDED_FIELDS = frozenset({
     "readiness_cache_ttl_s",
     "llm_timeout_s",
     "llm_retry_backoff_s",
+    "llm_max_transport_attempts",
+    "llm_retry_backoff_max_s",
     "apps_python_version",
     "llm_monthly_token_budget",
     "llm_price_per_mtok_json",
+    "narration_max_parallel",
 })
 
 

@@ -1,9 +1,11 @@
 """LLMGateway: the one place a node calls a model (independent review
 2026-09-24 item 3; docs/specs/P6_P8_explorer_llm_design.md §3.6). Every call
 goes: resolve role -> filter params through the role's recorded capability
-matrix -> check the response cache -> call the ModelClient (with one retry
-on a rate limit / transient failure) -> validate the output against a JSON
-Schema if one was given (with one client-side retry) -> log to `llm_calls`
+matrix -> check the response cache -> call the ModelClient (with bounded,
+Retry-After-honouring backoff on a rate limit / transient failure --
+`max_transport_attempts`, perf review 2026-09-25) -> validate the output
+against a JSON Schema if one was given (with one client-side retry) -> log
+to `llm_calls`
 SYNCHRONOUSLY BEFORE RETURNING (CLAUDE.md §3 non-negotiable 7) -> cache a
 successful response for replay (non-negotiable 8).
 
@@ -34,6 +36,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import random
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -91,6 +94,15 @@ class LLMResult:
     source: Literal["live", "cache"] | None
     served_model_version: str | None
     error: str | None
+    # Perf review 2026-09-25: meaningful only when status == "unavailable".
+    # True (the default, for every OTHER status and for the pre-existing
+    # 403/404/rate-limit-0/unconfigured-endpoint paths) means the endpoint
+    # will not come back without operator action -- safe to trip
+    # `orchestrator.narration.runner`'s circuit breaker for every other item
+    # sharing the role. False means a RateLimited/TransientModelError
+    # exhausted its bounded retries for THIS item alone; a sibling item may
+    # still succeed, so the breaker must not trip on it.
+    permanent: bool = True
 
 
 class LLMGateway:
@@ -108,6 +120,18 @@ class LLMGateway:
         prompt_template_id: str = "none",
         prompt_template_version: str = "none",
         fallback_role: dict[str, str | None] | None = None,
+        # Perf review 2026-09-25 (found live: a 4-way concurrent narration
+        # run hit the workspace's QPS limit repeatedly; a single retry at a
+        # flat backoff was not enough, and giving up after it wrongly
+        # tripped the circuit breaker for every other item on the same
+        # role). `max_transport_attempts` bounds how many times ONE logical
+        # call retries a RateLimited/TransientModelError before giving up
+        # as (non-permanent) unavailable -- 2 is the pre-existing behaviour
+        # (one retry); `retry_backoff_max_s` caps the EXPONENTIAL backoff
+        # `_call_live` computes when the endpoint's own response states no
+        # `Retry-After` (the common case for Databricks Model Serving).
+        max_transport_attempts: int = 3,
+        retry_backoff_max_s: float = 30.0,
     ):
         self.settings = settings
         self.client = client
@@ -117,6 +141,8 @@ class LLMGateway:
         self.clock = clock
         self.retry_backoff_s = retry_backoff_s
         self.timeout_s = timeout_s
+        self.max_transport_attempts = max_transport_attempts
+        self.retry_backoff_max_s = retry_backoff_max_s
         # Construction-time defaults, kept for the one caller that still
         # fixes these at construction (orchestrator.nodes.fieldwork.
         # _build_classify_gateway) -- every other caller passes them per
@@ -348,7 +374,7 @@ class LLMGateway:
         except ModelUnavailable as exc:
             return self._log_and_return(
                 **common, transport_attempt=transport_attempt, outcome="unavailable", status="unavailable",
-                error_type="ModelUnavailable", error_message=str(exc),
+                error_type="ModelUnavailable", error_message=str(exc), permanent=exc.permanent,
             )
         except LLMConfigError as exc:
             # NN7: a 400 (a request this code built incorrectly) is a
@@ -363,20 +389,39 @@ class LLMGateway:
             )
             raise
         except (RateLimited, TransientModelError) as exc:
-            if transport_attempt >= 2:
+            if transport_attempt >= self.max_transport_attempts:
                 # Give up: one row for this final attempt, outcome
                 # 'unavailable' -- not also a separate 'failed_transport'
-                # row for the same attempt (spec §3.6 step 8: "on attempt 2,
-                # return unavailable").
+                # row for the same attempt (spec §3.6 step 8: "on the last
+                # attempt, return unavailable"). `permanent=False` (perf
+                # review 2026-09-25): retries were exhausted for THIS item,
+                # not proof the endpoint is genuinely down -- never trips
+                # `orchestrator.narration.runner`'s circuit breaker for a
+                # sibling item on the same role.
                 return self._log_and_return(
                     **common, transport_attempt=transport_attempt, outcome="unavailable", status="unavailable",
-                    error_type=type(exc).__name__, error_message=str(exc),
+                    error_type=type(exc).__name__, error_message=str(exc), permanent=False,
                 )
             self._log_and_return(
                 **common, transport_attempt=transport_attempt, outcome="failed_transport", status="unavailable",
                 error_type=type(exc).__name__, error_message=str(exc), _return=False,
             )
-            time.sleep(self.retry_backoff_s)
+            # Bounded exponential backoff, honouring the endpoint's own
+            # `Retry-After` when it states one (rare for Databricks Model
+            # Serving's own 429 body, but respected when present) rather
+            # than always waiting this code's own guess; capped at
+            # `retry_backoff_max_s` either way. A small random jitter
+            # de-synchronises concurrent retries under `narrate`'s bounded
+            # thread pool (perf review 2026-09-25) -- without it, several
+            # workers that all hit the SAME rate limit at once would also
+            # all retry at once, reproducing the same burst.
+            retry_after = getattr(exc, "retry_after_s", None)
+            if retry_after is not None:
+                wait_s = min(max(retry_after, 0.0), self.retry_backoff_max_s)
+            else:
+                wait_s = min(self.retry_backoff_s * (2 ** (transport_attempt - 1)), self.retry_backoff_max_s)
+            wait_s += random.uniform(0, min(1.0, wait_s * 0.25)) if wait_s > 0 else 0.0
+            time.sleep(wait_s)
             return self._call_live(
                 task=task, seq=seq, role=role, endpoint=endpoint, messages=messages,
                 params_sent=params_sent, params_dropped=params_dropped, ctx=ctx,
@@ -459,7 +504,7 @@ class LLMGateway:
         prompt_tokens=None, completion_tokens=None, total_tokens=None, latency_ms=None,
         request_id=None, error_type=None, error_message=None, cache_hit=False, cache_key=None,
         cached_from_call_id=None, prompt_sha256=None, params_json=None, schema=None,
-        parsed=None, put_cache=False, _return=True,
+        parsed=None, put_cache=False, _return=True, permanent=True,
     ) -> LLMResult | None:
         now = self.clock()
         version_changed = False
@@ -517,7 +562,7 @@ class LLMGateway:
             return None
         return LLMResult(
             status=status, text=response_text, parsed=parsed, call_id=call_id, source=source,
-            served_model_version=served_model_version, error=error_message,
+            served_model_version=served_model_version, error=error_message, permanent=permanent,
         )
 
 

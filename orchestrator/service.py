@@ -451,6 +451,8 @@ def _build_explorer_llm(ctx: AppContext):
         settings=ctx.settings, client=client, persistence=ctx.persistence, node_models=NODE_MODELS,
         clock=ctx.clock, retry_backoff_s=getattr(ctx.settings, "llm_retry_backoff_s", 5.0),
         timeout_s=getattr(ctx.settings, "llm_timeout_s", 180.0),
+        max_transport_attempts=getattr(ctx.settings, "llm_max_transport_attempts", 3),
+        retry_backoff_max_s=getattr(ctx.settings, "llm_retry_backoff_max_s", 30.0),
     )
     return llm, FilePromptRepository()
 

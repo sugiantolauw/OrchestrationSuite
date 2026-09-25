@@ -47,6 +47,7 @@ check, not a formatting step.
 from __future__ import annotations
 
 import json
+import threading
 from dataclasses import dataclass, field as dataclass_field
 from typing import Any, Callable, Iterable
 
@@ -133,6 +134,17 @@ class RunnerContext:
     dead_role_pairs: set[tuple[str, str | None]] = dataclass_field(default_factory=set)
     origin_counts: dict[str, int] = dataclass_field(default_factory=dict)
     _seq_counters: dict[str, int] = dataclass_field(default_factory=dict)
+    # Perf review 2026-09-25: `narrate` now runs its independent items
+    # (orchestrator.nodes.narration._run_stage_one) through a bounded thread
+    # pool, so every mutable field above this line (`dead_role_pairs`,
+    # `origin_counts`, `_seq_counters`) can be touched by more than one
+    # worker thread at once. A plain dict/set get-then-set is NOT atomic
+    # across threads (only a single bytecode-level op is, under the GIL) --
+    # every mutation goes through the three methods below, each holding this
+    # lock for the whole read-modify-write. Never acquired by a caller
+    # directly; `next_seq`/`mark_role_pair_dead`/`is_role_pair_dead`/
+    # `record_origin` are the only entry points.
+    _lock: threading.Lock = dataclass_field(default_factory=threading.Lock, repr=False, compare=False)
     # P6 WP N10 (§5.5 point 2): `narrative_id`s the caller (the `narrate`
     # node) found already at origin='human_edit' when this RunnerContext was
     # built, i.e. BEFORE this execution wrote anything -- `_persist` checks
@@ -145,9 +157,22 @@ class RunnerContext:
     existing_human_edited: frozenset[str] = dataclass_field(default_factory=frozenset)
 
     def next_seq(self, task: str) -> tuple[int, int]:
-        k = self._seq_counters.get(task, 0)
-        self._seq_counters[task] = k + 1
-        return 2 * k + 1, 2 * k + 2
+        with self._lock:
+            k = self._seq_counters.get(task, 0)
+            self._seq_counters[task] = k + 1
+            return 2 * k + 1, 2 * k + 2
+
+    def mark_role_pair_dead(self, pair: tuple[str, str | None]) -> None:
+        with self._lock:
+            self.dead_role_pairs.add(pair)
+
+    def is_role_pair_dead(self, pair: tuple[str, str | None]) -> bool:
+        with self._lock:
+            return pair in self.dead_role_pairs
+
+    def record_origin(self, origin: str) -> None:
+        with self._lock:
+            self.origin_counts[origin] = self.origin_counts.get(origin, 0) + 1
 
     def call_ctx(self) -> CallContext:
         return CallContext(
@@ -188,17 +213,29 @@ def _validate_field(
 
 def _generate_item(
     rc: RunnerContext, *, task: str, payload: dict, schema: dict, extra_params: dict,
-    validate_fn: Callable[[dict], tuple[bool, list[dict]]],
+    validate_fn: Callable[[dict], tuple[bool, list[dict]]], seq_pair: tuple[int, int] | None = None,
 ) -> NarrationOutcome:
     role = NODE_MODELS[task]
     pair = (role, FALLBACK_ROLE.get(task))
-    if pair in rc.dead_role_pairs:
+    if rc.is_role_pair_dead(pair):
         # Circuit breaker (§3.5): this exact primary/fallback pair already
         # returned "unavailable" once this narrate() execution -- no call,
-        # no llm_calls row.
+        # no llm_calls row. Under concurrency (orchestrator.nodes.narration
+        # perf review 2026-09-25) this only stops a call not yet DISPATCHED
+        # -- an in-flight call started before the breaker tripped still
+        # finishes and logs its own row, exactly as the design's "in-flight
+        # ones finish/log" requires.
         return NarrationOutcome("fallback_unavailable", None, [], None, None)
 
-    seq_gen, seq_repair = rc.next_seq(task)
+    # `seq_pair` (perf review 2026-09-25): the "find" task is the only one
+    # `narrate()` calls more than once, and it now dispatches those calls
+    # concurrently -- `rc.next_seq("find")` would then be racing across
+    # worker threads, making the seq assigned to a given finding depend on
+    # thread-scheduling order rather than the run's own deterministic
+    # finding order (breaking G9/replay). The caller precomputes every
+    # item's seq pair sequentially, in the SAME deterministic order the
+    # single-threaded code always used, before dispatching any worker.
+    seq_gen, seq_repair = seq_pair if seq_pair is not None else rc.next_seq(task)
     ptver = rc.prompts.template_set_version()
     messages = rc.prompts.render_task(
         task, payload_json=_canonical_json(payload), generation_line=_generation_line(rc.generation),
@@ -209,7 +246,15 @@ def _generate_item(
         schema=schema, ctx=rc.call_ctx(), prompt_template_id=f"narration/{task}", prompt_template_version=ptver,
     )
     if result.status == "unavailable":
-        rc.dead_role_pairs.add(pair)
+        # Perf review 2026-09-25: only a PERMANENT unavailability (a real
+        # 403/404/rate-limit-0/unconfigured-endpoint, `LLMResult.permanent`)
+        # trips the breaker for every other item sharing this role -- a
+        # RateLimited/TransientModelError that exhausted its bounded
+        # retries (`permanent=False`) means only THIS item could not get an
+        # answer; a sibling item, not yet dispatched, still gets its own
+        # attempt.
+        if result.permanent:
+            rc.mark_role_pair_dead(pair)
         return NarrationOutcome("fallback_unavailable", None, [result.call_id], None, None)
 
     call_ids = [result.call_id]
@@ -230,7 +275,8 @@ def _generate_item(
     )
     call_ids.append(repair_result.call_id)
     if repair_result.status == "unavailable":
-        rc.dead_role_pairs.add(pair)
+        if repair_result.permanent:
+            rc.mark_role_pair_dead(pair)
         return NarrationOutcome("fallback_unavailable", None, call_ids, None, None)
     if repair_result.status == "ok":
         is_valid2, violations2 = validate_fn(repair_result.parsed)
@@ -295,7 +341,7 @@ def _persist(
         "updated_at": now,
     }
     rc.persistence.upsert_narrative(row)
-    rc.origin_counts[origin] = rc.origin_counts.get(origin, 0) + 1
+    rc.record_origin(origin)
     return nid
 
 
@@ -332,7 +378,10 @@ def _allowed_identifiers(finding: dict) -> set[str]:
     return ids
 
 
-def narrate_finding(rc: RunnerContext, finding: dict, *, skill, period: tuple[str, str] | None) -> str:
+def narrate_finding(
+    rc: RunnerContext, finding: dict, *, skill, period: tuple[str, str] | None,
+    seq_pair: tuple[int, int] | None = None,
+) -> str:
     payload, table = build_finding_payload(finding, skill=skill, period=period)
     key = finding_key(finding)
     schema = finding_narration_schema(key)
@@ -354,7 +403,10 @@ def narrate_finding(rc: RunnerContext, finding: dict, *, skill, period: tuple[st
             violations += _validate_field(q, table, field="question", allowed_identifiers=allowed)
         return not violations, violations
 
-    outcome = _generate_item(rc, task="find", payload=payload, schema=schema, extra_params={}, validate_fn=validate_fn)
+    outcome = _generate_item(
+        rc, task="find", payload=payload, schema=schema, extra_params={}, validate_fn=validate_fn,
+        seq_pair=seq_pair,
+    )
     finding_id = finding.get("finding_id") or finding.get("candidate_id") or key
     parsed = outcome.parsed or {}
     observation_id = _persist(

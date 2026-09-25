@@ -196,20 +196,93 @@ def test_rate_limited_once_then_succeeds():
     ]
 
 
-def test_transient_error_twice_gives_up_as_unavailable():
+def test_transient_error_exhausts_bounded_retries_and_gives_up_as_non_permanent_unavailable():
+    """Perf review 2026-09-25: the retry budget is `max_transport_attempts`
+    (default 3 -- one more than the old hardcoded 2), and exhausting it is
+    a NON-permanent unavailability -- `orchestrator.narration.runner`'s
+    circuit breaker must not treat "this one item's retries ran out" the
+    same as a genuinely dead endpoint."""
     persistence = _persistence()
     client = FakeModelClient(responses={
         "databricks-gpt-oss-120b": [
             TransientModelError("ep", "boom"), TransientModelError("ep", "boom again"),
+            TransientModelError("ep", "boom a third time"),
         ]
     })
     gw = _gateway(client, persistence=persistence)
     result = gw.call(task="classify", seq=1, messages=[], desired_params={}, ctx=_ctx())
     assert result.status == "unavailable"
-    assert len(client.calls) == 2
+    assert result.permanent is False
+    assert len(client.calls) == 3
     rows = persistence.list_llm_calls("RUN-1")
     outcomes = sorted(r["outcome"] for r in rows)
-    assert outcomes == ["failed_transport", "unavailable"]
+    assert outcomes == ["failed_transport", "failed_transport", "unavailable"]
+
+
+def test_transient_error_retry_budget_is_configurable():
+    persistence = _persistence()
+    client = FakeModelClient(responses={
+        "databricks-gpt-oss-120b": [TransientModelError("ep", "boom")],
+    })
+    gw = _gateway(client, persistence=persistence, max_transport_attempts=1)
+    result = gw.call(task="classify", seq=1, messages=[], desired_params={}, ctx=_ctx())
+    assert result.status == "unavailable"
+    assert result.permanent is False
+    assert len(client.calls) == 1  # max_transport_attempts=1 -- no retry at all
+
+
+def test_rate_limited_twice_then_succeeds_within_the_default_budget():
+    persistence = _persistence()
+    client = FakeModelClient(responses={
+        "databricks-gpt-oss-120b": [
+            RateLimited("ep", "slow down"), RateLimited("ep", "still slow"), _resp(text="ok now"),
+        ]
+    })
+    gw = _gateway(client, persistence=persistence)
+    result = gw.call(task="classify", seq=1, messages=[], desired_params={}, ctx=_ctx())
+    assert result.status == "ok"
+    assert result.text == "ok now"
+    assert len(client.calls) == 3
+
+
+def test_a_permanent_model_unavailable_is_never_downgraded_to_non_permanent():
+    persistence = _persistence()
+    client = FakeModelClient(responses={
+        "databricks-gpt-oss-120b": ModelUnavailable("ep", "rate limit of 0", permanent=True),
+    })
+    gw = _gateway(client, persistence=persistence)
+    result = gw.call(task="classify", seq=1, messages=[], desired_params={}, ctx=_ctx())
+    assert result.status == "unavailable"
+    assert result.permanent is True
+
+
+def test_retry_after_is_honoured_over_the_computed_backoff(monkeypatch):
+    persistence = _persistence()
+    client = FakeModelClient(responses={
+        "databricks-gpt-oss-120b": [
+            RateLimited("ep", "slow down", retry_after_s=2.5), _resp(text="ok now"),
+        ]
+    })
+    slept: list[float] = []
+    monkeypatch.setattr("orchestrator.llm.gateway.time.sleep", lambda s: slept.append(s))
+    monkeypatch.setattr("orchestrator.llm.gateway.random.uniform", lambda a, b: 0.0)  # deterministic
+    gw = _gateway(client, persistence=persistence, retry_backoff_s=100.0)  # would dominate if NOT honoured
+    result = gw.call(task="classify", seq=1, messages=[], desired_params={}, ctx=_ctx())
+    assert result.status == "ok"
+    assert slept == [2.5]
+
+
+def test_backoff_without_retry_after_is_capped_at_retry_backoff_max_s(monkeypatch):
+    persistence = _persistence()
+    client = FakeModelClient(responses={
+        "databricks-gpt-oss-120b": [RateLimited("ep", "slow down"), _resp(text="ok now")],
+    })
+    slept: list[float] = []
+    monkeypatch.setattr("orchestrator.llm.gateway.time.sleep", lambda s: slept.append(s))
+    monkeypatch.setattr("orchestrator.llm.gateway.random.uniform", lambda a, b: 0.0)
+    gw = _gateway(client, persistence=persistence, retry_backoff_s=1000.0, retry_backoff_max_s=5.0)
+    gw.call(task="classify", seq=1, messages=[], desired_params={}, ctx=_ctx())
+    assert slept == [5.0]
 
 
 # ── schema validation with one retry ─────────────────────────────────────

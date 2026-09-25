@@ -139,6 +139,8 @@ _ALWAYS_FORWARDED_SETTINGS: list[tuple[str, str]] = [
     ("readiness_cache_ttl_s", "READINESS_CACHE_TTL_S"),
     ("llm_timeout_s", "LLM_TIMEOUT_S"),
     ("llm_retry_backoff_s", "LLM_RETRY_BACKOFF_S"),
+    ("llm_max_transport_attempts", "LLM_MAX_TRANSPORT_ATTEMPTS"),
+    ("llm_retry_backoff_max_s", "LLM_RETRY_BACKOFF_MAX_S"),
     ("enable_row_level_llm", "ENABLE_ROW_LEVEL_LLM"),
     ("llm_cache_mode", "LLM_CACHE_MODE"),
     # BUG-1: Explorer refuses to start with this unset (NN14) -- Explorer is
@@ -154,6 +156,7 @@ _ALWAYS_FORWARDED_SETTINGS: list[tuple[str, str]] = [
     ("narration_enabled", "NARRATION_ENABLED"),
     ("ai_proposed_findings_enabled", "AI_PROPOSED_FINDINGS_ENABLED"),
     ("narration_max_candidates", "NARRATION_MAX_CANDIDATES"),
+    ("narration_max_parallel", "NARRATION_MAX_PARALLEL"),
     ("explorer_category_max_distinct", "EXPLORER_CATEGORY_MAX_DISTINCT"),
     ("explorer_category_min_count", "EXPLORER_CATEGORY_MIN_COUNT"),
     ("explorer_max_columns", "EXPLORER_MAX_COLUMNS"),
