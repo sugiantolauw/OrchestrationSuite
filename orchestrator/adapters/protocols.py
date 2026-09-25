@@ -276,6 +276,17 @@ class PersistenceAdapter(Protocol):
     def list_skill_versions(self, skill_id: str) -> list[dict]:
         ...
 
+    def list_skill_versions_by_origin(self, origin: str) -> list[dict]:
+        """The latest row (by created_at) per skill_id whose content.origin ==
+        `origin` -- app/'s /skills list use ('explorer_saved') so a saved
+        Explorer draft appears there without a repo directory (docs/specs/
+        P6_P8_explorer_llm_design.md §4.13 point 4). `origin` lives inside
+        each row's content_json (record_skill_version's own `content` dict),
+        not a separate indexed column, so this is necessarily a full scan --
+        acceptable at the skill_versions table's scale (one row per Skill
+        version, never per run)."""
+        ...
+
     def upsert_risks(self, risks: list[dict], *, now: str) -> None:
         ...
 
