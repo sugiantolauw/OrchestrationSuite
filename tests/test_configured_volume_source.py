@@ -18,6 +18,8 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import threading
+import time
 
 import pandas as pd
 import pytest
@@ -233,6 +235,214 @@ def test_configured_binding_takes_priority_when_an_upload_shares_the_path():
     # storage was never even asked, since resolve_version returns the
     # recorded sha256 straight from the upload row.
     assert ds.export_storage.read_calls == []
+
+
+# ── resolve_source_versions concurrency (P3/P4 perf gap review 2026-09-25) ──
+
+
+class _TrackingExportStorage:
+    """Like `_FakeExportStorage`, but can simulate a slow read (`sleep_s`)
+    and records how many `.read()` calls were in flight at once, so a test
+    can assert real concurrency happened rather than a short wall time by
+    coincidence."""
+
+    def __init__(self, files: dict[str, bytes], sleep_s: float = 0.0):
+        self.files = files
+        self.sleep_s = sleep_s
+        self.read_calls: list[str] = []
+        self._lock = threading.Lock()
+        self.current = 0
+        self.max_seen = 0
+
+    def read(self, path):
+        with self._lock:
+            self.current += 1
+            self.max_seen = max(self.max_seen, self.current)
+        try:
+            self.read_calls.append(path)
+            if self.sleep_s:
+                time.sleep(self.sleep_s)
+            if path not in self.files:
+                raise FileNotFoundError(path)
+            return self.files[path]
+        finally:
+            with self._lock:
+                self.current -= 1
+
+
+class _CountingPersistence:
+    """Like `_FakePersistence`, but counts how many times
+    `list_uploaded_files()` was actually called -- proves the listing is
+    fetched once and shared, not once per source resolved."""
+
+    def __init__(self, rows):
+        self.rows = rows
+        self.call_count = 0
+
+    def list_uploaded_files(self, engagement_id=None):
+        self.call_count += 1
+        return self.rows
+
+
+class _SettingsStub:
+    def __init__(self, max_connections):
+        self.max_connections = max_connections
+
+
+class _TableSourceWithSettings:
+    """A table_source stub carrying a `.settings.max_connections`, the same
+    attribute path `VolumeUploadAwareDataSource._resolve_cap` reads from a
+    real `UCTableDataSource`."""
+
+    def __init__(self, max_connections, table_versions=None):
+        self.settings = _SettingsStub(max_connections)
+        self._table_versions = table_versions or {}
+
+    def resolve_source_versions(self, names):
+        return {n: self._table_versions.get(n, f"table-v-{n}") for n in names}
+
+
+def test_resolve_source_versions_runs_configured_files_concurrently():
+    n = 6
+    sleep_s = 0.05
+    paths = {f"p{i}": f"/Volumes/cat/sch/vol/tne/f{i}.csv" for i in range(n)}
+    files = {path: CSV_BYTES for path in paths.values()}
+    export_storage = _TrackingExportStorage(files, sleep_s=sleep_s)
+    configured = {path: {"path": path} for path in paths.values()}
+
+    ds = VolumeUploadAwareDataSource(
+        table_source=_ExplodingTableSource(),
+        bindings=paths,
+        contract_sources={},
+        persistence=_FakePersistence(),
+        export_storage=export_storage,
+        configured_volume_paths=configured,
+    )
+
+    start = time.monotonic()
+    result = ds.resolve_source_versions(list(paths))
+    elapsed = time.monotonic() - start
+
+    assert result == {name: CSV_SHA256 for name in paths}
+    sequential_time = n * sleep_s
+    assert elapsed < sequential_time / 2, (
+        f"resolve_source_versions took {elapsed:.3f}s for {n} configured files at "
+        f"{sleep_s}s each ({sequential_time:.3f}s sequential) -- looks serialised"
+    )
+    assert export_storage.max_seen > 1, "no two configured-file reads ever overlapped"
+
+
+def test_resolve_source_versions_respects_max_connections_bound():
+    n = 6
+    sleep_s = 0.05
+    cap = 2
+    paths = {f"p{i}": f"/Volumes/cat/sch/vol/tne/f{i}.csv" for i in range(n)}
+    files = {path: CSV_BYTES for path in paths.values()}
+    export_storage = _TrackingExportStorage(files, sleep_s=sleep_s)
+    configured = {path: {"path": path} for path in paths.values()}
+
+    ds = VolumeUploadAwareDataSource(
+        table_source=_TableSourceWithSettings(max_connections=cap),
+        bindings=paths,
+        contract_sources={},
+        persistence=_FakePersistence(),
+        export_storage=export_storage,
+        configured_volume_paths=configured,
+    )
+
+    ds.resolve_source_versions(list(paths))
+
+    assert export_storage.max_seen <= cap
+
+
+def test_resolve_source_versions_fetches_the_upload_list_once():
+    rows = [
+        {"filename": "a.csv", "volume_path": "/Volumes/cat/sch/vol/uploads/a.csv", "sha256": "sha-a"},
+        {"filename": "b.csv", "volume_path": "/Volumes/cat/sch/vol/uploads/b.csv", "sha256": "sha-b"},
+        {"filename": "c.csv", "volume_path": "/Volumes/cat/sch/vol/uploads/c.csv", "sha256": "sha-c"},
+    ]
+    persistence = _CountingPersistence(rows)
+    bindings = {r["filename"][:-4]: r["volume_path"] for r in rows}
+
+    ds = VolumeUploadAwareDataSource(
+        table_source=_ExplodingTableSource(),
+        bindings=bindings,
+        contract_sources={},
+        persistence=persistence,
+        export_storage=_FakeExportStorage({}),
+        configured_volume_paths={},
+    )
+
+    result = ds.resolve_source_versions(list(bindings))
+
+    assert result == {"a": "sha-a", "b": "sha-b", "c": "sha-c"}
+    assert persistence.call_count == 1, "list_uploaded_files() must be fetched once and shared"
+
+
+def test_resolve_source_versions_deterministic_with_mixed_source_kinds():
+    """One batch spanning all three kinds -- an uploaded file (pre-recorded
+    hash, no I/O), a configured Volume file (read-and-hash), and a governed
+    table (delegates to table_source) -- assembled back in the caller's own
+    order, keyed by source name."""
+    upload_row = {
+        "filename": "claims.csv",
+        "volume_path": "/Volumes/cat/sch/vol/uploads/u1/claims.csv",
+        "sha256": "up-sha",
+    }
+    persistence = _CountingPersistence([upload_row])
+    configured_path = "/Volumes/cat/sch/vol/tne/per_diem.csv"
+    export_storage = _TrackingExportStorage({configured_path: CSV_BYTES})
+
+    ds = VolumeUploadAwareDataSource(
+        table_source=_TableSourceWithSettings(max_connections=6),
+        bindings={
+            "claims": upload_row["volume_path"],
+            "per_diem_rates": configured_path,
+            "expense_report": "cat.sch.expense_report",
+        },
+        contract_sources={},
+        persistence=persistence,
+        export_storage=export_storage,
+        configured_volume_paths={configured_path: {"path": configured_path}},
+    )
+
+    result = ds.resolve_source_versions(["claims", "per_diem_rates", "expense_report"])
+
+    assert result == {
+        "claims": "up-sha",
+        "per_diem_rates": CSV_SHA256,
+        "expense_report": "table-v-expense_report",
+    }
+    assert list(result) == ["claims", "per_diem_rates", "expense_report"]
+    assert persistence.call_count == 1
+
+
+def test_resolve_source_versions_one_failure_fails_the_whole_batch():
+    good_path = "/Volumes/cat/sch/vol/tne/good.csv"
+    bad_path = "/Volumes/cat/sch/vol/tne/missing.csv"
+    export_storage = _TrackingExportStorage({good_path: CSV_BYTES})
+    bindings = {"good": good_path, "bad": bad_path}
+    configured = {good_path: {"path": good_path}, bad_path: {"path": bad_path}}
+
+    ds = VolumeUploadAwareDataSource(
+        table_source=_ExplodingTableSource(),
+        bindings=bindings,
+        contract_sources={},
+        persistence=_FakePersistence(),
+        export_storage=export_storage,
+        configured_volume_paths=configured,
+    )
+
+    with pytest.raises(ConfiguredSourceUnavailable):
+        ds.resolve_source_versions(["good", "bad"])
+
+
+def test_resolve_source_versions_single_configured_source_stays_sequential():
+    """cap collapses to 1 for a single source needing I/O -- no thread pool
+    spun up, same resolve_version() call path as before."""
+    ds = _ds({VOLUME_PATH: CSV_BYTES}, {VOLUME_PATH: {"path": VOLUME_PATH}})
+    result = ds.resolve_source_versions(["expense_report"])
+    assert result == {"expense_report": CSV_SHA256}
 
 
 # ── orchestrator.source_bindings ────────────────────────────────────────────

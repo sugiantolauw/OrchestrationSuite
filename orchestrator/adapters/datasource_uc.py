@@ -22,6 +22,7 @@ import os
 import re
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -291,7 +292,65 @@ class UCTableDataSource:
         # Matches orchestrator.contract.LocalFileDataSource.resolve_source_versions:
         # despite the Protocol's parameter name, this takes SOURCE NAMES (contract.yaml
         # keys), not table_fqns -- callers resolve a whole Skill's sources by name.
-        return {name: self.resolve_version(name) for name in sources}
+        #
+        # P3/P4 perf gap review (2026-09-25): a plain `{name: self.resolve_version(name)
+        # for name in sources}` loop runs every DESCRIBE HISTORY sequentially, because
+        # resolve_version -> _resolve_version_for_fqn -> _execute -> _get_connection() all
+        # share this instance's ONE lazily-opened connection, guarded by `_conn_lock` --
+        # a second thread's resolve_version blocks on the lock for the first thread's
+        # entire round trip. Live measurement: service.start_audit_run resolving
+        # SKILL-001's 8 bound sources sequentially took 13.0s (0.97-5.66s each).
+        #
+        # Below, each resolution gets its OWN short-lived connection (`self._factory()`,
+        # opened and closed just for that one DESCRIBE HISTORY) and they run concurrently
+        # via a bounded ThreadPoolExecutor -- CLAUDE.md §2.3 rule 3's concurrency cap
+        # (DBX_MAX_CONNECTIONS, `settings.max_connections`, the same knob
+        # persistence_delta.DeltaPersistence's connection pool is bounded by) applies here
+        # too, capped further at `len(sources)` so a small Skill never opens connections
+        # it has no use for. `self._fqn(name)` is resolved for every source BEFORE any
+        # thread starts, so an unbound source (UCSourceError) fails loudly before a single
+        # connection is opened, exactly as it did in the sequential version. Every source's
+        # version is still resolved before any read (CLAUDE.md §4.1 TOCTOU ordering) --
+        # this only changes HOW the resolutions happen, never when relative to a read.
+        if not sources:
+            return {}
+        fqns = {name: self._fqn(name) for name in sources}
+        cap = max(1, min(len(sources), self.settings.max_connections))
+        if cap == 1:
+            return {name: self._resolve_version_for_fqn(fqns[name]) for name in sources}
+
+        def _resolve_on_own_connection(fqn: str) -> str:
+            conn = self._factory()
+            try:
+                cur = conn.cursor()
+                cur.execute(f"DESCRIBE HISTORY {_quoted_fqn(fqn)} LIMIT 1")
+                columns = [d[0] for d in cur.description]
+                row = cur.fetchone()
+                if row is None:
+                    raise UCSourceError(
+                        f"DESCRIBE HISTORY returned no rows for {fqn} -- table has no commits"
+                    )
+                idx = columns.index("version")
+                return str(row[idx])
+            finally:
+                # No idle connections left behind: each ephemeral connection
+                # is closed the moment its own resolution is done, win or
+                # lose, never held open waiting for the batch's other calls.
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+        with ThreadPoolExecutor(max_workers=cap) as pool:
+            futures = {name: pool.submit(_resolve_on_own_connection, fqns[name]) for name in sources}
+            # .result() on each future re-raises that source's exception (if
+            # any) here -- a single failure fails the whole batch loudly
+            # (CLAUDE.md NN14), exactly as the sequential version's first
+            # failing resolve_version() call would have. Iterating `sources`
+            # (not completion order) assembles the returned dict
+            # deterministically by source name, matching the input order,
+            # regardless of which resolution actually finished first.
+            return {name: futures[name].result() for name in sources}
 
     def _describe_columns(self, quoted_fqn: str, version: int) -> list[str]:
         cur = self._execute(f"SELECT * FROM {quoted_fqn} VERSION AS OF {version} LIMIT 0")

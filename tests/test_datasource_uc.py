@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import threading
+import time
 from pathlib import Path
 
 import pandas as pd
@@ -13,6 +15,7 @@ from orchestrator.adapters.datasource_uc import (
     _build_where,
     _normalise_datetime_dtypes,
     _quote_ident,
+    _quoted_fqn,
     clear_table_listing_cache,
 )
 from orchestrator.config import Settings
@@ -168,6 +171,201 @@ def test_resolve_source_versions_takes_source_names():
     handlers = {"DESCRIBE HISTORY": lambda sql, p: (["version"], [(3,)])}
     ds, _ = _ds(handlers)
     assert ds.resolve_source_versions(["expense_report"]) == {"expense_report": "3"}
+
+
+# ── resolve_source_versions concurrency (P3/P4 perf gap review 2026-09-25) ──
+
+
+class _ConcurrencyTracker:
+    """Records how many `_SleepingConnection.cursor().execute()` calls were
+    in flight at once, so a test can assert real concurrency happened (not
+    just that the wall-clock time was short by coincidence)."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.current = 0
+        self.max_seen = 0
+
+    def enter(self):
+        with self._lock:
+            self.current += 1
+            self.max_seen = max(self.max_seen, self.current)
+
+    def exit(self):
+        with self._lock:
+            self.current -= 1
+
+
+class _SleepingCursor:
+    def __init__(self, version_by_quoted_fqn, sleep_s, tracker):
+        self._version_by_quoted_fqn = version_by_quoted_fqn
+        self._sleep_s = sleep_s
+        self._tracker = tracker
+        self.description = []
+        self._rows = []
+        self._pos = 0
+
+    def execute(self, sql_text, params=None):
+        self._tracker.enter()
+        try:
+            time.sleep(self._sleep_s)
+            qfqn = sql_text[len("DESCRIBE HISTORY ") : -len(" LIMIT 1")]
+            version = self._version_by_quoted_fqn[qfqn]
+            self.description = [("version",)]
+            self._rows = [(version,)]
+            self._pos = 0
+        finally:
+            self._tracker.exit()
+
+    def fetchone(self):
+        if self._pos < len(self._rows):
+            row = self._rows[self._pos]
+            self._pos += 1
+            return row
+        return None
+
+
+class _SleepingConnection:
+    """A fresh instance is handed back on every `connection_factory()` call --
+    the shape `resolve_source_versions` relies on for "each resolution on its
+    own connection" (unlike `FakeConnection` above, which `_ds()` always
+    reuses via a shared closure)."""
+
+    def __init__(self, version_by_quoted_fqn, sleep_s, tracker):
+        self._version_by_quoted_fqn = version_by_quoted_fqn
+        self._sleep_s = sleep_s
+        self._tracker = tracker
+        self.closed = False
+
+    def cursor(self):
+        return _SleepingCursor(self._version_by_quoted_fqn, self._sleep_s, self._tracker)
+
+    def close(self):
+        self.closed = True
+
+
+def test_resolve_source_versions_runs_concurrently_wall_time_is_max_not_sum():
+    n = 8
+    sleep_s = 0.05
+    bindings = {f"s{i}": f"cat.sch.t{i}" for i in range(n)}
+    version_by_quoted_fqn = {_quoted_fqn(fqn): str(i) for i, fqn in enumerate(bindings.values())}
+    tracker = _ConcurrencyTracker()
+
+    def factory():
+        return _SleepingConnection(version_by_quoted_fqn, sleep_s, tracker)
+
+    ds = UCTableDataSource(_settings(), bindings, connection_factory=factory)
+
+    start = time.monotonic()
+    result = ds.resolve_source_versions(list(bindings))
+    elapsed = time.monotonic() - start
+
+    assert result == {f"s{i}": str(i) for i in range(n)}
+    sequential_time = n * sleep_s
+    assert elapsed < sequential_time / 2, (
+        f"resolve_source_versions took {elapsed:.3f}s for {n} sources at {sleep_s}s each "
+        f"({sequential_time:.3f}s sequential) -- looks serialised, not concurrent"
+    )
+    assert tracker.max_seen > 1, "no two DESCRIBE HISTORY calls ever overlapped"
+
+
+def test_resolve_source_versions_respects_max_connections_bound():
+    n = 8
+    sleep_s = 0.05
+    cap = 2
+    bindings = {f"s{i}": f"cat.sch.t{i}" for i in range(n)}
+    version_by_quoted_fqn = {_quoted_fqn(fqn): str(i) for i, fqn in enumerate(bindings.values())}
+    tracker = _ConcurrencyTracker()
+
+    def factory():
+        return _SleepingConnection(version_by_quoted_fqn, sleep_s, tracker)
+
+    settings = Settings(
+        host="https://x.cloud.databricks.com", warehouse_http_path="/sql/1.0/warehouses/abc",
+        max_connections=cap,
+    )
+    ds = UCTableDataSource(settings, bindings, connection_factory=factory)
+
+    ds.resolve_source_versions(list(bindings))
+
+    assert tracker.max_seen <= cap
+
+
+def test_resolve_source_versions_assembles_deterministically_by_source_name():
+    bindings = {f"s{i}": f"cat.sch.t{i}" for i in range(5)}
+    handlers = {}
+    for i, fqn in enumerate(bindings.values()):
+        def handler(sql, p, _v=i):
+            return (["version"], [(_v,)])
+
+        handlers[_quoted_fqn(fqn)] = handler
+
+    def factory():
+        return FakeConnection(handlers)
+
+    ds = UCTableDataSource(_settings(), bindings, connection_factory=factory)
+    result = ds.resolve_source_versions(list(bindings))
+
+    assert result == {f"s{i}": str(i) for i in range(5)}
+    assert list(result) == list(bindings), "result order must match the caller's input order"
+
+
+def test_resolve_source_versions_one_failure_fails_the_whole_batch():
+    bindings = {"a": "cat.sch.a", "b": "cat.sch.b", "c": "cat.sch.c"}
+
+    def failing_handler(sql, p):
+        raise RuntimeError("boom on b")
+
+    def ok_handler(sql, p):
+        return (["version"], [(1,)])
+
+    handlers = {
+        _quoted_fqn("cat.sch.a"): ok_handler,
+        _quoted_fqn("cat.sch.b"): failing_handler,
+        _quoted_fqn("cat.sch.c"): ok_handler,
+    }
+
+    def factory():
+        return FakeConnection(handlers)
+
+    ds = UCTableDataSource(_settings(), bindings, connection_factory=factory)
+    with pytest.raises(RuntimeError, match="boom on b"):
+        ds.resolve_source_versions(list(bindings))
+
+
+def test_resolve_source_versions_each_call_closes_its_own_connection():
+    n = 4
+    opened: list = []
+
+    class _TrackedConnection(FakeConnection):
+        def close(self):
+            opened.remove(self)
+            super().close()
+
+    handlers = {_quoted_fqn(f"cat.sch.t{i}"): (lambda sql, p, _v=i: (["version"], [(_v,)])) for i in range(n)}
+    bindings = {f"s{i}": f"cat.sch.t{i}" for i in range(n)}
+
+    def factory():
+        conn = _TrackedConnection(handlers)
+        opened.append(conn)
+        return conn
+
+    ds = UCTableDataSource(_settings(), bindings, connection_factory=factory)
+    ds.resolve_source_versions(list(bindings))
+
+    assert opened == [], "every ephemeral connection opened for a resolve must be closed, none left idle"
+
+
+def test_resolve_source_versions_single_source_uses_the_existing_single_connection_path():
+    """cap collapses to 1 for a single source -- no ThreadPoolExecutor, no
+    extra connection opened; goes through the same `_execute`/shared-`_conn`
+    path `resolve_version` always used, so a Skill with one source sees no
+    behaviour change at all."""
+    handlers = {"DESCRIBE HISTORY": lambda sql, p: (["version"], [(9,)])}
+    ds, conn = _ds(handlers)
+    result = ds.resolve_source_versions(["expense_report"])
+    assert result == {"expense_report": "9"}
+    assert ds._conn is conn, "singular resolve must still use the instance's shared lazy connection"
 
 
 # ── get_row_count() / get_classification() (data_asset_card metadata) ───────

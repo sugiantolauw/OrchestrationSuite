@@ -1253,7 +1253,15 @@ def start_audit_run(
     # Resolve every source's version FIRST, before any read (CLAUDE.md §4.1
     # TOCTOU ordering) -- these become both this run's pinned data_assets
     # bindings and the fingerprint's source_table_versions.
-    source_versions = {name: data_source.resolve_version(name) for name in contract_sources}
+    #
+    # P3/P4 perf gap review (2026-09-25): resolve_source_versions (not a
+    # per-source resolve_version() loop) lets a UC-backed/Volume-aware data
+    # source resolve all of a Skill's sources concurrently, on a bounded pool
+    # of connections, instead of one DESCRIBE HISTORY/file-hash at a time --
+    # live measurement showed SKILL-001's 8 sources taking 13.0s resolved
+    # sequentially. Still resolved before any read either way; this only
+    # changes how the resolutions themselves run.
+    source_versions = data_source.resolve_source_versions(list(contract_sources))
 
     # A source bound to an uploaded file (run_setup._auto_bind's exact-
     # filename-stem match), or to a SOURCE_BINDINGS-configured Volume file
