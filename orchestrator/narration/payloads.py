@@ -343,6 +343,37 @@ def build_synthesis_payload(findings: list[dict], *, skill) -> tuple[dict, dict[
     return {"identifiers": identifiers, "findings": items}, tables
 
 
+def identifiers_for_findings(findings: list[dict]) -> frozenset[str]:
+    """The N-D1 allow-list (CLAUDE.md §3.3) for prose validated against
+    MORE THAN ONE finding at once -- `find_synthesis`'s themes and severity
+    proposals today. Every finding's `test_id`/`control_id`/`risk_id` is a
+    legitimate per-run identifier a model may write verbatim (e.g.
+    "T3.1a", the dotted form `orchestrator.narration.validate._TOKEN_RE`
+    matches as one token) without tripping the literal-number ban.
+
+    THE single source both `orchestrator.narration.runner.narrate_synthesis`
+    (generation time) and `orchestrator.service._narrative_allowed_identifiers`
+    (re-validation -- G11, edit review, the exec/human-facing "Numbers
+    from" reads) build this allow-list from, so the two can never drift
+    apart again. BUG-SYNTH-T1T2 (independent review round 3, 2026-09-25):
+    a theme's stored root_cause/summary legitimately citing a member
+    finding's own test_id at GENERATION time (this run's full finding set
+    was the allowed set `narrate_synthesis` validated against) still
+    failed N-D1 on RE-validation, because the re-validation path passed no
+    `allowed_identifiers` at all -- not a narrower, differently-scoped set,
+    none. Reconstructing the identical set from this run's persisted
+    findings (`ctx.persistence.list_findings(state.run_id)`, exactly what
+    `narrate_synthesis` was called with) closes that gap without loosening
+    what N-D1 catches for a genuinely invented number."""
+    ids: set[str] = set()
+    for finding in findings:
+        for key in ("test_id", "control_id", "risk_id"):
+            value = finding.get(key)
+            if value:
+                ids.add(value)
+    return frozenset(ids)
+
+
 # ── `find_candidates` (finding-candidates/1): one call, skipped by the
 # caller unless some test has exception_units > 0 (§4.1) ───────────────────
 

@@ -37,7 +37,6 @@ pytestmark = pytest.mark.skipif(
 def test_one_real_narration_pass_per_task_passes_g11_or_is_a_labelled_fallback(tmp_path):
     from orchestrator.adapters.persistence_local import LocalPersistence
     from orchestrator.config import load_settings
-    from orchestrator.narration.placeholders import scan_placeholders, strip_placeholder_spans
     from orchestrator.nodes.narration import narrate
     from tests.narration_test_support import make_narration_harness, run_to_narrate_input
 
@@ -64,17 +63,38 @@ def test_one_real_narration_pass_per_task_passes_g11_or_is_a_labelled_fallback(t
         print(f"{c['task']} seq={c['seq']}: endpoint={c['endpoint']!r} outcome={c['outcome']!r} "
               f"served_model={c['served_model_version']!r}")
 
+    # BUG-SYNTH-T1T2 (independent review round 3, 2026-09-25): a bare
+    # "stray digit outside a placeholder span" scan does not know about the
+    # N-D1 allow-list -- a theme legitimately citing a member finding's own
+    # test_id ("T3.1a") is valid model output (CLAUDE.md §3.3), yet every
+    # digit in that token would fail this check regardless. Re-validate
+    # with the SAME identifier table generation used
+    # (`service._narrative_allowed_identifiers`, the same fix
+    # `tests/test_g11_invariant.py` applies) rather than a digit-blind
+    # scan, so this live pass agrees with the G11 invariant on what counts
+    # as a real violation.
+    from orchestrator import service
+    from orchestrator.narration.validate import validate_prose
+
     narratives = persistence.get_narratives(state.run_id)
     assert narratives
     for n in narratives:
         if n["origin"] in ("model", "model_repaired"):
+            table = service._narrative_table(h.ctx, result, n)
+            allowed_identifiers = service._narrative_allowed_identifiers(h.ctx, result, n)
+            validator_field = service._VALIDATOR_FIELD_FOR[(n["target_kind"], n["field"])]
             text = n["template_text"]
             items = text if isinstance(text, list) else [text]
             for item in items:
-                spans = scan_placeholders(item)
-                stripped = strip_placeholder_spans(item, spans)
-                stray_digits = [ch for ch in stripped if ch.isnumeric()]
-                assert not stray_digits, f"{n['narrative_id']}: digit(s) outside a placeholder span: {item!r}"
+                # validate_prose's own N-D1 rule IS "no numeral survives
+                # outside a placeholder span, except a whole token from
+                # `allowed_identifiers`" (orchestrator.narration.validate.
+                # _check_model_digits) -- this replaces the old bare
+                # stray-digit scan entirely rather than duplicating it.
+                vres = validate_prose(
+                    item, table, field=validator_field, origin="model", allowed_identifiers=allowed_identifiers,
+                )
+                assert vres.valid, f"{n['narrative_id']}: {[(v.rule_id, v.message) for v in vres.violations]}"
         else:
             assert n["template_text"] is None, f"{n['narrative_id']}: fallback row carries stored prose"
             print(f"{n['narrative_id']} ({n['target_kind']}.{n['field']}): fallback, origin={n['origin']!r}")

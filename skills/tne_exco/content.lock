@@ -1,0 +1,16 @@
+# BUG-SKILLVER-1 guard (independent review, round 3, 2026-09-25): pins this
+# Skill's version to the content_hash it must currently hash to
+# (orchestrator.fingerprint.skill_content_hash, the SAME hash
+# orchestrator.skill_registry.register_skill checks against the shared
+# skill_versions ledger, CLAUDE.md §9C "Skill versioning and rollback").
+#
+# tests/test_skill_content_lock.py fails the build the moment this Skill's
+# real content_hash drifts from the hash recorded here while `version`
+# stays unchanged -- exactly the shape of the bug this lock exists to
+# catch: a content-affecting edit (skills/tne_exco/findings.yaml in commit
+# 7d46554) landed without the version bump every earlier content change
+# made (e14e155, 022d7db). Whenever that test fails: bump manifest.yaml's
+# version, then regenerate this file so `version`/`content_hash` match the
+# new content again.
+version: "2.1.0-draft"
+content_hash: "0f5744f3001072e438a548f8c6baefa9dd7364f0d38254daf9b1459f54972e5d"

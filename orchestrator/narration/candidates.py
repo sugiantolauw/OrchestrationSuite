@@ -206,7 +206,18 @@ def _field(
     ]
 
 
-def _allowed_identifiers_for(cited: list[str], metrics: dict[str, dict], test_ident: dict[str, dict]) -> set[str]:
+def allowed_identifiers_for_cited_metrics(
+    cited: list[str], metrics: dict[str, dict], test_ident: dict[str, dict]
+) -> set[str]:
+    """The N-D1 allow-list for a candidate's own prose (§5.1): each cited
+    metric's `test_id` (`run_metrics`'s own per-metric provenance) plus
+    that test's `control_id`/`risk_id` (`test_ident`, built from
+    `skill.plan`'s own tests -- CLAUDE.md §4.9). Public (not `_`-prefixed):
+    `orchestrator.service._narrative_allowed_identifiers` re-validates a
+    persisted `candidate`-kind narrative against this SAME computation
+    (BUG-SYNTH-T1T2's fix, independent review round 3, 2026-09-25 -- a
+    re-validation must build its allow-list identically to generation,
+    never independently)."""
     ids: set[str] = set()
     for name in cited:
         test_id = (metrics.get(name) or {}).get("test_id")
@@ -225,7 +236,7 @@ def _validate_response(
     for item in parsed.get("candidates", []):
         cited = [n for n in (item.get("metrics_cited") or []) if isinstance(n, str)]
         table = {n: all_metrics_table[n] for n in cited if n in all_metrics_table}
-        allowed = _allowed_identifiers_for(cited, metrics, test_ident)
+        allowed = allowed_identifiers_for_cited_metrics(cited, metrics, test_ident)
         violations += _field(item.get("title", ""), table, field="candidate_title", allowed_identifiers=allowed)
         violations += _field(
             item.get("observation", ""), table, field="observation", allowed_identifiers=allowed,

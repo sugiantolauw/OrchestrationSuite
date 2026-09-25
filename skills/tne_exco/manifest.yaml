@@ -1,7 +1,15 @@
+# Changelog (manifest.yaml carries no structured field for this --
+# additionalProperties: false in orchestrator/schemas/manifest.schema.json
+# -- so it is recorded here as a comment; content.lock in this directory
+# pins the version this content_hash belongs to):
+#   2.1.0-draft (2026-09-25): findings.yaml's optional metric_descriptions
+#     block (BUG-SKILLVER-1 fix -- commit 7d46554 changed findings.yaml by
+#     154 lines without bumping this file, which broke every fresh
+#     SKILL-001 run against the shared ledger with SkillVersionConflict).
 id: SKILL-001
 name: ExCo T&E Executive Diligence
 domain: Travel & Expenses
-version: "2.0.7-draft"
+version: "2.1.0-draft"
 owner: Internal Audit
 status: draft
 description: >
