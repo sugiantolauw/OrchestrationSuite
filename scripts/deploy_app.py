@@ -129,6 +129,7 @@ def _git_head(repo_root: Path) -> str | None:
 _ALWAYS_FORWARDED_SETTINGS: list[tuple[str, str]] = [
     ("executor", "EXECUTOR"),
     ("max_concurrent_runs", "MAX_CONCURRENT_RUNS"),
+    ("max_connections", "DBX_MAX_CONNECTIONS"),
     ("demo_mode", "DEMO_MODE"),
     ("admission_max_attempts", "ADMISSION_MAX_ATTEMPTS"),
     ("admission_backoff_base_s", "ADMISSION_BACKOFF_BASE_S"),

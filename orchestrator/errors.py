@@ -506,3 +506,21 @@ class MissingSeverityProvenance(Exception):
             f"finding {finding_id!r}: {field} was not persisted -- a severity's provenance "
             f"must never be assumed (CLAUDE.md §0.4)"
         )
+
+
+class ConnectionPoolExhausted(Exception):
+    """CLAUDE.md NN14 (no silent defaults for missing data / fail loudly rather
+    than guess): DeltaPersistence's connection pool (P3/P4 perf gap review
+    2026-09-25, bounded-pool follow-up) has `max_size` connections all checked
+    out, and none became free within the checkout timeout. Raised instead of
+    blocking forever or silently proceeding with no connection -- a caller
+    sees a clear, actionable error naming the bound rather than an
+    unexplained hang."""
+
+    def __init__(self, max_size: int, timeout_s: float):
+        self.max_size = max_size
+        self.timeout_s = timeout_s
+        super().__init__(
+            f"connection pool exhausted: no connection became available within "
+            f"{timeout_s}s (pool max_size={max_size}, DBX_MAX_CONNECTIONS)"
+        )
