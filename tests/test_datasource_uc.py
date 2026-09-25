@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import threading
+import time
 from pathlib import Path
 
 import pandas as pd
@@ -8,11 +10,14 @@ import pyarrow as pa
 import pytest
 
 from orchestrator.adapters.datasource_uc import (
+    UCConnectionPoolExhausted,
     UCSourceError,
     UCTableDataSource,
     _build_where,
     _normalise_datetime_dtypes,
     _quote_ident,
+    _quoted_fqn,
+    _UCConnectionPool,
     clear_table_listing_cache,
 )
 from orchestrator.config import Settings
@@ -168,6 +173,384 @@ def test_resolve_source_versions_takes_source_names():
     handlers = {"DESCRIBE HISTORY": lambda sql, p: (["version"], [(3,)])}
     ds, _ = _ds(handlers)
     assert ds.resolve_source_versions(["expense_report"]) == {"expense_report": "3"}
+
+
+# ── resolve_source_versions concurrency (P3/P4 perf gap review 2026-09-25) ──
+
+
+class _ConcurrencyTracker:
+    """Records how many `_SleepingConnection.cursor().execute()` calls were
+    in flight at once, so a test can assert real concurrency happened (not
+    just that the wall-clock time was short by coincidence)."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.current = 0
+        self.max_seen = 0
+
+    def enter(self):
+        with self._lock:
+            self.current += 1
+            self.max_seen = max(self.max_seen, self.current)
+
+    def exit(self):
+        with self._lock:
+            self.current -= 1
+
+
+class _SleepingCursor:
+    def __init__(self, version_by_quoted_fqn, sleep_s, tracker):
+        self._version_by_quoted_fqn = version_by_quoted_fqn
+        self._sleep_s = sleep_s
+        self._tracker = tracker
+        self.description = []
+        self._rows = []
+        self._pos = 0
+
+    def execute(self, sql_text, params=None):
+        self._tracker.enter()
+        try:
+            time.sleep(self._sleep_s)
+            qfqn = sql_text[len("DESCRIBE HISTORY ") : -len(" LIMIT 1")]
+            version = self._version_by_quoted_fqn[qfqn]
+            self.description = [("version",)]
+            self._rows = [(version,)]
+            self._pos = 0
+        finally:
+            self._tracker.exit()
+
+    def fetchone(self):
+        if self._pos < len(self._rows):
+            row = self._rows[self._pos]
+            self._pos += 1
+            return row
+        return None
+
+
+class _SleepingConnection:
+    """A fresh instance is handed back on every `connection_factory()` call --
+    the shape `resolve_source_versions` relies on for "each resolution on its
+    own connection" (unlike `FakeConnection` above, which `_ds()` always
+    reuses via a shared closure)."""
+
+    def __init__(self, version_by_quoted_fqn, sleep_s, tracker):
+        self._version_by_quoted_fqn = version_by_quoted_fqn
+        self._sleep_s = sleep_s
+        self._tracker = tracker
+        self.closed = False
+
+    def cursor(self):
+        return _SleepingCursor(self._version_by_quoted_fqn, self._sleep_s, self._tracker)
+
+    def close(self):
+        self.closed = True
+
+
+def test_resolve_source_versions_runs_concurrently_wall_time_is_max_not_sum():
+    n = 8
+    sleep_s = 0.05
+    bindings = {f"s{i}": f"cat.sch.t{i}" for i in range(n)}
+    version_by_quoted_fqn = {_quoted_fqn(fqn): str(i) for i, fqn in enumerate(bindings.values())}
+    tracker = _ConcurrencyTracker()
+
+    def factory():
+        return _SleepingConnection(version_by_quoted_fqn, sleep_s, tracker)
+
+    ds = UCTableDataSource(_settings(), bindings, connection_factory=factory)
+
+    start = time.monotonic()
+    result = ds.resolve_source_versions(list(bindings))
+    elapsed = time.monotonic() - start
+
+    assert result == {f"s{i}": str(i) for i in range(n)}
+    sequential_time = n * sleep_s
+    assert elapsed < sequential_time / 2, (
+        f"resolve_source_versions took {elapsed:.3f}s for {n} sources at {sleep_s}s each "
+        f"({sequential_time:.3f}s sequential) -- looks serialised, not concurrent"
+    )
+    assert tracker.max_seen > 1, "no two DESCRIBE HISTORY calls ever overlapped"
+
+
+def test_resolve_source_versions_respects_max_connections_bound():
+    n = 8
+    sleep_s = 0.05
+    cap = 2
+    bindings = {f"s{i}": f"cat.sch.t{i}" for i in range(n)}
+    version_by_quoted_fqn = {_quoted_fqn(fqn): str(i) for i, fqn in enumerate(bindings.values())}
+    tracker = _ConcurrencyTracker()
+
+    def factory():
+        return _SleepingConnection(version_by_quoted_fqn, sleep_s, tracker)
+
+    settings = Settings(
+        host="https://x.cloud.databricks.com", warehouse_http_path="/sql/1.0/warehouses/abc",
+        max_connections=cap,
+    )
+    ds = UCTableDataSource(settings, bindings, connection_factory=factory)
+
+    ds.resolve_source_versions(list(bindings))
+
+    assert tracker.max_seen <= cap
+
+
+def test_resolve_source_versions_assembles_deterministically_by_source_name():
+    bindings = {f"s{i}": f"cat.sch.t{i}" for i in range(5)}
+    handlers = {}
+    for i, fqn in enumerate(bindings.values()):
+        def handler(sql, p, _v=i):
+            return (["version"], [(_v,)])
+
+        handlers[_quoted_fqn(fqn)] = handler
+
+    def factory():
+        return FakeConnection(handlers)
+
+    ds = UCTableDataSource(_settings(), bindings, connection_factory=factory)
+    result = ds.resolve_source_versions(list(bindings))
+
+    assert result == {f"s{i}": str(i) for i in range(5)}
+    assert list(result) == list(bindings), "result order must match the caller's input order"
+
+
+def test_resolve_source_versions_one_failure_fails_the_whole_batch():
+    bindings = {"a": "cat.sch.a", "b": "cat.sch.b", "c": "cat.sch.c"}
+
+    def failing_handler(sql, p):
+        raise RuntimeError("boom on b")
+
+    def ok_handler(sql, p):
+        return (["version"], [(1,)])
+
+    handlers = {
+        _quoted_fqn("cat.sch.a"): ok_handler,
+        _quoted_fqn("cat.sch.b"): failing_handler,
+        _quoted_fqn("cat.sch.c"): ok_handler,
+    }
+
+    def factory():
+        return FakeConnection(handlers)
+
+    ds = UCTableDataSource(_settings(), bindings, connection_factory=factory)
+    with pytest.raises(RuntimeError, match="boom on b"):
+        ds.resolve_source_versions(list(bindings))
+
+
+def test_resolve_source_versions_checks_connections_back_into_the_pool_not_closed():
+    """Warm-pool follow-up (P3/P4 perf gap review 2026-09-25): a resolve's
+    connections must be returned to the pool for reuse (checkin), never
+    closed outright -- closing them on every call is exactly the cold-open
+    cost this redesign removes. Nothing is left OUTSIDE the pool's
+    bookkeeping either: every connection opened ends up idle in the pool,
+    ready for the next checkout, and closing the (privately-owned) pool
+    afterwards closes all of them -- proving none leaked."""
+    n = 4
+    opened: list = []
+
+    class _TrackedConnection(FakeConnection):
+        def close(self):
+            opened.remove(self)
+            super().close()
+
+    handlers = {_quoted_fqn(f"cat.sch.t{i}"): (lambda sql, p, _v=i: (["version"], [(_v,)])) for i in range(n)}
+    bindings = {f"s{i}": f"cat.sch.t{i}" for i in range(n)}
+
+    def factory():
+        conn = _TrackedConnection(handlers)
+        opened.append(conn)
+        return conn
+
+    ds = UCTableDataSource(_settings(), bindings, connection_factory=factory)
+    ds.resolve_source_versions(list(bindings))
+
+    # However many connections the pool actually needed to open (fast fake
+    # queries may let it reuse one connection across several sequential
+    # checkouts, same as a real pool would under no real overlap) -- none of
+    # them were closed, and every one is idle in the pool, ready for reuse.
+    assert len(opened) >= 1
+    assert ds._pool.size() == len(opened)
+    assert len(ds._pool._idle) == len(opened), "every connection must be idle in the pool, not held by an instance"
+
+    ds.close()
+    assert opened == [], "closing the (privately-owned) pool must close every connection it holds"
+
+
+def test_resolve_source_versions_single_source_uses_the_existing_single_connection_path():
+    """cap collapses to 1 for a single source -- no ThreadPoolExecutor, no
+    extra connection opened; goes through the same `_execute`/shared-`_conn`
+    path `resolve_version` always used, so a Skill with one source sees no
+    behaviour change at all."""
+    handlers = {"DESCRIBE HISTORY": lambda sql, p: (["version"], [(9,)])}
+    ds, conn = _ds(handlers)
+    result = ds.resolve_source_versions(["expense_report"])
+    assert result == {"expense_report": "9"}
+    assert ds._conn is conn, "singular resolve must still use the instance's shared lazy connection"
+
+
+# ── persistent/shared connection pool (P3/P4 perf gap review 2026-09-25, ──
+# warm-pool follow-up): a caller holding a process-lifetime _UCConnectionPool
+# (AppContext.uc_pool) shares it across every UCTableDataSource instance it
+# builds, so a cold connection open happens at most once per process, not
+# once per run/node.
+
+
+def _counting_factory(opened: list):
+    handlers = {"DESCRIBE HISTORY": lambda sql, p: (["version"], [(1,)])}
+
+    class _TrackedConnection(FakeConnection):
+        def close(self):
+            opened.remove(self)
+            super().close()
+
+    def factory():
+        conn = _TrackedConnection(handlers)
+        opened.append(conn)
+        return conn
+
+    return factory
+
+
+def test_shared_pool_is_warm_on_a_second_uctabledatasource_instance():
+    """The core new capability: TWO separate instances (exactly the shape
+    `ctx.data_source_factory(...)` builds on every call -- once for
+    start_audit_run's own resolve, again later for a node's read) sharing
+    ONE pool must open a connection only ONCE across both, not once each."""
+    opened: list = []
+    pool = _UCConnectionPool(_counting_factory(opened), max_size=6, checkout_timeout_s=5.0)
+
+    ds1 = UCTableDataSource(_settings(), {"expense_report": "cat.sch.expense_report"}, pool=pool)
+    assert ds1.resolve_version("expense_report") == "1"
+    assert len(opened) == 1
+    ds1.close()  # returns the connection to the SHARED pool -- must not close it
+
+    assert pool.size() == 1  # still open and tracked by the pool, not discarded
+
+    ds2 = UCTableDataSource(_settings(), {"expense_report": "cat.sch.expense_report"}, pool=pool)
+    assert ds2.resolve_version("expense_report") == "1"
+    ds2.close()
+
+    assert len(opened) == 1, "a second instance sharing the pool must reuse the warm connection, not open a new one"
+
+
+def test_close_with_a_shared_pool_checks_in_without_closing():
+    opened: list = []
+    pool = _UCConnectionPool(_counting_factory(opened), max_size=6, checkout_timeout_s=5.0)
+    ds = UCTableDataSource(_settings(), {"expense_report": "cat.sch.expense_report"}, pool=pool)
+    ds.resolve_version("expense_report")
+    ds.close()
+
+    assert len(opened) == 1
+    assert pool._idle == [opened[0]], "the connection must be idle in the SHARED pool, ready for reuse"
+    # A shared pool is never torn down by one instance's close() -- it
+    # outlives every UCTableDataSource that borrows from it.
+    assert pool._closed is False
+
+
+def test_close_with_no_pool_given_closes_the_private_pool_it_owns():
+    opened: list = []
+    ds = UCTableDataSource(
+        _settings(), {"expense_report": "cat.sch.expense_report"}, connection_factory=_counting_factory(opened)
+    )
+    ds.resolve_version("expense_report")
+    assert len(opened) == 1
+
+    ds.close()
+
+    assert opened == [], "closing an instance with no pool= given must close the private pool it owns"
+
+
+def test_broken_connection_is_dropped_from_a_shared_pool_never_reused():
+    calls = {"n": 0}
+
+    class _FlakyConnection:
+        def __init__(self, index):
+            self.index = index
+            self.closed = False
+
+        def cursor(self):
+            return self
+
+        def execute(self, sql, params=None):
+            if self.index == 1:
+                raise RuntimeError("connection died mid-query")
+            self.description = [("version",)]
+            self._rows = [(7,)]
+
+        def fetchone(self):
+            row = self._rows[0]
+            self._rows = []
+            return row
+
+        def close(self):
+            self.closed = True
+
+    def factory():
+        calls["n"] += 1
+        return _FlakyConnection(calls["n"])
+
+    pool = _UCConnectionPool(factory, max_size=6, checkout_timeout_s=5.0)
+    ds = UCTableDataSource(_settings(), {"expense_report": "cat.sch.expense_report"}, pool=pool)
+
+    with pytest.raises(RuntimeError, match="connection died mid-query"):
+        ds.resolve_version("expense_report")
+    assert ds._conn is None, "a failed connection must be dropped, not cached for reuse by this instance"
+    assert pool.size() == 0, "a broken connection must never sit in the pool for another instance to inherit"
+
+    # The SAME shared pool, used again, opens a fresh (second, working)
+    # connection rather than ever handing back the broken first one.
+    ds2 = UCTableDataSource(_settings(), {"expense_report": "cat.sch.expense_report"}, pool=pool)
+    assert ds2.resolve_version("expense_report") == "7"
+    assert calls["n"] == 2
+
+
+def test_uc_pool_checkout_times_out_loudly_when_exhausted():
+    """CLAUDE.md NN14: an exhausted pool that never frees up fails loudly,
+    never hangs forever or silently proceeds with no connection."""
+
+    def factory():
+        return FakeConnection({})
+
+    pool = _UCConnectionPool(factory, max_size=1, checkout_timeout_s=0.2)
+    held = pool.checkout()
+    try:
+        start = time.monotonic()
+        with pytest.raises(UCConnectionPoolExhausted):
+            pool.checkout()
+        elapsed = time.monotonic() - start
+        assert 0.15 <= elapsed < 2.0, f"checkout timeout took {elapsed:.2f}s, expected ~0.2s"
+    finally:
+        pool.checkin(held)
+
+
+def test_uc_pool_concurrent_opens_are_not_serialised_under_the_lock():
+    """Mirrors persistence_delta's own _ConnectionPool test: the slow
+    factory() call must run OUTSIDE the pool's lock, so N concurrent
+    checkouts against a cold pool open in parallel, not one at a time."""
+    open_delay_s = 0.2
+    n_concurrent = 4
+
+    def factory():
+        time.sleep(open_delay_s)
+        return FakeConnection({})
+
+    pool = _UCConnectionPool(factory, max_size=n_concurrent, checkout_timeout_s=5.0)
+
+    def _checkout_and_return():
+        conn = pool.checkout()
+        pool.checkin(conn)
+
+    threads = [threading.Thread(target=_checkout_and_return) for _ in range(n_concurrent)]
+    start = time.monotonic()
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=5)
+    elapsed = time.monotonic() - start
+
+    assert elapsed < open_delay_s * (n_concurrent / 2), (
+        f"{n_concurrent} concurrent checkouts against a cold pool took {elapsed:.3f}s for a "
+        f"{open_delay_s}s-per-open factory -- looks like opens are serialised, not parallel"
+    )
+    assert pool.size() == n_concurrent
 
 
 # ── get_row_count() / get_classification() (data_asset_card metadata) ───────

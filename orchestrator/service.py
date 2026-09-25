@@ -176,6 +176,18 @@ class AppContext:
     # when this is unset (keeps every existing direct AppContext(...)
     # construction, e.g. in tests, working unchanged).
     readiness: Any = None
+    # P3/P4 perf gap review 2026-09-25, warm-pool follow-up: a single
+    # orchestrator.adapters.datasource_uc._UCConnectionPool, built once in
+    # build_app_context and OUTLIVING any one UCTableDataSource instance --
+    # `_uc_factory` and `_build_explorer_data_source` both hand it to every
+    # UCTableDataSource they build (via `pool=`), so start_audit_run's own
+    # version resolution and every later node's reads (build_node_context)
+    # share the SAME warm connections instead of each paying a cold open.
+    # None on the local backend, and for every existing direct AppContext(...)
+    # construction (tests) that never sets it -- UCTableDataSource treats a
+    # missing pool exactly as before this change: it builds and owns a
+    # private one.
+    uc_pool: Any = None
 
 
 # ── construction ──────────────────────────────────────────────────────────────
@@ -429,7 +441,14 @@ def _build_explorer_data_source(ctx: AppContext, state: RunState):
     from orchestrator.adapters.datasource_volume_upload import VolumeUploadAwareDataSource
 
     bindings = {b["source"]: b["table_fqn"] for b in state.data_assets}
-    table_source = UCTableDataSource(ctx.settings, bindings)
+    # P3/P4 perf gap review 2026-09-25, warm-pool follow-up: shares
+    # AppContext.uc_pool the same way build_app_context's _uc_factory does
+    # -- an Explorer run's plan/execute-phase reads reuse the SAME warm
+    # connections a Playbook run's would, rather than each Explorer pass
+    # paying its own cold open. `ctx.uc_pool` is None on the local backend
+    # and for any bare AppContext(...) test construction, in which case
+    # UCTableDataSource falls back to a private pool, exactly as before.
+    table_source = UCTableDataSource(ctx.settings, bindings, pool=ctx.uc_pool)
     # An `upload`-kind Explorer source's table_fqn is the uploaded file's own
     # volume_path (start_explorer_run pins it that way), so the SAME
     # VolumeUploadAwareDataSource wrapper Playbook uses (build_app_context's
@@ -734,6 +753,29 @@ def build_app_context(env: dict | None = None) -> AppContext:
         persistence = DeltaPersistence(settings)
         persistence.migrate()
 
+        # P3/P4 perf gap review 2026-09-25, warm-pool follow-up: built ONCE
+        # here and shared via AppContext.uc_pool (see that field's own
+        # comment) -- _uc_factory and _build_explorer_data_source both hand
+        # it to every UCTableDataSource they build, so a cold connection
+        # open happens at most once per process. Lazily filled: constructing
+        # the pool object does no I/O, and checkout() opens nothing until
+        # the first real caller needs a connection (CLAUDE.md §11 idle-cost
+        # incident -- "zero connections while idle" still holds). The
+        # try/except mirrors _uc_factory's own guarded import just below,
+        # for the same reason: this module may not exist yet in this
+        # checkout.
+        uc_pool = None
+        try:
+            from orchestrator.adapters.datasource_uc import _default_connection_factory, _UCConnectionPool
+
+            uc_pool = _UCConnectionPool(
+                lambda: _default_connection_factory(settings),
+                max_size=settings.max_connections,
+                checkout_timeout_s=30.0,
+            )
+        except ImportError:  # pragma: no cover - depends on a sibling agent's file
+            pass
+
         def _uc_factory(bindings: dict[str, str], contract_sources: dict[str, dict] | None = None,
                         skill_id: str | None = None, _settings=settings, _persistence=persistence):
             try:
@@ -745,7 +787,12 @@ def build_app_context(env: dict | None = None) -> AppContext:
                     "orchestrator.adapters.datasource_uc.UCTableDataSource is not available "
                     "yet -- the Unity Catalog source-data work has not landed in this checkout"
                 ) from exc
-            table_source = UCTableDataSource(_settings, bindings)
+            # `ctx` is defined further below in this same build_app_context()
+            # call -- resolved at CALL time (late-bound closure), never at
+            # definition time, and _uc_factory is only ever called after ctx
+            # is fully constructed (same pattern this closure already relies
+            # on for configured_bindings_for_skill(ctx, skill_id) below).
+            table_source = UCTableDataSource(_settings, bindings, pool=ctx.uc_pool)
             # A source bound to an uploaded file's Volume path, or to a
             # SOURCE_BINDINGS-configured Volume file (independent review
             # 2026-09-24 item 1), is read from the Volume via the Files API,
@@ -781,6 +828,7 @@ def build_app_context(env: dict | None = None) -> AppContext:
             settings=settings, persistence=persistence, skills_dir=skills_dir,
             data_source_factory=_uc_factory, export_storage=export_storage,
             clock=clock, backend="uc", tracing=tracing, model_client=model_client,
+            uc_pool=uc_pool,
         )
 
     source_bindings_config = _load_source_bindings_cached(settings.source_bindings_path) if settings.source_bindings_path else {}
@@ -1253,7 +1301,15 @@ def start_audit_run(
     # Resolve every source's version FIRST, before any read (CLAUDE.md §4.1
     # TOCTOU ordering) -- these become both this run's pinned data_assets
     # bindings and the fingerprint's source_table_versions.
-    source_versions = {name: data_source.resolve_version(name) for name in contract_sources}
+    #
+    # P3/P4 perf gap review (2026-09-25): resolve_source_versions (not a
+    # per-source resolve_version() loop) lets a UC-backed/Volume-aware data
+    # source resolve all of a Skill's sources concurrently, on a bounded pool
+    # of connections, instead of one DESCRIBE HISTORY/file-hash at a time --
+    # live measurement showed SKILL-001's 8 sources taking 13.0s resolved
+    # sequentially. Still resolved before any read either way; this only
+    # changes how the resolutions themselves run.
+    source_versions = data_source.resolve_source_versions(list(contract_sources))
 
     # A source bound to an uploaded file (run_setup._auto_bind's exact-
     # filename-stem match), or to a SOURCE_BINDINGS-configured Volume file

@@ -283,9 +283,10 @@ class _FakePersistenceForBuild:
 
 
 class _StubUCTableDataSource:
-    def __init__(self, settings, bindings):
+    def __init__(self, settings, bindings, pool=None):
         self.settings = settings
         self.bindings = bindings
+        self.pool = pool
 
     def resolve_version(self, source):
         raise AssertionError(f"UCTableDataSource.resolve_version called for {source!r} -- should have been routed to the upload path")

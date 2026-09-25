@@ -147,7 +147,80 @@ class VolumeUploadAwareDataSource:
         return self.table_source.resolve_version(source)
 
     def resolve_source_versions(self, sources: list[str]) -> dict[str, str]:
-        return {name: self.resolve_version(name) for name in sources}
+        # P3/P4 perf gap review (2026-09-25): fetch the uploaded-file listing
+        # ONCE, up front, and share it -- resolving each source through
+        # self.resolve_version() independently would still call
+        # self._uploaded_files_by_path() on first use per instance (its own
+        # docstring), which is harmless sequentially (the cache warms on the
+        # first call, CLAUDE.md §5 UI item 5) but must not become a race if
+        # the sources below are then resolved concurrently.
+        if not sources:
+            return {}
+        self._uploaded_files_by_path()
+
+        uploaded_names: list[str] = []
+        configured_names: list[str] = []
+        table_names: list[str] = []
+        for name in sources:
+            if self._uploaded_row(name) is not None:
+                uploaded_names.append(name)
+            elif self._configured_binding(name) is not None:
+                configured_names.append(name)
+            else:
+                table_names.append(name)
+
+        results: dict[str, str] = {}
+
+        # An upload's version is its pre-recorded sha256 (service.upload_file
+        # hashed it once at upload time) -- a dict lookup, no I/O, so these
+        # never need concurrency of their own.
+        for name in uploaded_names:
+            results[name] = self._uploaded_row(name)["sha256"]
+
+        # A configured Volume file's version is computed by reading the file
+        # and hashing it (this module's own docstring, point 2) -- real I/O
+        # per source, so resolve them concurrently, bounded the same way
+        # UCTableDataSource.resolve_source_versions is (DBX_MAX_CONNECTIONS /
+        # settings.max_connections via table_source, capped further at the
+        # number of sources actually needing a read).
+        if configured_names:
+            cap = self._resolve_cap(len(configured_names))
+            if cap == 1:
+                for name in configured_names:
+                    results[name] = self.resolve_version(name)
+            else:
+                from concurrent.futures import ThreadPoolExecutor
+
+                with ThreadPoolExecutor(max_workers=cap) as pool:
+                    futures = {
+                        name: pool.submit(self.resolve_version, name) for name in configured_names
+                    }
+                    # .result() re-raises any single source's failure here --
+                    # ConfiguredSourceUnavailable/SourceVersionMismatch still
+                    # fails the whole batch loudly (CLAUDE.md NN14), exactly
+                    # as a sequential resolve_version() call would have.
+                    for name in configured_names:
+                        results[name] = futures[name].result()
+
+        # Governed-table sources delegate to table_source's OWN
+        # resolve_source_versions -- for a UCTableDataSource that is already
+        # the bounded concurrent-batch implementation, so a Skill mixing
+        # governed tables and flat files gets concurrency on both halves,
+        # not just this wrapper's own flat-file branch.
+        if table_names:
+            results.update(self.table_source.resolve_source_versions(table_names))
+
+        # Assembled deterministically by source name, in the caller's own
+        # input order, regardless of which group or which concurrent
+        # resolution actually finished first.
+        return {name: results[name] for name in sources}
+
+    def _resolve_cap(self, n: int) -> int:
+        settings = getattr(self.table_source, "settings", None)
+        max_connections = getattr(settings, "max_connections", None) if settings is not None else None
+        if max_connections is None:
+            max_connections = 6
+        return max(1, min(n, max_connections))
 
     def read_population(
         self, source: str, *, version, columns: list[str] | None = None, filters: dict | None = None,

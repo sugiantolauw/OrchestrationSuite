@@ -22,6 +22,7 @@ import os
 import re
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -96,6 +97,150 @@ class UCSourceError(Exception):
     """Raised for anything that would otherwise force a silent guess: an unknown
     binding, a column that cannot be resolved, a query that would exceed the memory
     ceiling. Never caught and defaulted (CLAUDE.md NN14)."""
+
+
+class UCConnectionPoolExhausted(Exception):
+    """CLAUDE.md NN14 (fail loudly rather than guess): _UCConnectionPool has
+    `max_size` connections all checked out, and none became free within the
+    checkout timeout. Raised instead of blocking forever or silently
+    proceeding with no connection."""
+
+    def __init__(self, max_size: int, timeout_s: float):
+        self.max_size = max_size
+        self.timeout_s = timeout_s
+        super().__init__(
+            f"UC connection pool exhausted: no connection became available within "
+            f"{timeout_s}s (pool max_size={max_size}, DBX_MAX_CONNECTIONS)"
+        )
+
+
+_DEFAULT_POOL_CHECKOUT_TIMEOUT_S = 30.0
+
+# Placeholder held in `_UCConnectionPool._all` while a slot is reserved but the
+# actual (slow, blocking) connection open for it is still in flight -- see
+# `_UCConnectionPool.checkout()`. A plain sentinel object, never a real connection.
+_UC_POOL_RESERVED = object()
+
+
+class _UCConnectionPool:
+    """Bounded, lazily-filled, PERSISTENT pool of connections, shared across
+    every `UCTableDataSource` instance handed the same pool object.
+
+    P3/P4 perf gap review (2026-09-25), warm-pool follow-up: the previous
+    design gave each `UCTableDataSource` instance its own single, lazily-
+    opened connection -- fine within one instance's lifetime, but
+    `ctx.data_source_factory(...)` (orchestrator/service.py) builds a FRESH
+    instance on every call (once per run's `start_audit_run`, again for
+    every later node's `build_node_context`), so that "lazy" open was in
+    practice a COLD open every single time -- live measurement: resolving
+    SKILL-001's 8 sources concurrently (each on its own fresh, one-shot
+    connection) took 25.52s, SLOWER than the 13.0s sequential baseline it
+    replaced, because opening several new SQL sessions at once does not
+    parallelise against this serverless warehouse (session establishment
+    itself appears to serialise/rate-limit server-side).
+
+    The fix is not more concurrency, it is fewer cold opens: a pool that is
+    built ONCE (service.build_app_context, captured on `AppContext.uc_pool`)
+    and OUTLIVES any single `UCTableDataSource` instance. A `close()`d
+    instance's connection is returned to this pool's idle list (`checkin`),
+    not actually closed, so the NEXT instance built later in the same
+    process -- whether that is `start_audit_run`'s own version resolution,
+    or a later node's `build_node_context` read -- finds an already-open,
+    already-authenticated connection waiting for it.
+
+    Mirrors `orchestrator.adapters.persistence_delta.DeltaPersistence`'s own
+    `_ConnectionPool` (same reserve-before-open shape -- the slow,
+    blocking `factory()` call runs OUTSIDE `self._cond`'s lock, so up to
+    `max_size` connections can genuinely open concurrently rather than
+    serialising behind one lock the way an earlier live measurement showed
+    a naive "open under the lock" pool costing ~19-20s minimum for a burst
+    of concurrent opens) -- duplicated rather than imported, same reasoning
+    as `_default_connection_factory` above: persistence_delta.py is owned by
+    another in-flight change this task must not touch."""
+
+    def __init__(self, factory: Callable[[], object], *, max_size: int, checkout_timeout_s: float):
+        self._factory = factory
+        self._max_size = max(1, max_size)
+        self._checkout_timeout_s = checkout_timeout_s
+        self._cond = threading.Condition()
+        self._idle: list = []
+        # Every connection this pool currently owns, idle or checked out --
+        # NOT just the idle ones -- plus a `_UC_POOL_RESERVED` placeholder
+        # for each slot whose connection is still being opened. Used to
+        # decide whether a new connection may be opened (len(_all) <
+        # max_size) and to close everything on close().
+        self._all: list = []
+        self._closed = False
+
+    def checkout(self):
+        deadline = time.monotonic() + self._checkout_timeout_s
+        while True:
+            with self._cond:
+                if self._idle:
+                    return self._idle.pop()
+                if len(self._all) < self._max_size:
+                    self._all.append(_UC_POOL_RESERVED)
+                    break
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise UCConnectionPoolExhausted(self._max_size, self._checkout_timeout_s)
+                self._cond.wait(remaining)
+        try:
+            conn = self._factory()
+        except Exception:
+            with self._cond:
+                self._all.remove(_UC_POOL_RESERVED)
+                self._cond.notify()
+            raise
+        with self._cond:
+            if self._closed:
+                # Closed while this connection was opening -- never hand out
+                # a connection from a closed pool.
+                self._all.remove(_UC_POOL_RESERVED)
+                self._cond.notify()
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+                raise UCConnectionPoolExhausted(self._max_size, self._checkout_timeout_s)
+            self._all[self._all.index(_UC_POOL_RESERVED)] = conn
+        return conn
+
+    def checkin(self, conn) -> None:
+        with self._cond:
+            if self._closed or conn not in self._all:
+                # Closed, or this connection was drop()ped as broken --
+                # either way it must never be resurrected into `_idle`.
+                return
+            self._idle.append(conn)
+            self._cond.notify()
+
+    def drop(self, conn) -> None:
+        # Removes a broken connection entirely (never returned to `_idle`)
+        # and frees its slot so a waiting checkout() can open a replacement.
+        with self._cond:
+            if conn in self._all:
+                self._all.remove(conn)
+            self._cond.notify()
+
+    def close(self) -> None:
+        with self._cond:
+            if self._closed:
+                return
+            self._closed = True
+            conns = [c for c in self._all if c is not _UC_POOL_RESERVED]
+            self._all.clear()
+            self._idle.clear()
+            self._cond.notify_all()
+        for c in conns:
+            try:
+                c.close()
+            except Exception:
+                pass
+
+    def size(self) -> int:
+        with self._cond:
+            return len(self._all)
 
 
 def _quote_ident(name: str) -> str:
@@ -197,14 +342,36 @@ class UCTableDataSource:
     max_cells: int | None = None
     connection_factory: Callable[[], object] | None = None
     workspace_client_factory: Callable[[], Any] | None = None
+    # P3/P4 perf gap review 2026-09-25, warm-pool follow-up: a caller that
+    # already has a process-lifetime `_UCConnectionPool` (service.py's
+    # `_uc_factory`/`_build_explorer_data_source`, via `AppContext.uc_pool`)
+    # passes it here so this instance's connection comes from -- and, on
+    # close(), goes back to -- that SHARED, already-warm pool instead of a
+    # private one. A caller with no pool in hand (every existing direct
+    # `UCTableDataSource(settings, bindings)` construction -- tests, the
+    # live equality test, `_resolve_explorer_sources`) is unaffected: `None`
+    # here means "build and own a private pool", the exact behaviour a
+    # single lazily-opened connection used to give, just pool-shaped.
+    pool: Any = None
     _conn: object | None = field(default=None, init=False, repr=False, compare=False)
     _conn_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False, compare=False)
     _ws_client: object | None = field(default=None, init=False, repr=False, compare=False)
     _ws_client_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False, compare=False)
+    _owns_pool: bool = field(default=False, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         self._max_cells = _resolve_max_cells(self.max_cells)
         self._factory = self.connection_factory or (lambda: _default_connection_factory(self.settings))
+        if self.pool is not None:
+            self._pool = self.pool
+            self._owns_pool = False
+        else:
+            self._pool = _UCConnectionPool(
+                self._factory,
+                max_size=self.settings.max_connections,
+                checkout_timeout_s=_DEFAULT_POOL_CHECKOUT_TIMEOUT_S,
+            )
+            self._owns_pool = True
 
     def _workspace_client(self):
         """Cached WorkspaceClient for list_tables() -- built once per adapter
@@ -242,9 +409,14 @@ class UCTableDataSource:
         return fqn
 
     def _get_connection(self):
+        # P3/P4 perf gap review 2026-09-25, warm-pool follow-up: checked out
+        # from `self._pool` (shared and already-warm, or private and freshly
+        # opened) rather than opened directly -- still cached on `self._conn`
+        # and reused for every call THIS instance makes, exactly as before;
+        # only the SOURCE of that one connection changed.
         with self._conn_lock:
             if self._conn is None:
-                self._conn = self._factory()
+                self._conn = self._pool.checkout()
             return self._conn
 
     def _execute(self, sql_text: str, params: dict | None = None):
@@ -254,20 +426,37 @@ class UCTableDataSource:
             cur.execute(sql_text, params or {})
             return cur
         except Exception:
-            # Connection-shaped failures aren't distinguished here the way
-            # persistence_delta.py does (that heuristic lives with the
-            # PersistenceAdapter this task must not touch); a caller that hits a
-            # dead connection gets a clear failure and can retry with a fresh
-            # UCTableDataSource rather than have this adapter guess.
+            # Connection-shaped failures aren't distinguished from query
+            # failures here the way persistence_delta.py does (that
+            # heuristic lives with the PersistenceAdapter this task must not
+            # touch) -- but now that a connection may be SHARED (checked
+            # back into a pool other instances also draw from), any
+            # exception drops it rather than caching it for a future
+            # checkin(): a caller that hits a dead connection gets a clear
+            # failure and the NEXT call on this instance (or the next
+            # instance to check out from a shared pool) gets a fresh
+            # connection instead of the same broken one, and a broken
+            # connection is never handed to another instance via the pool.
+            with self._conn_lock:
+                if self._conn is not None:
+                    self._pool.drop(self._conn)
+                    self._conn = None
             raise
 
     def close(self) -> None:
+        # A connection this instance was using goes back to the pool for
+        # reuse (`checkin`), never actually closed here -- that is what
+        # makes a SHARED pool (`self.pool` was given) stay warm across
+        # UCTableDataSource instances. Only a PRIVATELY-owned pool (no
+        # `pool=` was given -- every existing caller before this change) is
+        # itself torn down, matching the exact previous behaviour: closing
+        # this instance closes everything it opened, and nothing else.
         with self._conn_lock:
             if self._conn is not None:
-                try:
-                    self._conn.close()
-                finally:
-                    self._conn = None
+                self._pool.checkin(self._conn)
+                self._conn = None
+        if self._owns_pool:
+            self._pool.close()
 
     # ── DataSourceAdapter protocol ──────────────────────────────────────────
 
@@ -291,7 +480,79 @@ class UCTableDataSource:
         # Matches orchestrator.contract.LocalFileDataSource.resolve_source_versions:
         # despite the Protocol's parameter name, this takes SOURCE NAMES (contract.yaml
         # keys), not table_fqns -- callers resolve a whole Skill's sources by name.
-        return {name: self.resolve_version(name) for name in sources}
+        #
+        # P3/P4 perf gap review (2026-09-25): a plain `{name: self.resolve_version(name)
+        # for name in sources}` loop runs every DESCRIBE HISTORY sequentially, because
+        # resolve_version -> _resolve_version_for_fqn -> _execute -> _get_connection() all
+        # share this instance's ONE cached connection, guarded by `_conn_lock` -- a
+        # second thread's resolve_version blocks on the lock for the first thread's
+        # entire round trip. Live measurement: service.start_audit_run resolving
+        # SKILL-001's 8 bound sources sequentially took 13.0s (0.97-5.66s each).
+        #
+        # Warm-pool follow-up (same date): the first attempt at concurrency gave each
+        # resolution its OWN short-lived, one-shot connection (opened via
+        # self._factory() and closed immediately after) -- correctly concurrent in
+        # unit tests, but SLOWER live (25.52s for the same 8 sources) than the 13.0s
+        # sequential baseline, because opening several brand-new SQL sessions at once
+        # does not parallelise against this serverless warehouse (session
+        # establishment itself appears to serialise/rate-limit server-side -- the
+        # same finding persistence_delta.py's own _ConnectionPool docstring records:
+        # "a burst of concurrent checkouts against a cold pool showed a MINIMUM
+        # latency of ~19-20s"). Below, each resolution instead checks a connection
+        # OUT of self._pool (already-warm and idle if this pool has been used before
+        # in this process -- see AppContext.uc_pool) and CHECKS IT BACK IN when done
+        # (checkin(), never close()) so the connection is reused by the next caller
+        # -- whether that is another source in THIS batch, a later node's read, or a
+        # second run's own resolve_source_versions -- rather than reopened from cold.
+        # A connection that fails mid-query is drop()ped, never checked back in, so a
+        # broken connection can never contaminate the pool for a later caller.
+        #
+        # `self.settings.max_connections` (DBX_MAX_CONNECTIONS) still bounds how many
+        # of these run at once (CLAUDE.md §2.3 rule 3), capped further at
+        # `len(sources)` so a small Skill never asks the pool for more than it has
+        # use for. `self._fqn(name)` is resolved for every source BEFORE any thread
+        # starts, so an unbound source (UCSourceError) fails loudly before a single
+        # connection is even checked out, exactly as it did in the sequential
+        # version. Every source's version is still resolved before any read
+        # (CLAUDE.md §4.1 TOCTOU ordering) -- this only changes HOW the resolutions
+        # happen, never when relative to a read.
+        if not sources:
+            return {}
+        fqns = {name: self._fqn(name) for name in sources}
+        cap = max(1, min(len(sources), self.settings.max_connections))
+        if cap == 1:
+            return {name: self._resolve_version_for_fqn(fqns[name]) for name in sources}
+
+        def _resolve_on_pooled_connection(fqn: str) -> str:
+            conn = self._pool.checkout()
+            try:
+                cur = conn.cursor()
+                cur.execute(f"DESCRIBE HISTORY {_quoted_fqn(fqn)} LIMIT 1")
+                columns = [d[0] for d in cur.description]
+                row = cur.fetchone()
+                if row is None:
+                    raise UCSourceError(
+                        f"DESCRIBE HISTORY returned no rows for {fqn} -- table has no commits"
+                    )
+                idx = columns.index("version")
+                result = str(row[idx])
+            except Exception:
+                self._pool.drop(conn)
+                raise
+            else:
+                self._pool.checkin(conn)
+                return result
+
+        with ThreadPoolExecutor(max_workers=cap) as executor:
+            futures = {name: executor.submit(_resolve_on_pooled_connection, fqns[name]) for name in sources}
+            # .result() on each future re-raises that source's exception (if
+            # any) here -- a single failure fails the whole batch loudly
+            # (CLAUDE.md NN14), exactly as the sequential version's first
+            # failing resolve_version() call would have. Iterating `sources`
+            # (not completion order) assembles the returned dict
+            # deterministically by source name, matching the input order,
+            # regardless of which resolution actually finished first.
+            return {name: futures[name].result() for name in sources}
 
     def _describe_columns(self, quoted_fqn: str, version: int) -> list[str]:
         cur = self._execute(f"SELECT * FROM {quoted_fqn} VERSION AS OF {version} LIMIT 0")
