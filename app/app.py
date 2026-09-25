@@ -80,6 +80,19 @@ def serve_layout():
         # its `disabled` prop).
         dcc.Store(id="explorer-run-store", data=None),
         dcc.Interval(id="explorer-poll-interval", interval=3000, disabled=True),
+        # CLAUDE.md §11 "Run cards on /runs (user decision, 2026-09-25)":
+        # the /runs run-card Export button needs exactly one dcc.Download to
+        # trigger a browser download from -- src/run_status.py's own
+        # "Download Excel" button already has one (run-download-xlsx) but
+        # that one lives inside run_status.run_page()'s own tree, scoped to
+        # a single run. Placed here, outside audit_runs_page()'s own
+        # returned tree, for the same reason the two Stores and the
+        # Interval above are: it renders nothing (a hidden control, like
+        # D2's hidden Store/Interval), so tests/test_layout_parity.py's
+        # zero-diff comparison of audit_runs_page() itself is unaffected --
+        # adding it inside that page's own tree would have required a new
+        # allow-list entry for no visible reason.
+        dcc.Download(id="runs-export-download"),
         html.Div(id="page-content"),
     ], className="app-shell")
 
@@ -101,7 +114,7 @@ def route_page(pathname, search):
     if pathname == "/runs":
         return audit_runs_page()
     if pathname == "/trace":
-        return platform_trace_page()
+        return platform_trace_page(run_id=_parse_run_id(search))
     if pathname == "/actions":
         return management_actions_page()
     if pathname and pathname.startswith("/run/"):
