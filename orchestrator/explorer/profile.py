@@ -23,6 +23,7 @@
 
 from __future__ import annotations
 
+import datetime
 import re
 from pathlib import Path
 from typing import Any
@@ -70,7 +71,35 @@ def infer_column_type(series: pd.Series) -> str:
     "string", with no min/max/in_period_count -- an Excel date cell
     round-trips as a real datetime64 dtype and profiles correctly. A UC
     TIMESTAMP/DATE column is unaffected either way, since its dtype is
-    already native."""
+    already native.
+
+    One more refinement (live 2026-09-25 regression, mixed-type-column
+    fix): an object-dtype column whose non-null cells are EVERY ONE of them
+    already date-like -- a `str` or a `datetime.date`/`datetime.datetime`/
+    `pandas.Timestamp` -- is also "date"/"datetime", never "string", even
+    though its pandas dtype is `object` rather than `datetime64`. This is
+    NOT "genuinely mixed-type text": a real-world Excel column commonly
+    round-trips with SOME cells as native datetime (openpyxl's own date
+    cells) and others as plain date-formatted text (a cell typed or pasted
+    as text, or written by a different tool), and every value is still
+    genuinely one date. Declaring such a column "string" sends it through
+    orchestrator.contract._coerce_string, which stringifies each value with
+    a bare `str(v)` -- producing TWO DIFFERENT STRING FORMATS for the same
+    logical date ("2026-01-15" for the text cells, "2026-01-15 00:00:00"
+    for `str(datetime.datetime(...))`) that a later `pd.to_datetime` call
+    (e.g. G6 reconciliation's own date-range stats) cannot parse with one
+    inferred format, and that a date-range population filter's `between`
+    silently compares as unrelated strings instead of dates (CLAUDE.md
+    NN14: never a silent wrong answer). Attempting the SAME parse
+    `orchestrator.contract._coerce_date` already performs on a
+    contract-declared "date" column here, at inference time, means Explorer
+    profiles and materialises this column exactly the way a Playbook Skill
+    that declares it `type: date` up front already does -- one shared
+    coercion path, not two. A column that mixes genuine non-date content
+    (numbers, free text) with dates still correctly falls through to
+    "string" below: the isinstance check first requires EVERY non-null
+    value to already look date-shaped, and `pd.to_datetime(..., errors="raise")`
+    additionally requires all of them to actually parse."""
     if pd.api.types.is_bool_dtype(series):
         return "boolean"
     if pd.api.types.is_datetime64_any_dtype(series):
@@ -82,6 +111,25 @@ def infer_column_type(series: pd.Series) -> str:
         return "integer"
     if pd.api.types.is_float_dtype(series):
         return "number"
+    def _is_missing(v: Any) -> bool:
+        return v is None or (isinstance(v, float) and pd.isna(v))
+
+    non_null = series[~series.map(_is_missing)]
+    if len(non_null) and non_null.map(lambda v: isinstance(v, (str, datetime.date))).all():
+        # errors="coerce" (not "raise"): a genuine parse failure is
+        # detected below (any remaining NaT) rather than by exception.
+        # format="mixed": this non_null slice mixes a native datetime
+        # representation with plain date-formatted text by construction
+        # (that mix is exactly what the isinstance check above requires),
+        # so pandas can never infer one single format from its first
+        # element -- without "mixed" it falls back to parsing element-by-
+        # element via dateutil anyway, just slower and with a UserWarning
+        # saying to pass this same value.
+        parsed = pd.to_datetime(non_null, errors="coerce", format="mixed")
+        if parsed.notna().all():
+            if bool((parsed.dt.normalize() == parsed).all()):
+                return "date"
+            return "datetime"
     return "string"
 
 

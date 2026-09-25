@@ -45,6 +45,44 @@ def test_infer_column_type_distinguishes_date_from_datetime():
     assert infer_column_type(pd.Series(datetimes)) == "datetime"
 
 
+def test_infer_column_type_mixed_datetime_and_string_cells_is_date():
+    # Live 2026-09-25 regression: an object-dtype column that mixes real
+    # datetime.datetime cells with date-formatted text cells (a common
+    # real-world Excel mess, e.g. tests/fixtures/tne_planted's own
+    # "Transaction Date") is a "date", not "string" -- declaring it
+    # "string" sends it through _coerce_string's bare str(v), producing
+    # two different string formats for the same logical date that later
+    # break (ValueError/ArrowTypeError) wherever the column is re-parsed
+    # as a date.
+    import datetime as dt
+
+    series = pd.Series([dt.datetime(2026, 1, 15), "2026-02-03", dt.datetime(2026, 3, 1), "2026-04-20"])
+    assert infer_column_type(series) == "date"
+
+
+def test_infer_column_type_mixed_datetime_and_string_cells_is_datetime_with_time():
+    import datetime as dt
+
+    series = pd.Series([dt.datetime(2026, 1, 15, 9, 30), "2026-02-03", dt.datetime(2026, 3, 1)])
+    assert infer_column_type(series) == "datetime"
+
+
+def test_infer_column_type_mixed_date_and_non_date_text_stays_string():
+    # A column that genuinely mixes date-shaped and non-date-shaped text
+    # (unparseable as a date) must still fall back to "string" -- this
+    # refinement only recognises a column that IS entirely dates, never
+    # guesses one that is not.
+    import datetime as dt
+
+    series = pd.Series([dt.datetime(2026, 1, 15), "not a date", "Cash"])
+    assert infer_column_type(series) == "string"
+
+
+def test_infer_column_type_mixed_string_and_numeric_stays_string():
+    series = pd.Series(["Sydney", float("nan"), "Melbourne", 42])
+    assert infer_column_type(series) == "string"
+
+
 @pytest.mark.parametrize(
     "kwargs,expected",
     [
