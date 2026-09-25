@@ -193,16 +193,18 @@ def _raise_typed(endpoint: str, exc: Exception) -> None:
     retry_after = _retry_after_s(exc)
 
     if status == 403 or _RATE_LIMIT_ZERO_MARKER in lowered or "permission_denied" in lowered:
-        raise ModelUnavailable(endpoint, message, permanent=True) from exc
+        raise ModelUnavailable(endpoint, message, permanent=True, status_code=status) from exc
     if status == 404:
-        raise ModelUnavailable(endpoint, message, permanent=True) from exc
+        raise ModelUnavailable(endpoint, message, permanent=True, status_code=status) from exc
     if status == 429:
-        raise RateLimited(endpoint, message, retry_after_s=retry_after) from exc
+        raise RateLimited(endpoint, message, retry_after_s=retry_after, status_code=status) from exc
     if status == 400:
-        raise LLMConfigError(f"model endpoint {endpoint!r} rejected the request (400): {message}") from exc
+        raise LLMConfigError(
+            f"model endpoint {endpoint!r} rejected the request (400): {message}", status_code=status,
+        ) from exc
     if status is not None and 500 <= status < 600:
-        raise TransientModelError(endpoint, message, retry_after_s=retry_after) from exc
+        raise TransientModelError(endpoint, message, retry_after_s=retry_after, status_code=status) from exc
     # No status code at all -- a timeout or connection error (openai's
     # APITimeoutError/APIConnectionError carry no status_code) -- treated as
     # transient, retried by LLMGateway like any other transport failure.
-    raise TransientModelError(endpoint, message, retry_after_s=retry_after) from exc
+    raise TransientModelError(endpoint, message, retry_after_s=retry_after, status_code=status) from exc

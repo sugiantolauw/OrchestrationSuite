@@ -285,6 +285,79 @@ def test_backoff_without_retry_after_is_capped_at_retry_backoff_max_s(monkeypatc
     assert slept == [5.0]
 
 
+# ── error_status_code: HTTP status carried onto llm_calls (quality review
+# 2026-09-25 -- this column was always logged null, even for a real HTTP
+# error, because the status was read to CHOOSE a typed exception and then
+# discarded rather than attached to it) ─────────────────────────────────────
+
+
+def test_error_status_code_is_logged_for_a_429_that_exhausts_its_retries():
+    persistence = _persistence()
+    client = FakeModelClient(responses={
+        "databricks-gpt-oss-120b": [RateLimited("ep", "slow down"), RateLimited("ep", "still slow")],
+    })
+    gw = _gateway(client, persistence=persistence, max_transport_attempts=2)
+    gw.call(task="classify", seq=1, messages=[], desired_params={}, ctx=_ctx())
+    rows = persistence.list_llm_calls("RUN-1")
+    assert [r["error_status_code"] for r in sorted(rows, key=lambda r: r["transport_attempt"])] == [429, 429]
+
+
+def test_error_status_code_is_logged_for_a_500():
+    persistence = _persistence()
+    client = FakeModelClient(responses={
+        "databricks-gpt-oss-120b": TransientModelError("ep", "server blew up", status_code=500),
+    })
+    gw = _gateway(client, persistence=persistence, max_transport_attempts=1)
+    gw.call(task="classify", seq=1, messages=[], desired_params={}, ctx=_ctx())
+    rows = persistence.list_llm_calls("RUN-1")
+    assert rows[0]["error_status_code"] == 500
+
+
+def test_error_status_code_is_logged_for_a_permanent_403():
+    persistence = _persistence()
+    client = FakeModelClient(responses={
+        "databricks-gpt-oss-120b": ModelUnavailable("ep", "nope", permanent=True, status_code=403),
+    })
+    gw = _gateway(client, persistence=persistence)
+    gw.call(task="classify", seq=1, messages=[], desired_params={}, ctx=_ctx())
+    rows = persistence.list_llm_calls("RUN-1")
+    assert rows[0]["error_status_code"] == 403
+
+
+def test_error_status_code_is_logged_for_a_400_bad_request():
+    persistence = _persistence()
+    client = FakeModelClient(responses={
+        "databricks-gpt-oss-120b": LLMConfigError("bad request", status_code=400),
+    })
+    gw = _gateway(client, persistence=persistence)
+    with pytest.raises(LLMConfigError):
+        gw.call(task="classify", seq=1, messages=[], desired_params={}, ctx=_ctx())
+    rows = persistence.list_llm_calls("RUN-1")
+    assert rows[0]["error_status_code"] == 400
+
+
+def test_error_status_code_stays_none_when_there_is_no_http_status():
+    """A timeout/connection error (openai's APITimeoutError/
+    APIConnectionError shape) carries no status_code at all -- logging
+    `None` here is honest, never a fabricated status."""
+    persistence = _persistence()
+    client = FakeModelClient(responses={
+        "databricks-gpt-oss-120b": [TransientModelError("ep", "connection reset")],
+    })
+    gw = _gateway(client, persistence=persistence, max_transport_attempts=1)
+    gw.call(task="classify", seq=1, messages=[], desired_params={}, ctx=_ctx())
+    rows = persistence.list_llm_calls("RUN-1")
+    assert rows[0]["error_status_code"] is None
+
+
+def test_error_status_code_stays_none_for_an_unconfigured_endpoint():
+    persistence = _persistence()
+    gw = _gateway(FakeModelClient(), persistence=persistence)
+    gw.call(task="find", seq=1, messages=[], desired_params={}, ctx=_ctx(node_name="find"))
+    rows = persistence.list_llm_calls("RUN-1")
+    assert rows[0]["error_status_code"] is None
+
+
 # ── schema validation with one retry ─────────────────────────────────────
 
 

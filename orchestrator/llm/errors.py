@@ -10,7 +10,19 @@ from __future__ import annotations
 class LLMConfigError(Exception):
     """A configuration bug -- an unset endpoint for a role that needs one,
     or a 400 Bad Request from the model (a request this code built
-    incorrectly). Fails the node; retrying would not help."""
+    incorrectly). Fails the node; retrying would not help.
+
+    `status_code` is the HTTP status that produced this error, when there
+    was one (400 for the model-rejected-the-request case; `None` for the
+    "no NODE_MODELS entry" case, which never reaches the model at all) --
+    carried through to `llm_calls.error_status_code` (quality review
+    2026-09-25: that column was always logged `null`, even for a real
+    HTTP error, because the status was read to CHOOSE which typed
+    exception to raise and then discarded rather than attached to it)."""
+
+    def __init__(self, message: str, *, status_code: int | None = None):
+        self.status_code = status_code
+        super().__init__(message)
 
 
 class ModelUnavailable(Exception):
@@ -29,10 +41,11 @@ class ModelUnavailable(Exception):
     `orchestrator.narration.runner`'s circuit breaker for every other item
     sharing the same role."""
 
-    def __init__(self, endpoint: str, reason: str, *, permanent: bool = True):
+    def __init__(self, endpoint: str, reason: str, *, permanent: bool = True, status_code: int | None = None):
         self.endpoint = endpoint
         self.reason = reason
         self.permanent = permanent
+        self.status_code = status_code
         super().__init__(f"model endpoint {endpoint!r} unavailable: {reason}")
 
 
@@ -44,10 +57,11 @@ class RateLimited(Exception):
     `retry_after_s`, when the endpoint's own response states one, is the
     exact wait `LLMGateway` uses instead of its own computed backoff."""
 
-    def __init__(self, endpoint: str, reason: str, *, retry_after_s: float | None = None):
+    def __init__(self, endpoint: str, reason: str, *, retry_after_s: float | None = None, status_code: int | None = 429):
         self.endpoint = endpoint
         self.reason = reason
         self.retry_after_s = retry_after_s
+        self.status_code = status_code
         super().__init__(f"model endpoint {endpoint!r} rate limited: {reason}")
 
 
@@ -56,10 +70,11 @@ class TransientModelError(Exception):
     bounded way `RateLimited` is (`retry_after_s` is rare for this class,
     but the field exists for a 5xx response that states one)."""
 
-    def __init__(self, endpoint: str, reason: str, *, retry_after_s: float | None = None):
+    def __init__(self, endpoint: str, reason: str, *, retry_after_s: float | None = None, status_code: int | None = None):
         self.endpoint = endpoint
         self.retry_after_s = retry_after_s
         self.reason = reason
+        self.status_code = status_code
         super().__init__(f"model endpoint {endpoint!r} transient failure: {reason}")
 
 

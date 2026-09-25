@@ -375,6 +375,7 @@ class LLMGateway:
             return self._log_and_return(
                 **common, transport_attempt=transport_attempt, outcome="unavailable", status="unavailable",
                 error_type="ModelUnavailable", error_message=str(exc), permanent=exc.permanent,
+                error_status_code=exc.status_code,
             )
         except LLMConfigError as exc:
             # NN7: a 400 (a request this code built incorrectly) is a
@@ -386,6 +387,7 @@ class LLMGateway:
             self._log_and_return(
                 **common, transport_attempt=transport_attempt, outcome="bad_request", status="unavailable",
                 error_type="LLMConfigError", error_message=str(exc), _return=False,
+                error_status_code=exc.status_code,
             )
             raise
         except (RateLimited, TransientModelError) as exc:
@@ -401,10 +403,12 @@ class LLMGateway:
                 return self._log_and_return(
                     **common, transport_attempt=transport_attempt, outcome="unavailable", status="unavailable",
                     error_type=type(exc).__name__, error_message=str(exc), permanent=False,
+                    error_status_code=exc.status_code,
                 )
             self._log_and_return(
                 **common, transport_attempt=transport_attempt, outcome="failed_transport", status="unavailable",
                 error_type=type(exc).__name__, error_message=str(exc), _return=False,
+                error_status_code=exc.status_code,
             )
             # Bounded exponential backoff, honouring the endpoint's own
             # `Retry-After` when it states one (rare for Databricks Model
@@ -448,6 +452,7 @@ class LLMGateway:
             self._log_and_return(
                 **common, transport_attempt=transport_attempt, outcome="failed_transport", status="unavailable",
                 error_type=type(exc).__name__, error_message=str(exc), _return=False,
+                error_status_code=getattr(exc, "status_code", None),
             )
             raise
 
@@ -502,7 +507,8 @@ class LLMGateway:
         source=None, served_model_version=None,
         response_text=None, finish_reason=None, reasoning_parts_stripped=0,
         prompt_tokens=None, completion_tokens=None, total_tokens=None, latency_ms=None,
-        request_id=None, error_type=None, error_message=None, cache_hit=False, cache_key=None,
+        request_id=None, error_type=None, error_message=None, error_status_code=None,
+        cache_hit=False, cache_key=None,
         cached_from_call_id=None, prompt_sha256=None, params_json=None, schema=None,
         parsed=None, put_cache=False, _return=True, permanent=True,
     ) -> LLMResult | None:
@@ -536,7 +542,7 @@ class LLMGateway:
             "prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens,
             "total_tokens": total_tokens, "latency_ms": latency_ms, "request_id": request_id,
             "outcome": outcome, "error_type": error_type,
-            "error_status_code": None, "error_message": (error_message or "")[:2000] or None,
+            "error_status_code": error_status_code, "error_message": (error_message or "")[:2000] or None,
             "pii_columns_masked_json": _canonical_json(ctx.pii_columns_masked),
             "pii_whitelist_json": _canonical_json(ctx.pii_whitelist),
             "actor": ctx.actor, "created_at": now,
