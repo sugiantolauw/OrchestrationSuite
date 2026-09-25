@@ -1988,6 +1988,7 @@ Measured live, "Start audit analysis" needed about 10 s once connections were wa
 The run card's existing View, Export and Trace buttons are wired as follows:
 - **View:** a SKILL-001 run with results (awaiting sign-off or completed) opens `/workspace/tne?run_id=<id>`, the dashboard for that run. Every other run opens `/run/<id>`: Explorer runs, which have no dashboard (D5), and runs that are in progress or failed.
 - **Export:** downloads that run's XLSX workpaper, the same file the run page offers. Before sign-off no export exists yet, so it states that the run must be signed off first.
+  - **Message line (user, 2026-09-25):** `/runs` gains one line of text under the filters, empty by default, styled like `/workspace/tne`'s existing export error text. It reads "This run must be signed off before its export is available." after an Export click on a run that has not been signed off.
 - **Trace:** opens `/trace` filtered to that run.
 
 ### Paused runs across a code deploy (user decision, 2026-09-24)
