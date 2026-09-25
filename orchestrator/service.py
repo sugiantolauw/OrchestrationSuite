@@ -2375,16 +2375,34 @@ def _narrative_table(ctx: AppContext, state: RunState, row: dict) -> dict:
         _, table = build_profile_payload(state)
         return table
     if target_kind == "chart":
-        # A chart's own metric_names (the caption's original, narrower
-        # table) live only in the `narrate` node's own in-memory chart specs
-        # (orchestrator.nodes.narration._chart_specs), not in anything
-        # persisted -- every run metric is offered instead. This never
-        # widens what an edit may claim as true (N-H1 only checks that a
-        # typed number equals SOME metric's rendered value, never that it
-        # was the metric the original caption cited), and G11's own
-        # per-task coverage requirement (N-C1) is never applied to an edit.
+        # BUG-4b (independent review, 2026-09-25): a chart's own metric_names
+        # table is not only "narrower" than every run metric -- for the
+        # 'severity_distribution' chart it also carries run_high_count/
+        # run_medium_count/run_low_count, computed ad hoc by
+        # orchestrator.nodes.narration._chart_specs and NEVER persisted to
+        # run_metrics. Offering "every run metric" alone therefore silently
+        # DROPS names a caption legitimately cited and validated against at
+        # generation time -- re-validation/render then fails N-G3 on
+        # placeholders the model never invented. Reconstruct the SAME
+        # per-chart table `orchestrator.narration.runner.narrate_captions`
+        # built (`_chart_specs` + `build_caption_payload`, the identical two
+        # calls `narrate()` makes), then still widen it with every run
+        # metric -- this keeps the edit path's original, deliberate
+        # permissiveness (N-H1 only checks that a typed number equals SOME
+        # metric's rendered value, never that it was the metric the original
+        # caption cited; G11's own per-task coverage requirement, N-C1, is
+        # never applied to an edit) while fixing what re-validating a
+        # genuinely model-authored placeholder needs.
+        from orchestrator.narration.payloads import build_caption_payload
+        from orchestrator.nodes.narration import _chart_specs
+
         metrics = ctx.persistence.get_run_metrics(state.run_id)
-        return _metrics_placeholder_table(list(metrics), metrics)
+        findings_for_charts = ctx.persistence.list_findings(state.run_id)
+        chart_specs, chart_metrics = _chart_specs(findings_for_charts, metrics)
+        _, chart_tables = build_caption_payload(chart_specs, chart_metrics)
+        table = dict(_metrics_placeholder_table(list(metrics), metrics))
+        table.update(chart_tables.get(target_id, {}))
+        return table
     raise NarrativeTargetNotFound(row["narrative_id"], target_kind, target_id)
 
 

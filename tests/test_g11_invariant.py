@@ -46,7 +46,9 @@ import pytest
 from orchestrator import service
 from orchestrator.narration.placeholders import render, scan_placeholders, strip_placeholder_spans
 from orchestrator.narration.validate import validate_prose
+from tests.narration_test_support import resp
 from tests.test_narration_e2e_local import (
+    MARKER_CAPTIONS,
     _build_ctx,
     _happy_client,
     _start_run,
@@ -224,3 +226,70 @@ def test_every_stored_narrative_re_validates_and_renders_with_digits_confined_to
                     f"cited metric(s) {sorted(missing)} never referenced in the stored prose"
                 )
     assert checked > 0, "no narrative item was checked -- the fixture e2e runs produced no real prose"
+
+
+# ── BUG-4b (independent review, 2026-09-25): a chart caption that
+# legitimately cites the 'severity_distribution' chart's own
+# run_high_count/run_medium_count/run_low_count placeholders -- computed ad
+# hoc by orchestrator.nodes.narration._chart_specs and never persisted to
+# run_metrics -- must still re-validate/render, because those are exactly
+# the names orchestrator.narration.payloads.build_caption_payload put in
+# THIS chart_id's own table at generation time. Not part of `e2e_runs`
+# above because the shared happy-path fixture's own recorded caption
+# carries no placeholders at all (never exercises this branch) -- a
+# dedicated run scripts a caption response that does. ──────────────────────
+
+
+def test_chart_caption_citing_severity_counts_re_validates(tmp_path):
+    ctx = _build_ctx(tmp_path)
+    ctx.executor.start()
+    try:
+        client = _happy_client()
+        client.by_marker[MARKER_CAPTIONS] = resp(
+            {
+                "schema_version": "chart-captions/1",
+                "captions": [
+                    {
+                        "chart_id": "severity_distribution",
+                        "caption": (
+                            "This run raised {count:run_high_count} High, {count:run_medium_count} "
+                            "Medium and {count:run_low_count} Low severity finding(s)."
+                        ),
+                    },
+                    {
+                        "chart_id": "risk_and_exposure",
+                        "caption": "This chart shows the amount at risk identified by this run.",
+                    },
+                ],
+            },
+            model="gpt-oss-test-v1",
+        )
+        ctx.model_client = client
+        run_id = _start_run(ctx)
+        status = _wait_for(ctx, run_id, {"awaiting_signoff", "failed"})
+        assert status == "awaiting_signoff", service.get_run(ctx, run_id).get("status_reason")
+
+        state = ctx.persistence.load_state(run_id)
+        caption_row = next(
+            r for r in ctx.persistence.get_narratives(run_id)
+            if r["target_kind"] == "chart" and r["target_id"] == "severity_distribution" and r["field"] == "caption"
+        )
+        assert caption_row["origin"] == "model", (
+            "the scripted caption must generate/validate cleanly at generation time, or this test "
+            "proves nothing about the READ-time table matching it"
+        )
+
+        table = service._narrative_table(ctx, state, caption_row)
+        for name in ("run_high_count", "run_medium_count", "run_low_count"):
+            assert name in table, f"{name!r} missing from the re-derived chart table (BUG-4b)"
+
+        rendered = render(caption_row["template_text"], table)  # must not raise NarrationConfigError
+        assert "{count:run_low_count}" not in rendered
+
+        result = validate_prose(
+            caption_row["template_text"], table, field=service._VALIDATOR_FIELD_FOR[("chart", "caption")],
+            origin="model",
+        )
+        assert result.valid, [(v.rule_id, v.message) for v in result.violations]
+    finally:
+        ctx.executor.stop()

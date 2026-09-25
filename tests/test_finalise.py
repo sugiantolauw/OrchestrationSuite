@@ -127,6 +127,15 @@ def test_accepted_candidate_reaches_findings_issues_actions_and_headline(local_p
     assert ai_finding["analyst_set_severity"] is True
     assert ai_finding["accepted_by"] == "alice"
     assert ai_finding["accepted_at"] is not None
+    # BUG-6 (independent review, 2026-09-25): sign_off() already walked every
+    # RULE finding's review_state to 'approved' before finalise ever ran (it
+    # is the first EXPORT-phase node -- always after sign-off). The accepted
+    # candidate, materialised into `findings` for the first time HERE, must
+    # carry the SAME review_state a rule finding already has -- never the
+    # DDL's bare 'draft' default.
+    rule_finding = next(f for f in findings_after if f.get("origin") != "ai_proposed")
+    assert rule_finding["review_state"] == "approved"
+    assert ai_finding["review_state"] == "approved"
     assert ai_finding["exposure_amount"] == exposure_amount
     assert "missing_amount" in ai_finding["metrics_cited"]
     assert "{money:missing_amount}" not in ai_finding["observation"]  # rendered, never a raw placeholder

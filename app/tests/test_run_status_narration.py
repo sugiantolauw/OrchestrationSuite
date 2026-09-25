@@ -415,3 +415,52 @@ def test_workspace_tne_chip_and_tooltip_render_only_for_accepted_ai_findings(mon
 
     rule_card = str(workspace_tne._finding_card(0, rule_findings[0]))
     assert "AI-proposed, accepted by" not in rule_card
+
+
+# ── BUG-4 (independent review, 2026-09-25): a stored, model-authored
+# finding observation that legitimately cites a THRESHOLD placeholder (not
+# just a metric) must render -- get_narration_review must not crash the
+# whole /run/<id> read on it. T1's own severity rule
+# (`hv_count > thresholds.hv_high`, tests/fixtures/skills/mini/
+# findings.yaml) puts `hv_high` in `build_finding_table`'s per-finding
+# table (orchestrator.narration.payloads), so a model referencing it is
+# exactly what generation-time validation accepts -- the bug was that
+# get_narration_review's OWN shared render table never carried threshold
+# entries at all, so re-rendering the SAME text on read raised an
+# uncaught NarrationConfigError. ─────────────────────────────────────────
+
+
+def test_narration_review_renders_a_finding_observation_that_cites_a_threshold(real_run):
+    from orchestrator.narration.runner import narrative_id as _narrative_id
+
+    h, ctx_app, run_id, candidate_id = real_run
+    t1_finding_id = next(
+        f["finding_id"] for f in h.persistence.list_findings(run_id) if f.get("test_id") == "T1"
+    )
+    now = _clock()()
+    h.persistence.upsert_narrative(
+        {
+            "narrative_id": _narrative_id(run_id, "finding", t1_finding_id, "observation"),
+            "run_id": run_id, "engagement_id": "ENG-DEFAULT", "target_kind": "finding",
+            "target_id": t1_finding_id, "field": "observation", "version": 2, "generation": 0,
+            "origin": "model",
+            "template_text": (
+                "This run found {count:hv_count} high-value claim(s), totalling {money:hv_amount} -- "
+                "above the {count:hv_high} claim(s) that drives High severity for this test."
+            ),
+            "sources": [
+                {"placeholder": "{count:hv_count}", "source_field": "run_metrics.hv_count", "unit": "count"},
+                {"placeholder": "{money:hv_amount}", "source_field": "run_metrics.hv_amount", "unit": "AUD"},
+                {"placeholder": "{count:hv_high}", "source_field": "thresholds.hv_high", "unit": "count"},
+            ],
+            "call_ids": ["CALL-T1-2"], "served_model_version": "test-model-v1", "violations": None,
+            "updated_by": "model", "updated_at": now,
+        }
+    )
+
+    narration = adapters.get_narration_review(run_id)  # must not raise NarrationConfigError
+
+    t1_out = next(f for f in narration["findings"] if f["finding_id"] == t1_finding_id)
+    assert t1_out["status"] == "model"
+    assert "1" in t1_out["text"]  # hv_high renders to "1" (tests/fixtures/skills/mini/thresholds.yaml)
+    assert "{count:hv_high}" not in t1_out["text"]
