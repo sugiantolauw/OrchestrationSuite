@@ -220,12 +220,21 @@ def test_skill_detail_page_statement_budget(real_ctx):
     with count_statements(real_ctx.persistence) as counter:
         skill_methodology_page("SKILL-001")
 
-    # get_skill (-> list_skills, one skill_versions read) + list_skill_versions
-    # (the version-history table) -- a small, fixed number of reads, not one
-    # per version or one per test in the catalogue.
-    assert counter.count <= 5, (
+    # BUG-SKILLDETAIL-1 (P3/P4 perf gap review 2026-09-25, live pass):
+    # get_skill(skill_id) now reads skill_versions ONCE and exposes this
+    # skill's own rows as `version_history_rows` -- methodology.py no
+    # longer issues a second, separate list_skill_versions(skill_id) read
+    # against the same table (real count: skill_versions + list_runs = 2).
+    # Budget kept a little above that, and still a small, fixed number of
+    # reads, not one per version or one per test in the catalogue.
+    assert counter.count <= 4, (
         f"skill_methodology_page('SKILL-001') issued {counter.count} statements "
-        f"(budget 5):\n" + "\n".join(counter.statements)
+        f"(budget 4):\n" + "\n".join(counter.statements)
+    )
+    skill_versions_reads = [s for s in counter.statements if "FROM skill_versions" in s]
+    assert len(skill_versions_reads) <= 1, (
+        f"expected at most one skill_versions read (BUG-SKILLDETAIL-1), got "
+        f"{len(skill_versions_reads)}:\n" + "\n".join(skill_versions_reads)
     )
 
 
@@ -242,21 +251,22 @@ def test_actions_page_statement_budget_does_not_scale_with_run_count(real_ctx, n
     with count_statements(real_ctx.persistence) as counter:
         management_actions_page()
 
-    # management_actions_page() still fetches the unfiltered runs list twice
-    # (once inside list_management_actions' own list_skills(ctx) call, once
-    # again for cross_run_totals) -- a known remaining inefficiency, not
-    # fixed here: list_skills(ctx, runs=...)'s `runs` parameter must be the
-    # RAW ctx.persistence.list_runs() rows (skill_id, created_at, status),
-    # never adapters.list_audit_runs()' own reshaped UI dicts (run_timestamp
-    # instead of created_at, no raw status) -- pages.py has no access to the
-    # raw shape without a deeper service-layer restructure this task's
-    # budget did not cover. The list_skills() N+1 fix still cuts each of
-    # those two list_runs() calls' own downstream skill_versions cost from
-    # 3 statements to 1, so the budget below is generous but still bounded
-    # and still independent of run count -- the thing an N+1 would violate.
-    assert counter.count <= 16, (
+    # BUG-ACTIONS-3 (P3/P4 perf gap review 2026-09-25, live pass):
+    # management_actions_page() used to fetch the unfiltered runs list AND
+    # the full skill_versions table TWICE each -- once inside
+    # list_management_actions' own list_skills(ctx) call, once again for
+    # cross_run_totals' list_audit_runs() -- measured live against the real
+    # warehouse at 0.9-3.2s per skill_versions read alone. adapters.
+    # get_actions_page_data() now fetches both raw reads ONCE and threads
+    # them into both list_management_actions and list_runs (which also
+    # threads them into its own internal list_skills call). Real count with
+    # LocalPersistence: raw list_runs(1) + raw list_all_skill_versions(1) +
+    # list_management_actions(1) + list_runs's 4 parallel-fanned-out reads
+    # (findings/actions/metrics/fingerprints, LocalPersistence stays
+    # sequential) = 7. Budget kept a little above that for headroom.
+    assert counter.count <= 9, (
         f"management_actions_page() issued {counter.count} statements for {n_runs} runs "
-        f"(budget 16, independent of run count):\n" + "\n".join(counter.statements)
+        f"(budget 9, independent of run count):\n" + "\n".join(counter.statements)
     )
 
 

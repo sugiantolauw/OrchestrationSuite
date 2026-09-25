@@ -22,6 +22,7 @@ Public API (signatures kept stable for the UI to import against):
     cross_run_totals(runs) -> dict   (pure; independent review 2026-09-24 gap #6)
     list_trace_events(ctx, run_id=None) -> list[dict]
     list_management_actions(ctx, filters=None) -> list[dict]
+    get_actions_page_data(ctx, filters=None) -> tuple[list[dict], list[dict]]  (actions, runs)
     update_management_action(ctx, action_id, *, owner, status, target_date, response,
                               actor) -> dict   (independent review 2026-09-24 gap #3)
     confirm_plan(ctx, run_id, actor) -> RunState
@@ -953,7 +954,9 @@ def _get_ledger_skill(ctx: AppContext, skill_id: str) -> dict | None:
     return None
 
 
-def list_skills(ctx: AppContext, *, runs: list[dict] | None = None) -> list[dict]:
+def list_skills(
+    ctx: AppContext, *, runs: list[dict] | None = None, versions: list[dict] | None = None,
+) -> list[dict]:
     # P3/P4 perf gap review 2026-09-25: this used to call
     # ctx.persistence.list_runs(filters={"skill_id": skill_id}) ONCE PER
     # SKILL DIRECTORY -- an N+1 that re-scans the whole runs/run_state join
@@ -986,7 +989,14 @@ def list_skills(ctx: AppContext, *, runs: list[dict] | None = None) -> list[dict
     # explorer_saved cards (same "last write wins in created_at order" rule
     # list_skill_versions_by_origin applied, since list_all_skill_versions
     # is ordered by skill_id, created_at -- identical result, one call).
-    all_versions = ctx.persistence.list_all_skill_versions()
+    #
+    # `versions`, like `runs` above, lets a caller that already fetched this
+    # (get_actions_page_data, list_runs' own parallel fan-out below) hand it
+    # straight in rather than paying for it twice -- BUG-ACTIONS-3, P3/P4
+    # perf gap review 2026-09-25 live pass: this single read was measured
+    # against the real warehouse at 0.9-3.2s, and /actions used to trigger
+    # it via TWO separate, un-shared list_skills(ctx) calls.
+    all_versions = ctx.persistence.list_all_skill_versions() if versions is None else versions
     versions_by_skill: dict[str, list[dict]] = {}
     for v in all_versions:
         versions_by_skill.setdefault(v["skill_id"], []).append(v)
@@ -1069,9 +1079,24 @@ def get_skill(ctx: AppContext, skill_id: str) -> dict | None:
         d = _skill_dir_for(ctx, skill_id)
     except ValueError:
         return _get_ledger_skill(ctx, skill_id)
-    base = next((e for e in list_skills(ctx) if e["skill_id"] == skill_id), None)
+    # P3/P4 perf gap review 2026-09-25, live pass (/skills/<id> cold-load
+    # pass): skill_methodology_page() (app/src/platform/methodology.py)
+    # used to call get_skill(skill_id) AND list_skill_versions(skill_id)
+    # separately -- the first already reads the WHOLE skill_versions table
+    # once, inside list_skills(ctx) below, just to build `base`; the second
+    # then read it AGAIN, filtered server-side instead of in Python, for
+    # the exact same table (measured live against the real warehouse:
+    # 0.9-3.2s for either query). Read once here and expose it as
+    # `version_history_rows`, so a caller building the Version History tab
+    # never has to issue a second read -- filtering an already-fetched list
+    # in Python instead of a second round trip.
+    all_versions = ctx.persistence.list_all_skill_versions()
+    base = next((e for e in list_skills(ctx, versions=all_versions) if e["skill_id"] == skill_id), None)
     if base is None:
         return None
+    version_history_rows = sorted(
+        (v for v in all_versions if v["skill_id"] == skill_id), key=lambda v: v.get("version") or ""
+    )
 
     contract = _read_yaml(d / "contract.yaml")
     sources = [
@@ -1141,6 +1166,7 @@ def get_skill(ctx: AppContext, skill_id: str) -> dict | None:
     return {
         **base, "sources": sources, "tests": tests_with_plan, "flag_to_test": flag_to_test,
         "thresholds": thresholds, "risk_control": risk_control,
+        "version_history_rows": version_history_rows,
     }
 
 
@@ -1252,6 +1278,7 @@ def list_data_asset_cards(ctx: AppContext, query: str = "", limit: int | None = 
 
     try:
         cards = []
+        lookup_targets: list[tuple[str, dict]] = []
         for t in tables:
             card = {
                 "name": t.get("fqn") or t.get("table") or "",
@@ -1263,21 +1290,58 @@ def list_data_asset_cards(ctx: AppContext, query: str = "", limit: int | None = 
                 card["owner"] = t["owner"]
             if t.get("last_refreshed"):
                 card["last_refreshed"] = t["last_refreshed"]
-            if limit is not None and data_source is not None and not t.get("restricted") and t.get("fqn"):
-                fqn = t["fqn"]
-                card["rows"] = data_source.get_row_count(fqn)
-                classification = data_source.get_classification(fqn)
-                if classification:
-                    card["classification"] = classification
             cards.append(card)
+            if limit is not None and data_source is not None and not t.get("restricted") and t.get("fqn"):
+                lookup_targets.append((t["fqn"], card))
+
+        # P3/P4 perf gap review 2026-09-25, live pass: each table's row-count
+        # + classification lookup is independent of every other table's --
+        # measured live against the real warehouse at several hundred ms to
+        # ~1s per call (a DESCRIBE HISTORY + a COUNT, then a tag lookup),
+        # run one table after another that was N tables x 2 calls each in
+        # series. The SHARED UC connection pool (AppContext.uc_pool) is
+        # exactly what lets this fan out safely -- multiple threads
+        # checking connections in and out of the same bounded pool is what
+        # it exists for; `data_source` (a UCTableDataSource) caches nothing
+        # per-call that isn't safe under that (the module-level row-count
+        # cache, the WorkspaceClient lock).
+        def _fill(fqn: str, card: dict) -> None:
+            card["rows"] = data_source.get_row_count(fqn)
+            classification = data_source.get_classification(fqn)
+            if classification:
+                card["classification"] = classification
+
+        if len(lookup_targets) > 1:
+            from concurrent.futures import ThreadPoolExecutor
+
+            max_workers = min(
+                len(lookup_targets), max(1, getattr(ctx.settings, "max_connections", len(lookup_targets)))
+            )
+            with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                futures = [pool.submit(_fill, fqn, card) for fqn, card in lookup_targets]
+                for f in futures:
+                    f.result()
+        else:
+            for fqn, card in lookup_targets:
+                _fill(fqn, card)
+
         return cards
     finally:
         if data_source is not None:
             _close_data_source(data_source)
 
 
-def suggest_bindings(ctx: AppContext, skill_id: str) -> dict[str, str | None]:
-    skill = get_skill(ctx, skill_id)
+def suggest_bindings(ctx: AppContext, skill_id: str, *, skill: dict | None = None) -> dict[str, str | None]:
+    """`skill`, when given, is an already-fetched `get_skill(ctx, skill_id)`
+    result -- skips this function's own call. P3/P4 perf gap review
+    2026-09-25, live pass: app/src/run_setup.py's `_auto_bind` (the
+    synchronous portion of "Start audit analysis", CLAUDE.md §11 "Run
+    start opens the run page at once") used to call `adapters.get_skill`
+    directly AND `adapters.suggest_bindings`, which called `get_skill`
+    AGAIN internally -- two skill_versions + list_runs round trips for the
+    one skill card this whole function ever needed (BUG-STARTRUN-1;
+    measured live at ~0.9-1.3s for the skill_versions read alone)."""
+    skill = get_skill(ctx, skill_id) if skill is None else skill
     if skill is None:
         return {}
     source_names = [s["source"] for s in skill["sources"]]
@@ -2018,7 +2082,10 @@ def get_run(ctx: AppContext, run_id: str, *, state: RunState | None = None) -> d
     return payload
 
 
-def list_runs(ctx: AppContext, filters: dict | None = None) -> list[dict]:
+def list_runs(
+    ctx: AppContext, filters: dict | None = None, *,
+    runs: list[dict] | None = None, versions: list[dict] | None = None,
+) -> list[dict]:
     """Independent review 2026-09-24 item 6: this used to issue 3 extra
     queries PER RUN (list_findings, list_management_actions, get_run_metrics)
     plus a 4th for any queued run (get_fingerprint) -- a genuine N+1 query
@@ -2026,27 +2093,62 @@ def list_runs(ctx: AppContext, filters: dict | None = None) -> list[dict]:
     was about. Every one of those is now a single batched call for the
     WHOLE page, keyed by run_id, looked up per row from an in-memory dict --
     same output, same per-run logic, one round trip per data source instead
-    of one per run."""
-    rows = ctx.persistence.list_runs(filters=filters)
+    of one per run.
+
+    `runs`, when given, is an already-fetched, UNFILTERED
+    `ctx.persistence.list_runs()` result (get_actions_page_data below is the
+    one real caller) -- skips this function's own `ctx.persistence.
+    list_runs()` round trip. Only honoured when `filters` is falsy: a
+    filtered caller must always get its own filtered read.
+
+    P3/P4 perf gap review 2026-09-25, live pass: the 5 reads below --
+    list_skills' own skill-directory/list_all_skill_versions work, and the
+    4 batched-by-run-id reads -- are each independent of the others (none
+    consumes another's result; they all key off `rows`/`run_ids`, computed
+    once above). Measured live against the real warehouse: ~0.5-1.3s each,
+    run sequentially that was 5 round trips no caller needed to wait on one
+    at a time. Same fan-out pattern as app/src/platform/adapters.py's
+    `_read_narration_sources` (bounded by the persistence layer's own
+    connection pool; LocalPersistence stays sequential for the same
+    single-shared-sqlite-connection reason that function's own docstring
+    gives)."""
+    rows = ctx.persistence.list_runs(filters=filters) if runs is None else runs
+    data_mode = "Local test data" if ctx.backend == "local" else "Unity Catalog"
+
+    run_ids = [r["run_id"] for r in rows]
+    own_code_revision = getattr(ctx.settings, "code_revision", None)
+    queued_fingerprint_ids = [
+        r["fingerprint_id"] for r in rows if r["status"] == "queued" and r.get("fingerprint_id")
+    ]
+
     # list_skills' own runs-by-skill grouping needs the COMPLETE run set to
     # produce a correct "previous_runs"/"last_run" per skill -- `rows` only
     # qualifies as that when this call itself was unfiltered; a filtered
     # call (e.g. by skill_id or status) leaves `runs=None` so list_skills
     # does its own single unfiltered fetch instead of grouping a narrowed set.
-    skills_by_id = {
-        e["skill_id"]: e for e in list_skills(ctx, runs=rows if not filters else None)
-    }
-    data_mode = "Local test data" if ctx.backend == "local" else "Unity Catalog"
+    reads = (
+        lambda: list_skills(
+            ctx, runs=rows if not filters else None, versions=versions if not filters else None,
+        ),
+        lambda: ctx.persistence.list_findings_for_runs(run_ids),
+        lambda: ctx.persistence.list_management_actions_for_runs(run_ids),
+        lambda: ctx.persistence.get_run_metrics_for_runs(run_ids),
+        lambda: ctx.persistence.get_fingerprints(queued_fingerprint_ids),
+    )
+    from orchestrator.adapters.persistence_local import LocalPersistence
 
-    run_ids = [r["run_id"] for r in rows]
-    findings_by_run = ctx.persistence.list_findings_for_runs(run_ids)
-    actions_by_run = ctx.persistence.list_management_actions_for_runs(run_ids)
-    metrics_by_run = ctx.persistence.get_run_metrics_for_runs(run_ids)
-    own_code_revision = getattr(ctx.settings, "code_revision", None)
-    queued_fingerprint_ids = [
-        r["fingerprint_id"] for r in rows if r["status"] == "queued" and r.get("fingerprint_id")
-    ]
-    fingerprints_by_id = ctx.persistence.get_fingerprints(queued_fingerprint_ids)
+    if isinstance(ctx.persistence, LocalPersistence):
+        skills, findings_by_run, actions_by_run, metrics_by_run, fingerprints_by_id = (fn() for fn in reads)
+    else:
+        from concurrent.futures import ThreadPoolExecutor
+
+        max_workers = min(len(reads), max(1, getattr(ctx.settings, "max_connections", len(reads))))
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = [pool.submit(fn) for fn in reads]
+            skills, findings_by_run, actions_by_run, metrics_by_run, fingerprints_by_id = (
+                f.result() for f in futures
+            )
+    skills_by_id = {e["skill_id"]: e for e in skills}
 
     out = []
     for r in rows:
@@ -2207,9 +2309,17 @@ def list_trace_events(ctx: AppContext, run_id: str | None = None) -> list[dict]:
     return ctx.persistence.list_trace_events(run_id)
 
 
-def list_management_actions(ctx: AppContext, filters: dict | None = None) -> list[dict]:
+def list_management_actions(
+    ctx: AppContext, filters: dict | None = None, *,
+    runs: list[dict] | None = None, versions: list[dict] | None = None,
+) -> list[dict]:
+    """`runs`/`versions`, when given, are already-fetched, UNFILTERED
+    `ctx.persistence.list_runs()`/`list_all_skill_versions()` results,
+    threaded straight into `list_skills` -- see `get_actions_page_data`
+    below, the one caller that needs to share them with a second,
+    independent `list_runs()` read rather than each issuing its own."""
     rows = ctx.persistence.list_management_actions(filters=filters)
-    skills_by_id = {e["skill_id"]: e for e in list_skills(ctx)}
+    skills_by_id = {e["skill_id"]: e for e in list_skills(ctx, runs=runs, versions=versions)}
     out = []
     for r in rows:
         skill_entry = skills_by_id.get(r.get("skill_id"))
@@ -2237,6 +2347,24 @@ def list_management_actions(ctx: AppContext, filters: dict | None = None) -> lis
             }
         )
     return out
+
+
+def get_actions_page_data(ctx: AppContext, filters: dict | None = None) -> tuple[list[dict], list[dict]]:
+    """`management_actions_page()` (app/src/platform/pages.py) needs BOTH
+    `list_management_actions()`'s UI rows (the action table, filtered by
+    `filters`) and `list_runs()`'s UI rows (for `cross_run_totals`' Total-
+    exposure KPI, always unfiltered) -- each used to independently issue its
+    own `ctx.persistence.list_runs()` AND `list_all_skill_versions()` call
+    via its own internal `list_skills(ctx)` lookup (BUG-ACTIONS-3, P3/P4
+    perf gap review 2026-09-25 live pass: two full round trips fired TWICE
+    each on every /actions render -- skill_versions alone measured 0.9-3.2s
+    per call against the real warehouse). Fetched here ONCE and threaded
+    into both."""
+    raw_runs = ctx.persistence.list_runs()
+    raw_versions = ctx.persistence.list_all_skill_versions()
+    actions = list_management_actions(ctx, filters=filters, runs=raw_runs, versions=raw_versions)
+    runs = list_runs(ctx, runs=raw_runs, versions=raw_versions)
+    return actions, runs
 
 
 # Independent review 2026-09-24 gap #3: the Management Action Tracker's own
@@ -3217,8 +3345,10 @@ def propose_plan(ctx: AppContext, *, skill_id: str, mode: str = "playbook") -> d
     run's real suggest_bindings resolves; and the Skill/Explorer plan step,
     which is `mode` itself) can honestly be called 'ready' before any node
     has actually executed -- every later stage is genuinely 'pending'."""
+    # BUG-STARTRUN-1: `skill` threaded into suggest_bindings rather than it
+    # re-fetching the same skill_id (see that function's own docstring).
     skill = get_skill(ctx, skill_id) if skill_id else None
-    bindings = suggest_bindings(ctx, skill_id) if skill_id else {}
+    bindings = suggest_bindings(ctx, skill_id, skill=skill) if skill_id else {}
     bound_count = sum(1 for v in bindings.values() if v)
     tests = (skill.get("tests") if skill else None) or []
     test_count = len(tests) if isinstance(tests, list) else tests

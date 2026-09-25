@@ -238,8 +238,15 @@ def test_management_actions_page_matches_prototype(monkeypatch, reference_fixtur
     from src.platform import adapters
     from src.platform.pages import management_actions_page
 
+    # BUG-ACTIONS-3 (P3/P4 perf gap review 2026-09-25): management_actions_
+    # page() now calls adapters.get_actions_page_data() (one shared read for
+    # both the action table and cross_run_totals' KPI) rather than
+    # adapters.list_management_actions() directly -- monkeypatch that
+    # instead. The runs half is adapters.list_audit_runs() unmonkeypatched,
+    # exactly as it was before this fix (this test never overrode it).
     monkeypatch.setattr(
-        adapters, "list_management_actions", lambda filters=None: reference_fixtures["DEMO_MANAGEMENT_ACTIONS"]
+        adapters, "get_actions_page_data",
+        lambda filters=None: (reference_fixtures["DEMO_MANAGEMENT_ACTIONS"], adapters.list_audit_runs()),
     )
     monkeypatch.setattr(adapters, "is_demo_mode", lambda: True)
 

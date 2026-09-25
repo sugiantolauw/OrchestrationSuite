@@ -3,8 +3,9 @@
 For the T&E Skill (SKILL-001), every field here is read from the Skill
 itself -- manifest.yaml (version/owner/status/description), catalogue.yaml
 (rendered against thresholds.yaml, with provenance), and skill_versions
-(the real publish history) -- via orchestrator.service.get_skill /
-list_skill_versions (adapters). This module used to keep its own copy of
+(the real publish history) -- via orchestrator.service.get_skill, whose
+`version_history_rows` carries this Skill's own publish history (adapters).
+This module used to keep its own copy of
 the test catalogue (app/src/test_catalogue.py, deleted) with a hardcoded
 version, status and threshold text that drifted from the real Skill the
 moment anyone edited skills/tne_exco/*.yaml without also editing this file
@@ -29,7 +30,7 @@ def get_methodology(skill_id: str) -> dict:
 # ─── T&E Skill methodology (real, pulled from the Skill's own files) ────────
 
 def _tne_methodology(skill_id: str) -> dict:
-    from src.platform.adapters import get_skill, list_skill_versions
+    from src.platform.adapters import get_skill
 
     skill = get_skill(skill_id) or {}
     tests = skill.get("tests") or []
@@ -75,7 +76,12 @@ def _tne_methodology(skill_id: str) -> dict:
         })
 
     source_names = [s["key"] for s in data_sources if s.get("key")]
-    versions = list_skill_versions(skill_id)
+    # P3/P4 perf gap review 2026-09-25, live pass: get_skill(skill_id) above
+    # already carries this skill's own version rows (orchestrator.service.
+    # get_skill's `version_history_rows`) -- reused here instead of a
+    # second, separate list_skill_versions(skill_id) read against the same
+    # table (BUG-SKILLDETAIL-1).
+    versions = skill.get("version_history_rows") or []
 
     return {
         "skill_id": skill.get("skill_id", skill_id),
