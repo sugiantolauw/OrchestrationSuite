@@ -15,16 +15,19 @@ no `content.lock` there) and never the fixture Skills under
 `tests/fixtures/skills/` (outside `skills/`, no `content.lock` either).
 This loop only ever visits a directory that HAS one, so nothing needs an
 explicit exclude list -- adding a `content.lock` to a new Skill is what
-opts it into this guard."""
+opts it into this guard.
+
+The check itself moved into `orchestrator.authoring.checks.check_content_lock`
+(docs/specs/P7_mapping_authoring_design.md §2.1, §2.2 "Moved into
+orchestrator/") -- this test now calls it and keeps the same assertions."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
 import pytest
-import yaml
 
-from orchestrator.skills import load_skill
+from orchestrator.authoring.checks import check_content_lock
 
 SKILLS_ROOT = Path(__file__).parent.parent / "skills"
 
@@ -37,18 +40,9 @@ def _skill_dirs_with_lock() -> list[Path]:
 
 @pytest.mark.parametrize("skill_dir", _skill_dirs_with_lock(), ids=lambda p: p.name)
 def test_skill_content_matches_its_pinned_lock(skill_dir: Path):
-    lock = yaml.safe_load((skill_dir / "content.lock").read_text())
-    skill = load_skill(skill_dir)
-
-    assert skill.version == lock["version"], (
-        f"{skill_dir.name}: content.lock pins version {lock['version']!r} but manifest.yaml "
-        f"now says {skill.version!r} -- regenerate content.lock for the new version"
-    )
-    assert skill.content_hash == lock["content_hash"], (
-        f"{skill_dir.name}: this Skill's content changed under version {skill.version!r} "
-        f"without a version bump (content_hash is now {skill.content_hash!r}, content.lock "
-        f"still pins {lock['content_hash']!r}) -- bump the version and update the lock"
-    )
+    violations, has_lock = check_content_lock(skill_dir)
+    assert has_lock
+    assert not violations, "; ".join(violations)
 
 
 def test_at_least_one_repo_skill_is_covered_by_this_guard():

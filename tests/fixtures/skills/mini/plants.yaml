@@ -1,0 +1,58 @@
+# docs/specs/P7_mapping_authoring_design.md §2.3: the generic authoring
+# kit's own planted-fixture sidecar, over tests/fixtures/skills/mini (the
+# P2 primitives work's own minimal Skill -- owned by that session; this
+# file is new, added by the authoring-kit lane and never edits the Skill
+# itself). Only T1 (threshold_exceedance, row-grain, single source) is
+# scored here -- T2 (anti_join_gap) still EXECUTES as part of the plan
+# (plan.yaml runs every test regardless of what plants.yaml scores), so
+# register.csv gets a small background-only population to satisfy its
+# contract, but T2 is deliberately not scored: it is a two-source primitive
+# and this sidecar's single-source-per-test shape (§2.3) has no way to
+# declare matching register content for a claims plant without either
+# primitive doubling as an entry-key coupling mechanism this session does
+# not own, so the mini Skill's own P2 owner is the right place for a
+# two-source generic fixture, not this authoring-kit unit test.
+seed: 20260925
+natural_id_column: Fixture Line Id
+audit_period: ["2025-01-01", "2025-12-31"]
+
+background:
+  claims:
+    count: 20
+    template:
+      Vendor: "Acme Pty Ltd"
+    vary:
+      Employee ID: {int_range: [1000, 1099]}
+      Transaction Date: {date_range: ["2025-01-01", "2025-12-31"]}
+      Amount: {decimal_range: [10, 400]}
+  register:
+    count: 10
+    template:
+      Vendor: "Acme Pty Ltd"
+    vary:
+      Employee ID: {int_range: [1000, 1099]}
+      Transaction Date: {date_range: ["2025-01-01", "2025-12-31"]}
+
+tests:
+  T1:
+    scoring_unit: row
+    source: claims
+    rows:
+      - natural_id: HV-001
+        exception: true
+        fields: {Employee ID: 2001, Transaction Date: "2025-03-01", Vendor: "Big Vendor", Amount: 900}
+      - natural_id: HV-002
+        exception: true
+        fields: {Employee ID: 2002, Transaction Date: "2025-04-11", Vendor: "Big Vendor", Amount: 1250}
+      - natural_id: HV-003
+        exception: true
+        fields: {Employee ID: 2003, Transaction Date: "2025-06-22", Vendor: "Other Vendor", Amount: 501}
+      - natural_id: NM-101
+        exception: false
+        fields: {Employee ID: 2004, Transaction Date: "2025-03-02", Vendor: "Small Vendor", Amount: 499}
+      - natural_id: NM-102
+        exception: false
+        fields: {Employee ID: 2005, Transaction Date: "2025-05-05", Vendor: "Small Vendor", Amount: 450}
+      - natural_id: NM-103
+        exception: false
+        fields: {Employee ID: 2006, Transaction Date: "2025-07-18", Vendor: "Small Vendor", Amount: 1}

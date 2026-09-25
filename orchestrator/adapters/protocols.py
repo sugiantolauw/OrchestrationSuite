@@ -301,6 +301,15 @@ class PersistenceAdapter(Protocol):
         same table for what is, today, still one full scan's worth of data)."""
         ...
 
+    def record_skill_surface2_results(self, *, skill_id: str, version: str, results_json: dict) -> None:
+        """docs/specs/P7_mapping_authoring_design.md §2.2 "Recording Surface
+        2 results": overwrites `skill_versions.surface2_results_json` for an
+        existing (skill_id, version) row -- `orchestrator.service.
+        record_skill_surface2`'s one write, never called from the pipeline.
+        No-op silently if the row does not exist (the caller already checked
+        via get_skill_version before calling this)."""
+        ...
+
     def upsert_risks(self, risks: list[dict], *, now: str) -> None:
         ...
 

@@ -1219,6 +1219,15 @@ class DeltaPersistence:
             rows = _fetchall_dicts(cur)
         return [_skill_version_dict_from_row(r) for r in rows]
 
+    def record_skill_surface2_results(self, *, skill_id: str, version: str, results_json: dict) -> None:
+        with self._cursor_ctx() as conn:
+            self._execute(
+                conn,
+                f"UPDATE {self._table('skill_versions')} SET surface2_results_json = :results_json "
+                "WHERE skill_id = :skill_id AND version = :version",
+                {"results_json": _canonical_json(results_json), "skill_id": skill_id, "version": version},
+            )
+
     # ── risk / control register (P2) ─────────────────────────────────────────
 
     def upsert_risks(self, risks: list[dict], *, now: str) -> None:

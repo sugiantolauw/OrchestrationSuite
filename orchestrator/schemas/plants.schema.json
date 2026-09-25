@@ -1,0 +1,92 @@
+{
+  "type": "object",
+  "properties": {
+    "seed": {"type": "integer"},
+    "natural_id_column": {"type": "string"},
+    "audit_period": {
+      "type": "array",
+      "items": {"type": "string"},
+      "minItems": 2,
+      "maxItems": 2
+    },
+    "background": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "count": {"type": "integer", "minimum": 0},
+          "template": {"type": "object"},
+          "vary": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object",
+              "properties": {
+                "choice": {"type": "array", "minItems": 1},
+                "int_range": {"type": "array", "items": {"type": "integer"}, "minItems": 2, "maxItems": 2},
+                "decimal_range": {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2},
+                "date_range": {"type": "array", "items": {"type": "string"}, "minItems": 2, "maxItems": 2}
+              },
+              "additionalProperties": false,
+              "minProperties": 1,
+              "maxProperties": 1
+            }
+          }
+        },
+        "required": ["count"],
+        "additionalProperties": false
+      }
+    },
+    "tests": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "scoring_unit": {"type": "string", "enum": ["row", "group"]},
+          "source": {"type": "string"},
+          "rows": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "natural_id": {"type": "string"},
+                "exception": {"type": "boolean"},
+                "fields": {"type": "object"}
+              },
+              "required": ["natural_id", "exception", "fields"],
+              "additionalProperties": false
+            }
+          },
+          "groups": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "natural_id": {"type": "string"},
+                "exception": {"type": "boolean"},
+                "members": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "natural_id": {"type": "string"},
+                      "fields": {"type": "object"}
+                    },
+                    "required": ["natural_id", "fields"],
+                    "additionalProperties": false
+                  }
+                }
+              },
+              "required": ["natural_id", "exception", "members"],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": ["scoring_unit", "source"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["seed", "natural_id_column", "audit_period", "tests"],
+  "additionalProperties": false
+}
