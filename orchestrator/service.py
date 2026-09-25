@@ -370,6 +370,16 @@ def _build_explorer_data_source(ctx: AppContext, state: RunState):
     options = (state.options or {}).get("explorer", {})
     sources_cfg = {s["name"]: s for s in options.get("sources", [])}
     if ctx.backend == "local":
+        # An `upload`-kind entry's `b["table_fqn"]` is the upload's OWN
+        # recorded volume_path (_resolve_explorer_sources /
+        # _resolve_explorer_upload_entries pin it that way for every
+        # backend, never the upload_id) -- an absolute path under
+        # ctx.export_storage's root, so LocalFileDataSource reads it
+        # correctly regardless of `root_dir` (Path(root)/absolute == the
+        # absolute path). Its sha256 is re-verified on every read by
+        # LocalFileDataSource.read_population against this binding's
+        # pinned `version` (state.data_assets), the same re-verification
+        # VolumeUploadAwareDataSource performs for a non-local upload below.
         local_sources: dict[str, dict] = {}
         for b in state.data_assets:
             name = b["source"]
@@ -1240,32 +1250,61 @@ def _explorer_source_entries(sources: list[dict]) -> list[dict]:
     return out
 
 
+def _resolve_explorer_upload_entries(
+    ctx: AppContext, entries: list[dict],
+    table_fqn_by_name: dict[str, str], version_by_name: dict[str, str], uploaded_file_hashes: dict[str, dict],
+) -> None:
+    """Resolves every `upload`-kind entry the SAME way regardless of
+    backend: an `upload` source's `ref` is an upload_id, never a file path
+    -- `table_fqn` is the upload's OWN recorded volume_path (so
+    `_build_explorer_data_source`'s local LocalFileDataSource / non-local
+    VolumeUploadAwareDataSource wrapping recognises it the same way a
+    Playbook upload binding does) and `version` is the sha256 already
+    recorded at upload time -- read again, never trusted blind, the next
+    time `_build_explorer_data_source` actually reads it. Mutates the three
+    dicts in place; a non-Ready or unknown upload_id fails loudly (NN14),
+    never silently skipped."""
+    for e in entries:
+        if e["kind"] != "upload":
+            continue
+        row = ctx.persistence.get_uploaded_file(e["ref"])
+        if row is None or row.get("status") != "Ready":
+            raise ExplorerInputError(
+                f"start_explorer_run: upload {e['ref']!r} is not a Ready uploaded file"
+            )
+        table_fqn_by_name[e["name"]] = row["volume_path"]
+        version_by_name[e["name"]] = row["sha256"]
+        uploaded_file_hashes[row["volume_path"]] = row["sha256"]
+
+
 def _resolve_explorer_sources(
     ctx: AppContext, entries: list[dict]
 ) -> tuple[dict[str, str], dict[str, str], dict[str, dict]]:
     """Resolves every Explorer source's version BEFORE any read (CLAUDE.md
     §4.1 TOCTOU ordering -- the same discipline start_audit_run's own
     source_versions resolution follows). Returns `(table_fqn_by_name,
-    version_by_name, uploaded_file_hashes)`. An `upload` source's
-    `table_fqn` is the uploaded file's OWN volume_path (never its upload_id)
-    so `_build_explorer_data_source`'s VolumeUploadAwareDataSource wrapping
-    recognises it the same way a Playbook upload binding does; its version
-    is the sha256 already recorded at upload time -- read again, never
-    trusted blind, the next time `_build_explorer_data_source` actually
-    reads it."""
+    version_by_name, uploaded_file_hashes)`."""
     table_fqn_by_name: dict[str, str] = {}
     version_by_name: dict[str, str] = {}
     uploaded_file_hashes: dict[str, str] = {}
 
     if ctx.backend == "local":
+        # An `upload`-kind entry is resolved via
+        # _resolve_explorer_upload_entries, exactly like the non-local
+        # branch below -- never through LocalFileDataSource, whose
+        # `root_dir` is ctx.local_data_root and has no relationship to
+        # where an upload's own volume_path lives. Only non-upload entries
+        # (local_file) are files under local_data_root.
+        local_entries = [e for e in entries if e["kind"] != "upload"]
         local_sources = {
             e["name"]: {"format": e.get("format") or "csv", "file": e.get("file") or e["ref"]}
-            for e in entries
+            for e in local_entries
         }
         data_source = LocalFileDataSource(root_dir=ctx.local_data_root, sources=local_sources)
-        for e in entries:
+        for e in local_entries:
             table_fqn_by_name[e["name"]] = e["ref"]
             version_by_name[e["name"]] = data_source.resolve_version(e["name"])
+        _resolve_explorer_upload_entries(ctx, entries, table_fqn_by_name, version_by_name, uploaded_file_hashes)
         return table_fqn_by_name, version_by_name, uploaded_file_hashes
 
     uc_names = [e for e in entries if e["kind"] == "uc_table"]
@@ -1278,17 +1317,7 @@ def _resolve_explorer_sources(
             table_fqn_by_name[e["name"]] = e["ref"]
             version_by_name[e["name"]] = uc_source.resolve_version(e["name"])
 
-    for e in entries:
-        if e["kind"] != "upload":
-            continue
-        row = ctx.persistence.get_uploaded_file(e["ref"])
-        if row is None or row.get("status") != "Ready":
-            raise ExplorerInputError(
-                f"start_explorer_run: upload {e['ref']!r} is not a Ready uploaded file"
-            )
-        table_fqn_by_name[e["name"]] = row["volume_path"]
-        version_by_name[e["name"]] = row["sha256"]
-        uploaded_file_hashes[row["volume_path"]] = row["sha256"]
+    _resolve_explorer_upload_entries(ctx, entries, table_fqn_by_name, version_by_name, uploaded_file_hashes)
 
     if any(e["kind"] == "local_file" for e in entries):
         raise ExplorerInputError(
