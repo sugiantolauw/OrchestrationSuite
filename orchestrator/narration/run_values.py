@@ -136,6 +136,40 @@ def _dominant_exposure_entries(
     return entries
 
 
+def _severity_high_entries(findings: list[dict]) -> dict[str, PlaceholderEntry]:
+    """N-S6 ground truth (independent narration-content review 2026-09-25,
+    round 6, live example: an exec summary called the run's largest-EXPOSURE
+    finding -- Medium, always -- "the top-ranked severity issue"; a second
+    live run called it "the primary finding" and never named any of the
+    run's real High-severity findings at all). This run's OWN High-severity
+    findings, one `run_high_finding_<n>_title` entry each, is both what
+    `orchestrator.narration.validate`'s N-S6 checks a severity-superlative
+    claim ("top-ranked severity", "primary/main/key/top finding", "most
+    severe/serious", "high-severity") against, AND what
+    `exec_summary_user.md`'s prompt now asks the model to name explicitly in
+    its lead paragraph -- so a model that follows the prompt automatically
+    satisfies the rule, rather than the rule being a trap sprung after the
+    fact. Sorted by exposure descending, then title, for determinism
+    regardless of the input list's own order (T-PT; the same reason
+    `payloads._serialise_table` sorts by name). Returns {} on a run with no
+    High-severity finding -- the same "omit rather than fabricate" rule as
+    `_dominant_exposure_entries` above, and what gates N-S6 off entirely for
+    such a run (validate.py only runs the check when at least one
+    `run_high_finding_*_title` entry carries a real value)."""
+    high = [f for f in findings if f.get("severity") == "High"]
+    high.sort(key=lambda f: (-(f.get("exposure_amount") or 0), f.get("title") or ""))
+    entries: dict[str, PlaceholderEntry] = {}
+    for i, finding in enumerate(high, start=1):
+        finding_id = finding.get("finding_id") or finding.get("rule_id") or "?"
+        name = f"run_high_finding_{i}_title"
+        entries[name] = PlaceholderEntry(
+            name=name, unit="value", value=finding.get("title"),
+            source_field=f"findings[{finding_id}].title",
+            meaning=f"the title of this run's High-severity finding {i} of {len(high)}",
+        )
+    return entries
+
+
 def run_values(
     state, findings: list[dict], metrics: dict[str, dict], *, catalogue_tests: list[dict],
 ) -> dict[str, PlaceholderEntry]:
@@ -222,4 +256,5 @@ def run_values(
         ),
     }
     table.update(_dominant_exposure_entries(findings, metrics.get("run_exposure_headline")))
+    table.update(_severity_high_entries(findings))
     return table

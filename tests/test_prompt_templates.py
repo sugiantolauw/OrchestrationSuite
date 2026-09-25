@@ -479,7 +479,17 @@ _GOLDEN_PROMPT_SHA256: dict[str, str] = {
     # about exposure/amount for any finding other than PAYLOAD.placeholders' own declared
     # {value:run_exposure_dominant_title} -- see orchestrator.narration.validate's N-S5 for
     # the matching deterministic check.
-    "export_summary": "b11b87f081d10c043bae683c66d4e3a5a3df8092846ee9b1007c37835b425f52",
+    # Updated 2026-09-25 (round 6, task items 1/3): a live run's exec summary called its
+    # largest-EXPOSURE finding (Medium, always) "the top-ranked severity issue" / "the primary
+    # finding", and a second live run never named either of the run's actual High-severity
+    # findings at all. exec_summary_user.md now has a dedicated LEAD PARAGRAPH instruction to
+    # name EVERY run_high_finding_N_title entry with its own key figure, a dedicated SECOND
+    # PARAGRAPH instruction for the exposure driver and approved-not-spent, and bans
+    # "top-ranked severity"/"highest-severity"/"most severe"/"most serious"/"primary"/"main"/
+    # "key"/"top finding" for any finding that is not one of those run_high_finding_N_title
+    # entries -- see orchestrator.narration.validate's N-S6 for the matching deterministic
+    # check.
+    "export_summary": "80f5d91ef7da16f6fcb7f4892c964c1dad95c04c50c6778aea3411f03d872b79",
     "export_caption": "2daab21292416c8a9c919876ce622ed59e1415568202ad5e059e8db019123698",
 }
 

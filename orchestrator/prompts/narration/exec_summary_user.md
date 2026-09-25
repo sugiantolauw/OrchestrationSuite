@@ -5,30 +5,40 @@ PAYLOAD.theme_titles and the top findings in PAYLOAD.top_findings (already order
 first). The first paragraph must use {count:run_finding_count} and, only when PAYLOAD.placeholders
 gives it a value, the headline placeholder {money:run_exposure_headline}.
 
-Lead with the single most severe or most systemic result, not a generic overview. PAYLOAD.
-top_findings is ordered most severe first, ties broken by that finding's own exposure amount --
-top_findings[0] is this run's biggest STORY by severity, not necessarily the finding with the
-largest amount at risk. Where its own `placeholders` list gives you a striking figure for it (for
-example the share of a population affected), name that specific finding and cite that number using
-a placeholder from ITS OWN `placeholders` list -- never invent one, and never use a placeholder
-listed for a different finding. Do not merely restate the finding count and the headline in
-general terms.
+LEAD PARAGRAPH -- the High-severity findings. When PAYLOAD.placeholders gives you one or more
+run_high_finding_N_title entries (run_high_finding_1_title, run_high_finding_2_title, and so on),
+these are this run's actual High-severity findings -- what failed, not a generic overview. Name
+EVERY one of them in the lead paragraph using its own {value:run_high_finding_N_title} placeholder,
+each with its own key figure (for example the share of a population affected) cited from the
+matching item in PAYLOAD.top_findings[].placeholders -- never invent one, and never use a
+placeholder listed for a different finding. If PAYLOAD.placeholders gives you no
+run_high_finding_N_title at all, this run has no High-severity finding -- lead instead with
+PAYLOAD.top_findings[0], this run's most severe or most systemic result, the same way, citing a
+striking figure from its own placeholders. Do not merely restate the finding count and the headline
+in general terms.
 
-Never describe ANY finding with a superlative about exposure or amount at risk -- "highest
-exposure", "largest amount at risk", "most exposure", "the primary/main contributor" and similar
--- unless that finding is PAYLOAD.placeholders' own {value:run_exposure_dominant_title}, the
-payload's one declared largest-exposure contributor. Severity and exposure size are different
-rankings; a finding ranked first by severity (top_findings[0]) is routinely NOT the one ranked
-first by exposure.
-
-When PAYLOAD.placeholders gives you {money:run_exposure_dominant_amount}, explain what drives the
+SECOND PARAGRAPH -- the amount at risk and what drives it. When PAYLOAD.placeholders gives you
+{money:run_exposure_dominant_amount}, explain what drives the {money:run_exposure_headline}
 headline: name the finding at {value:run_exposure_dominant_title} and state whether that amount is
 spend under review or an excess over a threshold, using {value:run_exposure_dominant_basis}
 exactly as given -- "spend" means the full amount is under review, not a confirmed loss; "excess"
 means only the portion over a threshold is at risk. Never call either one a loss, a shortfall, or
 otherwise confirmed. When PAYLOAD.placeholders also gives you
-{money:run_approved_not_spent_total}, say plainly that this amount was approved but not spent and
-is reported separately, excluded from the headline.
+{money:run_approved_not_spent_total}, say plainly and separately that this amount was approved but
+not spent and is reported separately, excluded from the headline.
+
+Severity and exposure size are two different rankings, routinely NOT the same finding: this run's
+own largest-exposure contributor ({value:run_exposure_dominant_title}, second paragraph) is
+frequently NOT one of its High-severity findings (lead paragraph, above). Never describe ANY
+finding with a superlative about exposure or amount at risk -- "highest exposure", "largest amount
+at risk", "most exposure" -- unless that finding is PAYLOAD.placeholders' own
+{value:run_exposure_dominant_title}. Separately, NEVER call ANY finding "the top-ranked severity
+issue", "the highest-severity finding", "the most severe finding", "the most serious finding", "the
+primary finding", "the main finding", "the key finding", or "the top finding" unless that finding's
+own title is one of PAYLOAD.placeholders' run_high_finding_N_title entries -- this applies even to
+{value:run_exposure_dominant_title} itself: naming it as the driver of the exposure headline
+(second paragraph) is correct; calling it "primary", "main", or "top" is not, unless it is ALSO one
+of the High-severity findings named in the lead paragraph.
 
 Do not list every finding; describe the shape of what this run found and why it matters. Do not
 recommend a specific remediation here -- that belongs to each finding's own recommendation, not the

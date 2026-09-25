@@ -31,6 +31,8 @@ __all__ = [
     "find_currency_symbols",
     "find_percent_words",
     "find_exposure_superlative_claims",
+    "find_severity_superlative_claims",
+    "SEVERITY_CLAIM_FIELDS",
 ]
 
 
@@ -83,6 +85,21 @@ OBSERVATION_TYPE_FIELDS: frozenset[str] = frozenset(
 
 # §3.4 N-L2 scope: titles carry no placeholders.
 TITLE_FIELDS: frozenset[str] = frozenset({"theme_title", "candidate_title"})
+
+# N-S6 scope (independent narration-content review 2026-09-25, round 6):
+# exec-summary prose and finding/theme prose only -- NOT "caption" (a chart
+# caption legitimately calls the run's own largest-EXPOSURE contributor "the
+# top finding ... contributing $X", a real, already-validated N-S5 case
+# `find_exposure_superlative_claims`'s own docstring names explicitly; that
+# phrasing is about exposure ranking, not severity ranking, and must not
+# trip a severity-claim rule), "profile_paragraph" (no finding to rank) or
+# "rationale" (N-D3 already bans the ordinal words -- "top", "highest" --
+# this rule's own phrases substantially overlap with, and "root cause
+# hypothesis"/ranking language has no place in a one-line priority
+# rationale to begin with).
+SEVERITY_CLAIM_FIELDS: frozenset[str] = frozenset(
+    {"exec_paragraph", "observation", "theme_summary", "root_cause", "review_observation"}
+)
 
 # §3.3 N-D3 scope: ordinal/ranking words are rejected only in priority rationale.
 RATIONALE_FIELD = "rationale"
@@ -335,3 +352,45 @@ _EXPOSURE_SUPERLATIVE_RE = re.compile(
 
 def find_exposure_superlative_claims(text: str) -> list[LexiconHit]:
     return _find_all(_EXPOSURE_SUPERLATIVE_RE, text)
+
+
+# --------------------------------------------------------------------------
+# N-S6 (independent narration-content review 2026-09-25, round 6, live
+# examples: run A's exec summary opened "The top-ranked severity issue
+# relates to High-Value Claims Requiring Enhanced Scrutiny" -- that finding
+# is Medium, always (`findings.yaml` T4_4 has no `when` rule, only `else:
+# Medium`); run B's called it "The primary finding" and never named the
+# run's real High-severity findings at all). `payloads.top_findings` is
+# ordered "most severe first, ties broken by exposure" -- `top_findings[0]`
+# is a real finding, but a SUPERLATIVE severity claim ("the highest
+# severity", "the most severe/serious finding", "the primary/main/key/top
+# finding", "a high-severity finding") is only ever true of a finding this
+# run's OWN rules actually scored High (`run_values._severity_high_entries`,
+# the `run_high_finding_<n>_title` placeholders) -- never merely "the one
+# named first" or "the one with the most exposure". A leading '$' is not
+# involved here (contrast N-S5): this is about RANK, not money.
+#
+# The hyphen class below tolerates a plain ASCII hyphen, a space, or one of
+# the typographic hyphen/dash characters live model output was observed to
+# use verbatim ("top‑ranked", U+2011 NON-BREAKING HYPHEN) -- an ASCII-
+# only `[\s-]` would silently fail to match that real output.
+# --------------------------------------------------------------------------
+_SEV_HYPHEN = r"[\s\-‐‑‒–]"
+_SEVERITY_SUPERLATIVE_RE = re.compile(
+    r"\b(?:"
+    r"top" + _SEV_HYPHEN + r"+ranked" + _SEV_HYPHEN + r"+severity"
+    r"|highest" + _SEV_HYPHEN + r"+severity"
+    r"|most\s+severe"
+    r"|most\s+serious"
+    r"|primary\s+finding"
+    r"|main\s+finding"
+    r"|key\s+finding"
+    r"|top\s+finding"
+    r"|high" + _SEV_HYPHEN + r"+severity"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def find_severity_superlative_claims(text: str) -> list[LexiconHit]:
+    return _find_all(_SEVERITY_SUPERLATIVE_RE, text)
