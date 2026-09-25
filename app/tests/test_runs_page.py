@@ -123,6 +123,17 @@ def test_combined_skill_and_status_filters_apply_together(real_ctx):
     assert "RUN-C" not in text
 
 
+def test_needs_review_matches_runs_waiting_at_either_gate(real_ctx):
+    _make_run(real_ctx, "RUN-A", objective="Alpha objective", status="awaiting_confirmation")
+    _make_run(real_ctx, "RUN-B", objective="Beta objective", status="awaiting_signoff")
+    _make_run(real_ctx, "RUN-C", objective="Gamma objective", status="completed")
+
+    text = str(runs_page._rows_for_filter(None, "Needs review"))
+    assert "RUN-A" in text
+    assert "RUN-B" in text
+    assert "RUN-C" not in text
+
+
 def test_empty_string_filter_values_behave_like_cleared(real_ctx):
     _make_run(real_ctx, "RUN-A", objective="Alpha objective", status="completed")
 

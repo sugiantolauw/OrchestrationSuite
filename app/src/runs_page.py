@@ -50,11 +50,23 @@ def _matches(actual, wanted: str | None) -> bool:
     return str(actual or "").casefold() == wanted.casefold()
 
 
+# The prototype's "Needs review" status option names no single run status;
+# it means runs waiting on a person -- the two HITL gates (CLAUDE.md §2.4).
+_NEEDS_REVIEW = "needs review"
+_NEEDS_REVIEW_STATUSES = ("Awaiting Confirmation", "Awaiting Signoff")
+
+
+def _status_matches(actual, wanted: str | None) -> bool:
+    if wanted and wanted.casefold() == _NEEDS_REVIEW:
+        return any(_matches(actual, s) for s in _NEEDS_REVIEW_STATUSES)
+    return _matches(actual, wanted)
+
+
 def _rows_for_filter(skill: str | None, status: str | None) -> list:
     runs = adapters.list_audit_runs()
     filtered = [
         r for r in runs
-        if _matches(r.get("skill_name"), skill) and _matches(r.get("status"), status)
+        if _matches(r.get("skill_name"), skill) and _status_matches(r.get("status"), status)
     ]
     return [run_card(r) for r in filtered]
 
