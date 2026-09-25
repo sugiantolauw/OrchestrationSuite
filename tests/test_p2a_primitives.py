@@ -5,7 +5,7 @@ import pytest
 
 from orchestrator.populations import PopulationResult
 from orchestrator.primitives import PRIMITIVES, run_primitive
-from orchestrator.primitives.common import PrimitiveContext, PrimitiveParamsError
+from orchestrator.primitives.common import PrimitiveContext, PrimitiveParamsError, build_metrics
 
 
 def _rows(n: int) -> list[str]:
@@ -715,3 +715,51 @@ def test_registry_has_all_eight_primitives():
 def test_run_primitive_rejects_unknown_primitive_name():
     with pytest.raises(PrimitiveParamsError):
         run_primitive("not_a_real_primitive", _ctx({}), {})
+
+
+# ============================== build_metrics field validation =========================
+# Live regression (independent review 2026-09-25): a metric spec missing a
+# field its `kind` requires (e.g. `kind: "value"` with no `key`) used to
+# raise a bare `KeyError('key')` instead of `PrimitiveParamsError` -- caught
+# by the Explorer validator's V-T7 dry run, but all the planner's repair
+# round ever saw was "'key'", not which metric or field was wrong.
+
+
+def test_build_metrics_value_kind_missing_key_raises_a_named_primitiveparamserror():
+    pop = _pop("p1", pd.DataFrame({"Amount": [1, 2]}))
+    with pytest.raises(PrimitiveParamsError) as excinfo:
+        build_metrics(
+            {"bad_metric": {"kind": "value", "unit": "count"}},
+            population=pop, default_columns=["Amount"], grain="row", row_df=pop.df,
+        )
+    message = str(excinfo.value)
+    assert "bad_metric" in message
+    assert "key" in message
+    assert message != "'key'"  # never the bare KeyError repr
+
+
+@pytest.mark.parametrize(
+    "spec,missing_field",
+    [
+        ({"kind": "sum"}, "column"),
+        ({"kind": "distinct"}, "column"),
+        ({"kind": "max"}, "column"),
+        ({"kind": "count_where"}, "where"),
+        ({"kind": "sum_where", "column": "Amount"}, "where"),
+        ({"kind": "sum_where", "where": {"column": "Amount", "op": "gt", "value": 0}}, "column"),
+    ],
+)
+def test_build_metrics_every_kind_names_its_missing_field(spec, missing_field):
+    pop = _pop("p1", pd.DataFrame({"Amount": [1, 2]}))
+    with pytest.raises(PrimitiveParamsError) as excinfo:
+        build_metrics({"m1": spec}, population=pop, default_columns=["Amount"], grain="row", row_df=pop.df)
+    message = str(excinfo.value)
+    assert "m1" in message
+    assert missing_field in message
+
+
+def test_build_metrics_missing_kind_raises_a_named_primitiveparamserror():
+    pop = _pop("p1", pd.DataFrame({"Amount": [1, 2]}))
+    with pytest.raises(PrimitiveParamsError) as excinfo:
+        build_metrics({"m1": {}}, population=pop, default_columns=["Amount"], grain="row", row_df=pop.df)
+    assert "m1" in str(excinfo.value)

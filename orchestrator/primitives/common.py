@@ -310,6 +310,22 @@ def member_group_id(kind: str, row_keys: Iterable[str]) -> str:
     return f"{kind}:{digest}"
 
 
+def _require_metric_field(spec: dict, field_name: str, *, metric_name: str, kind: str | None = None) -> Any:
+    """A metric's spec is Skill-authored YAML (CLAUDE.md §4.4), not code --
+    a spec missing a field a given `kind` requires is a Skill authoring
+    mistake, and CLAUDE.md's Explorer validator dry run (V-T7) is the
+    planner's own feedback loop for exactly that mistake. A bare
+    `spec[field_name]` KeyError reports only the field name, with no
+    indication of which metric or which primitive's plan.yaml entry is
+    wrong (independent review 2026-09-25, V-T7 gap) -- this names both."""
+    if field_name not in spec:
+        where = f"kind {kind!r}" if kind else "spec"
+        raise PrimitiveParamsError(
+            f"metric {metric_name!r}: {where} requires {field_name!r}, got {spec!r}"
+        )
+    return spec[field_name]
+
+
 def _base_source_ref(population: PopulationResult, columns: list[str], grain: str) -> dict:
     return {
         "sources": [{"name": population.source, "version": population.source_version}],
@@ -346,7 +362,7 @@ def build_metrics(
     values = {**population.excluded_counts, **population.derivation_counters, **(values or {})}
     out: dict[str, dict] = {}
     for name, spec in (metrics_spec or {}).items():
-        kind = spec["kind"]
+        kind = _require_metric_field(spec, "kind", metric_name=name)
         unit = spec.get("unit")
         columns = default_columns
         if kind == "count":
@@ -359,12 +375,12 @@ def build_metrics(
             n = len(group_df) if group_df is not None else 0
             metric = Metric(value=int(n), unit=unit or "count", source_ref=_base_source_ref(population, columns, grain))
         elif kind == "sum":
-            col = spec["column"]
+            col = _require_metric_field(spec, "column", metric_name=name, kind=kind)
             frame = group_df if (group_df is not None and col in group_df.columns) else row_df
             v = float(frame[col].sum()) if frame is not None and len(frame) else 0.0
             metric = Metric(value=v, unit=unit or "AUD", source_ref=_base_source_ref(population, [col], grain))
         elif kind == "distinct":
-            col = spec["column"]
+            col = _require_metric_field(spec, "column", metric_name=name, kind=kind)
             frame = row_df if (row_df is not None and col in row_df.columns) else group_df
             v = int(frame[col].nunique()) if frame is not None and len(frame) else 0
             metric = Metric(value=v, unit=unit or "count", source_ref=_base_source_ref(population, [col], grain))
@@ -375,7 +391,7 @@ def build_metrics(
             # instance was $0", which is a different, wrong claim from "there
             # were no instances" (the same shape of bug pct_of_population's
             # own empty-population case below already guards against).
-            col = spec["column"]
+            col = _require_metric_field(spec, "column", metric_name=name, kind=kind)
             frame = group_df if (group_df is not None and col in group_df.columns) else row_df
             source_ref = _base_source_ref(population, [col], grain)
             if frame is not None and len(frame):
@@ -422,20 +438,20 @@ def build_metrics(
             v = values.get("match_rate")
             metric = Metric(value=v, unit=unit or "%", source_ref=_base_source_ref(population, columns, grain))
         elif kind == "value":
-            key = spec["key"]
+            key = _require_metric_field(spec, "key", metric_name=name, kind=kind)
             if key not in values:
                 raise PrimitiveParamsError(f"metric {name!r}: no computed value named {key!r}")
             metric = Metric(value=values[key], unit=unit or "count", source_ref=_base_source_ref(population, columns, grain))
         elif kind == "count_where":
             frame = row_df
-            where = spec["where"]
+            where = _require_metric_field(spec, "where", metric_name=name, kind=kind)
             n = int(row_condition_mask(frame, where).sum()) if frame is not None and len(frame) else 0
             metric = Metric(
                 value=n, unit=unit or "count", source_ref=_base_source_ref(population, [where["column"]], grain)
             )
         elif kind == "sum_where":
-            col = spec["column"]
-            where = spec["where"]
+            col = _require_metric_field(spec, "column", metric_name=name, kind=kind)
+            where = _require_metric_field(spec, "where", metric_name=name, kind=kind)
             frame = row_df
             if frame is not None and len(frame):
                 mask = row_condition_mask(frame, where)

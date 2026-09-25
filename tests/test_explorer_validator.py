@@ -491,6 +491,28 @@ def test_v_t7_negative_dry_run_catches_incompatible_params():
     assert "V-T7" in _rules(report)
 
 
+def test_v_t7_negative_missing_metric_field_names_the_metric_and_field_not_a_bare_keyerror():
+    # Live regression (independent review 2026-09-25): `kind: "value"` is a
+    # JSON-Schema-legal metric (`key` is not in METRICS_PROPERTY_SCHEMA's
+    # "required") but build_metrics needs `key` to look the computed value
+    # up -- a spec that omits it used to blow up with a bare
+    # `KeyError('key')`, and V-T7's dry run turned that into
+    # "schema-only dry run failed (V-T7): 'key'" -- the ONLY thing the
+    # planner's repair round ever saw, naming neither the metric nor the
+    # missing field. PrimitiveParamsError now names both, and that message
+    # is exactly what orchestrator.nodes.fieldwork._plan_explorer copies
+    # into the repair prompt's violations_json (report["tests"][key]
+    # ["reasons"][*]["message"]) when a repair round is needed.
+    c = _base_canonical()
+    c["tests"][0]["params"]["metrics"]["hv_bad"] = {"kind": "value", "unit": "count"}
+    report = _validate(c)
+    assert "V-T7" in _rules(report)
+    messages = [r["message"] for r in report["tests"]["t1"]["reasons"] if r["rule"] == "V-T7"]
+    assert messages, report["tests"]["t1"]["reasons"]
+    assert any("hv_bad" in m and "key" in m for m in messages), messages
+    assert not any(m.strip("\"' ") == "key" for m in messages), messages
+
+
 def test_v_t7_positive():
     report = _validate(_base_canonical())
     assert "V-T7" not in _rules(report)
