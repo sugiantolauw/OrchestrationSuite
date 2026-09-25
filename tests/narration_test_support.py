@@ -307,7 +307,16 @@ def happy_responses(*, model: str = "test-model-v1") -> dict[str, ModelResponse]
             {
                 "schema_version": "exec-summary/1",
                 "paragraphs": [
-                    "This run raised {count:run_finding_count} finding(s) across the tested population.",
+                    # Round-6 narration-content review, item 2 (N-C1 on
+                    # exec_summary): this mini Skill's own T1 ("High Value
+                    # Claims") always resolves High (hv_count > thresholds.
+                    # hv_high in this fixture's data), so `run_values` always
+                    # declares one `run_high_finding_1_title` entry here --
+                    # the coverage rule now requires citing it by name too,
+                    # not only `run_finding_count`.
+                    "This run raised {count:run_finding_count} finding(s) across the tested "
+                    "population, including the High-severity finding {value:run_high_finding_1_title}, "
+                    "which found {count:hv_count} claim(s) totalling {money:hv_amount}.",
                     # Round-5 narration-content review, item 2 (N-C1 on
                     # exec_summary): this mini Skill's own two findings both
                     # carry a real "spend" monetary_basis, so `run_values`

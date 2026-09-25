@@ -464,6 +464,132 @@ def test_n_s5_positive_ordinary_top_finding_caption_naming_the_dominant_is_not_f
 
 
 # ---------------------------------------------------------------------------
+# N-S6 (independent narration-content review 2026-09-25, round 6): a
+# severity-superlative claim ("top-ranked severity", "highest severity",
+# "most severe/serious", "the primary/main/key/top finding", "high-severity")
+# attached to a finding that is not one of the payload's own declared
+# High-severity findings (`run_high_finding_<n>_title`). The two negative
+# cases below are the actual live exec-summary sentences round 6 reported
+# (RUN-92B0DABA1FA6 / RUN-CF4381B52E8B): both called the run's largest-
+# EXPOSURE finding (High-Value Claims, Medium -- always) the run's
+# highest-severity/primary finding, and neither named any of the run's
+# real three High-severity findings anywhere in the same paragraph. This
+# is deliberately a DIFFERENT finding from N-S5's own `DOMINANT_TABLE`
+# fixture above: `run_exposure_dominant_title` (the largest EXPOSURE
+# contributor) and a `run_high_finding_*_title` (an actual High-SEVERITY
+# finding) are two different rankings, and conflating them is exactly the
+# live bug this rule closes.
+# ---------------------------------------------------------------------------
+HIGH_SEVERITY_TABLE = {
+    "run_finding_count": PlaceholderEntry("run_finding_count", "count", 11),
+    "run_exposure_headline": PlaceholderEntry("run_exposure_headline", "AUD", 324614.65),
+    "run_exposure_dominant_title": PlaceholderEntry(
+        "run_exposure_dominant_title", "value", "High-Value Claims Requiring Enhanced Scrutiny",
+    ),
+    "run_exposure_dominant_amount": PlaceholderEntry("run_exposure_dominant_amount", "AUD", 318785.60),
+    "run_high_finding_1_title": PlaceholderEntry(
+        "run_high_finding_1_title", "value", "Entertainment Claims Missing Attendee Details",
+    ),
+    "run_high_finding_2_title": PlaceholderEntry(
+        "run_high_finding_2_title", "value", "Inadequate Approver Review of Expense Reports",
+    ),
+    "run_high_finding_3_title": PlaceholderEntry(
+        "run_high_finding_3_title", "value", "Duplicate Expense Claims Identified",
+    ),
+}
+
+
+def test_n_s6_positive_superlative_on_a_true_high_finding_is_not_flagged():
+    r = validate_prose(
+        "The most severe finding this run is {value:run_high_finding_1_title}, with a "
+        "missing-attendee rate well above the analyst-set threshold.",
+        HIGH_SEVERITY_TABLE, field="exec_paragraph",
+    )
+    assert "N-S6" not in _rule_ids(r)
+
+
+def test_n_s6_positive_live_round3_true_high_finding_named_is_not_flagged():
+    # The round-3 exec summary called Duplicate Expense Claims Identified
+    # "the issue with the highest severity rating" -- unlike round 6's
+    # error, this finding genuinely WAS High (29 duplicate groups exceeds
+    # thresholds.duplicate_high_count): the claim is true, and must not be
+    # flagged just because a superlative-severity phrase is present.
+    r = validate_prose(
+        "{value:run_high_finding_3_title} surfaced as the issue with the highest severity "
+        "rating, representing a potential duplicate reimbursement risk of "
+        "{money:run_exposure_dominant_amount}.",
+        HIGH_SEVERITY_TABLE, field="exec_paragraph",
+    )
+    assert "N-S6" not in _rule_ids(r)
+
+
+def test_n_s6_negative_live_run_a_top_ranked_severity_on_a_medium_finding_is_flagged():
+    # RUN-92B0DABA1FA6, live exec summary (round-6 BEFORE): called
+    # High-Value Claims (Medium, always -- findings.yaml T4_4 has no `when`
+    # rule) "the top-ranked severity issue", never naming any of this run's
+    # real High-severity findings in the same paragraph. Uses the exact
+    # non-breaking hyphen (U+2011) the live model output, verbatim.
+    r = validate_prose(
+        "The top‑ranked severity issue relates to {value:run_exposure_dominant_title}, "
+        "which accounts for {money:run_exposure_dominant_amount} of the exposure. This amount "
+        "represents spend and appears in the headline exposure of "
+        "{money:run_exposure_headline}. Across the run, a total of {count:run_finding_count} "
+        "findings were flagged.",
+        HIGH_SEVERITY_TABLE, field="exec_paragraph",
+    )
+    assert "N-S6" in _rule_ids(r)
+
+
+def test_n_s6_negative_live_run_a_ascii_hyphen_variant_is_also_flagged():
+    # Same live claim, plain ASCII hyphen -- the rule must not depend on
+    # which hyphen-like character the model happened to use.
+    r = validate_prose(
+        "The top-ranked severity issue relates to {value:run_exposure_dominant_title}, which "
+        "accounts for {money:run_exposure_dominant_amount} of the exposure.",
+        HIGH_SEVERITY_TABLE, field="exec_paragraph",
+    )
+    assert "N-S6" in _rule_ids(r)
+
+
+def test_n_s6_negative_live_run_b_primary_finding_never_naming_a_high_finding_is_flagged():
+    # RUN-CF4381B52E8B, live exec summary (round-6 BEFORE): called the same
+    # Medium finding "the primary finding", and never named the run's
+    # actual High-severity findings anywhere in the summary.
+    r = validate_prose(
+        "The primary finding identified in this run involves "
+        "{value:run_exposure_dominant_title}, which underpins the exposure headline of "
+        "{money:run_exposure_headline} derived from {count:run_finding_count} findings.",
+        HIGH_SEVERITY_TABLE, field="exec_paragraph",
+    )
+    assert "N-S6" in _rule_ids(r)
+
+
+def test_n_s6_positive_no_high_finding_declared_in_table_is_not_flagged():
+    # A clean run, or a run with no High-severity finding at all:
+    # `run_values._severity_high_entries` returns {}, so no
+    # `run_high_finding_*_title` entry exists -- the rule is a no-op, not a
+    # false positive on ordinary audit prose about severity in general.
+    r = validate_prose(
+        "This is the most severe finding identified this quarter.", TABLE, field="observation",
+    )
+    assert "N-S6" not in _rule_ids(r)
+
+
+def test_n_s6_positive_caption_field_is_out_of_scope_even_with_high_findings_declared():
+    # SEVERITY_CLAIM_FIELDS excludes "caption" -- a chart caption legitimately
+    # calls the run's own largest-EXPOSURE finding "the top finding ...
+    # contributing $X" (N-S5's own passing case above), which is about
+    # exposure ranking, not severity ranking, and must never trip N-S6.
+    r = validate_prose(
+        "The chart shows the amount-at-risk headline and the top finding "
+        "{value:run_exposure_dominant_title} contributing "
+        "{money:run_exposure_dominant_amount} based on spend.",
+        HIGH_SEVERITY_TABLE, field="caption",
+    )
+    assert "N-S6" not in _rule_ids(r)
+
+
+# ---------------------------------------------------------------------------
 # N-S3: code-like text.
 # ---------------------------------------------------------------------------
 def test_n_s3_positive_ordinary_prose_is_not_flagged():
@@ -805,3 +931,79 @@ def test_n_c1_positive_live_round3_exec_summary_naming_the_dominant_contributor_
         require_coverage=True, required_placeholders=required_exec_summary_placeholders(EXEC_SUMMARY_TABLE),
     )
     assert "N-C1" not in _rule_ids(r)
+
+
+# ---------------------------------------------------------------------------
+# N-C1, exec_summary, round-6 extension (task item 2): a live round-5 exec
+# summary (RUN-CF4381B52E8B) named the finding count, the exposure headline
+# and its dominant contributor, but never named EITHER of the run's own
+# High-severity findings anywhere -- and still passed, because the coverage
+# check never looked at `run_high_finding_*_title` even when the payload
+# declared them. `required_exec_summary_placeholders` now requires every
+# such entry, same gating style as the dominant-contributor extension above
+# (required only when THIS item's own table declares a real value).
+# ---------------------------------------------------------------------------
+def test_required_exec_summary_placeholders_requires_every_high_finding_title_when_declared():
+    required = required_exec_summary_placeholders(HIGH_SEVERITY_TABLE)
+    assert {
+        "run_high_finding_1_title", "run_high_finding_2_title", "run_high_finding_3_title",
+    } <= required
+
+
+def test_required_exec_summary_placeholders_omits_high_finding_titles_when_none_declared():
+    # A run with no High-severity finding: `run_values._severity_high_entries`
+    # returns {}, so no `run_high_finding_*_title` name is present at all --
+    # nothing extra is required, the same "omit rather than fabricate" no-op
+    # every other entry here follows.
+    table = {"run_finding_count": PlaceholderEntry("run_finding_count", "count", 4)}
+    required = required_exec_summary_placeholders(table)
+    assert not any(name.startswith("run_high_finding_") for name in required)
+
+
+ROUND_6_RUN_B_EXEC_SUMMARY_TEXT = (
+    "The primary finding identified in this run involves {value:run_exposure_dominant_title}, "
+    "which underpins the exposure headline of {money:run_exposure_headline} derived from "
+    "{count:run_finding_count} findings. The exposure driver is "
+    "{value:run_exposure_dominant_title} with a spend under review of "
+    "{money:run_exposure_dominant_amount}, classified as spend. An additional amount approved "
+    "but not spent totals {money:run_approved_not_spent_total} and is reported separately from "
+    "the headline."
+)
+
+
+def test_n_c1_negative_live_round6_runB_exec_summary_omitting_every_high_finding_is_flagged():
+    table = {**HIGH_SEVERITY_TABLE, "run_approved_not_spent_total": PlaceholderEntry(
+        "run_approved_not_spent_total", "AUD", 182552.32,
+    )}
+    r = validate_prose(
+        ROUND_6_RUN_B_EXEC_SUMMARY_TEXT, table, field="exec_paragraph",
+        require_coverage=True, required_placeholders=required_exec_summary_placeholders(table),
+    )
+    hits = [v for v in r.violations if v.rule_id == "N-C1"]
+    assert len(hits) == 1
+    assert "run_high_finding_1_title" in hits[0].message
+    assert "run_high_finding_2_title" in hits[0].message
+    assert "run_high_finding_3_title" in hits[0].message
+
+
+COMPLIANT_EXEC_SUMMARY_TEXT = (
+    "This run raised {count:run_finding_count} findings, including three High-severity "
+    "matters: {value:run_high_finding_1_title}, {value:run_high_finding_2_title}, and "
+    "{value:run_high_finding_3_title}. The amount at risk totals {money:run_exposure_headline}, "
+    "driven mainly by {value:run_exposure_dominant_title}, which accounts for "
+    "{money:run_exposure_dominant_amount} of that total. An additional "
+    "{money:run_approved_not_spent_total} was approved but not spent and is reported "
+    "separately from the headline."
+)
+
+
+def test_n_c1_positive_compliant_exec_summary_naming_every_high_finding_is_not_flagged():
+    table = {**HIGH_SEVERITY_TABLE, "run_approved_not_spent_total": PlaceholderEntry(
+        "run_approved_not_spent_total", "AUD", 182552.32,
+    )}
+    r = validate_prose(
+        COMPLIANT_EXEC_SUMMARY_TEXT, table, field="exec_paragraph",
+        require_coverage=True, required_placeholders=required_exec_summary_placeholders(table),
+    )
+    assert "N-C1" not in _rule_ids(r)
+    assert "N-S6" not in _rule_ids(r)

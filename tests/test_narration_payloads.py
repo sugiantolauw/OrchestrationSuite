@@ -108,6 +108,40 @@ def test_run_values_never_fabricates_the_headline_when_absent():
     assert table["run_finding_count"].value == 0
 
 
+# N-S6 ground truth (round-6 narration-content review): one
+# `run_high_finding_<n>_title` entry per High-severity finding, sorted by
+# exposure descending then title -- what the exec-summary prompt now asks
+# the model to name explicitly, and what orchestrator.narration.validate's
+# N-S6 checks a severity-superlative claim against.
+def test_run_values_declares_one_title_entry_per_high_finding_sorted_by_exposure():
+    state = _State()
+    findings = [
+        _finding(finding_id="RUN1:T5_2", title="Duplicate Expense Claims Identified", severity="High", exposure_amount=1994.79),
+        _finding(finding_id="RUN1:T4_4", title="High-Value Claims Requiring Enhanced Scrutiny", severity="Medium", exposure_amount=318785.60),
+        _finding(finding_id="RUN1:T4_2", title="Entertainment Claims Missing Attendee Details", severity="High", exposure_amount=None),
+        _finding(finding_id="RUN1:T6_1a", title="Inadequate Approver Review of Expense Reports", severity="High", exposure_amount=None),
+    ]
+    table = run_values(state, findings, {}, catalogue_tests=[])
+
+    assert table["run_high_finding_1_title"].value == "Duplicate Expense Claims Identified"
+    assert table["run_high_finding_1_title"].unit == "value"
+    # The two zero-exposure High findings tie-break alphabetically by title.
+    assert table["run_high_finding_2_title"].value == "Entertainment Claims Missing Attendee Details"
+    assert table["run_high_finding_3_title"].value == "Inadequate Approver Review of Expense Reports"
+    # The Medium finding (even though it is the largest EXPOSURE contributor
+    # -- the live bug this closes) never gets a run_high_finding_*_title
+    # entry: only actual High-severity findings do.
+    assert "run_high_finding_4_title" not in table
+    assert table["run_exposure_dominant_title"].value == "High-Value Claims Requiring Enhanced Scrutiny"
+
+
+def test_run_values_declares_no_high_finding_titles_when_none_are_high():
+    state = _State()
+    findings = [_finding(severity="Medium"), _finding(severity="Low")]
+    table = run_values(state, findings, {}, catalogue_tests=[])
+    assert not any(name.startswith("run_high_finding_") for name in table)
+
+
 def test_run_values_catalogue_tests_give_14_grain_counts(skill):
     # Independent review 2026-09-24 gap #5: run_tests_* must count SKILL-001's
     # 14 catalogue tests (skills/tne_exco/catalogue.yaml), never the plan's

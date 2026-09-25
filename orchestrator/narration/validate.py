@@ -30,6 +30,7 @@ from orchestrator.narration.lexicon import (
     FIELD_LENGTH_CAPS,
     OBSERVATION_TYPE_FIELDS,
     RATIONALE_FIELD,
+    SEVERITY_CLAIM_FIELDS,
     TITLE_FIELDS,
     find_causal_connectives,
     find_causation_language,
@@ -42,6 +43,7 @@ from orchestrator.narration.lexicon import (
     find_ordinal_words,
     find_percent_words,
     find_policy_assertions,
+    find_severity_superlative_claims,
     find_universal_quantifiers,
     find_vague_magnitude_words,
 )
@@ -72,7 +74,7 @@ __all__ = [
 # lexicon addition, a coverage change, the sentence-split regex -- must bump
 # this, because it enters the run fingerprint's `prompt_template_version`
 # hash input (via the node that owns the fingerprint, outside N1's scope).
-NARRATION_VALIDATOR_VERSION = "3"
+NARRATION_VALIDATOR_VERSION = "4"
 
 # §3.4, the paragraph under the rule table: sentence boundaries for the
 # same-sentence exception in N-Q2, computed after placeholders have been
@@ -515,6 +517,47 @@ def validate_prose(
                         )
                     )
 
+        # N-S6 (independent narration-content review 2026-09-25, round 6):
+        # a severity-superlative claim ("top-ranked severity", "highest
+        # severity", "most severe/serious", "the primary/main/key/top
+        # finding", "high-severity") is only ever true of a finding this
+        # run's OWN rules actually scored High -- never merely the finding
+        # named first, and never the run's largest-EXPOSURE contributor
+        # unless that finding is ALSO High (`run_values.
+        # _severity_high_entries`'s `run_high_finding_<n>_title` entries are
+        # the ground truth; see that function's docstring for the two live
+        # failures this closes). Scoped to `SEVERITY_CLAIM_FIELDS` only --
+        # NOT every `OBSERVATION_TYPE_FIELDS` member -- because a chart
+        # caption legitimately calls the run's own dominant-EXPOSURE finding
+        # "the top finding ... contributing $X" (an N-S5 case, not this
+        # one); see that frozenset's own comment. Only runs when this item's
+        # own table carries at least one `run_high_finding_*_title` entry
+        # with a real value -- a run with no High-severity finding, or a
+        # finding-scoped table that never merges the run-level table in the
+        # first place, is a no-op here, not a false negative (mirrors N-S5's
+        # own gating above).
+        if field in SEVERITY_CLAIM_FIELDS:
+            high_titles = {
+                str(entry.value).casefold()
+                for name, entry in table.items()
+                if name.startswith("run_high_finding_") and name.endswith("_title") and entry.value
+            }
+            if high_titles:
+                low = rendered_for_lexicon.casefold()
+                if not any(title in low for title in high_titles):
+                    for hit in find_severity_superlative_claims(rendered_for_lexicon):
+                        violations.append(
+                            Violation(
+                                "N-S6",
+                                f"{hit.text!r} claims a finding is highest-severity/most-severe/"
+                                "primary, but this text never names any of this run's actual "
+                                "High-severity findings (run_high_finding_*_title) -- only a "
+                                "finding this run's rules scored High may be described with a "
+                                "severity superlative",
+                                hit.text,
+                            )
+                        )
+
     for hit in find_causation_language(stripped):
         violations.append(
             Violation(
@@ -595,21 +638,29 @@ def validate_prose(
 
 
 def required_exec_summary_placeholders(table: Mapping[str, PlaceholderEntry]) -> frozenset[str]:
-    """N-C1, `exec_summary` only (round-5 narration-content review, item 2):
-    a live round-4 exec summary correctly cited `run_finding_count` and
-    `run_exposure_headline` but never said WHICH finding drives the
-    headline or how much of it -- it omitted `run_exposure_dominant_title`/
-    `run_exposure_dominant_amount` even though the payload declared them
+    """N-C1, `exec_summary` only (round-5 narration-content review, item 2;
+    extended round 6, item 2): a live round-4 exec summary correctly cited
+    `run_finding_count` and `run_exposure_headline` but never said WHICH
+    finding drives the headline or how much of it -- it omitted
+    `run_exposure_dominant_title`/`run_exposure_dominant_amount` even though
+    the payload declared them
     (`orchestrator.narration.run_values._dominant_exposure_entries`) and
     `exec_summary_user.md` explicitly asks the model to name them -- and
     still passed, because `narrate_exec_summary`'s own coverage check never
-    looked at those two names. Same gating style as N-S5: a name is
-    required only when THIS item's own table actually declares it with a
-    real value (`entry.value is not None`) -- a clean run, or a run whose
-    exposure has no single dominant contributor, requires nothing extra,
-    and a finding-scoped table (which never carries these run-level names
-    at all, per `build_finding_table`) is unaffected. `run_finding_count`
-    is always required, matching the pre-existing behaviour this extends."""
+    looked at those two names. A live round-5 exec summary repeated the
+    same shape of gap one level up: it named `run_finding_count` and
+    `run_exposure_headline` but never named EITHER of the run's own
+    High-severity findings (`run_values._severity_high_entries`'s
+    `run_high_finding_<n>_title` entries) even though both existed with
+    real values -- so this now requires every such entry too, one per
+    actual High-severity finding, not merely the first. Same gating style
+    as N-S5 throughout: a name is required only when THIS item's own table
+    actually declares it with a real value (`entry.value is not None`) -- a
+    clean run, a run with no High-severity finding, or a run whose exposure
+    has no single dominant contributor, requires nothing extra, and a
+    finding-scoped table (which never carries these run-level names at all,
+    per `build_finding_table`) is unaffected. `run_finding_count` is always
+    required, matching the pre-existing behaviour this extends."""
     required = {"run_finding_count"}
     headline = table.get("run_exposure_headline")
     if headline is not None and headline.value is not None:
@@ -621,6 +672,9 @@ def required_exec_summary_placeholders(table: Mapping[str, PlaceholderEntry]) ->
     approved_not_spent = table.get("run_approved_not_spent_total")
     if approved_not_spent is not None and approved_not_spent.value is not None:
         required.add("run_approved_not_spent_total")
+    for name, entry in table.items():
+        if name.startswith("run_high_finding_") and name.endswith("_title") and entry.value is not None:
+            required.add(name)
     return frozenset(required)
 
 

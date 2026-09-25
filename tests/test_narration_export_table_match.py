@@ -45,8 +45,14 @@ def test_exec_summary_and_caption_citing_the_dominant_exposure_placeholder_do_no
         {
             "schema_version": "exec-summary/1",
             "paragraphs": [
+                # Round-6 narration-content review, item 2 (N-C1 on
+                # exec_summary): this mini Skill's own T1 always resolves
+                # High, so `run_values` always declares a
+                # `run_high_finding_1_title` entry -- cite it too, or the
+                # coverage check now fails this fixture's response.
                 "This run raised {count:run_finding_count} finding(s), an amount at risk of "
-                "{money:run_exposure_headline}.",
+                "{money:run_exposure_headline}, including the High-severity finding "
+                "{value:run_high_finding_1_title}.",
                 "That figure is driven by {value:run_exposure_dominant_title}, contributing "
                 "{money:run_exposure_dominant_amount}.",
             ],
