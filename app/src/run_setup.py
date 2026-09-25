@@ -68,6 +68,9 @@ _MODE_CARD_SPECS = [
 ]
 
 
+_EXPLORER_ACTIVE_STATUSES = {"queued", "running"}
+
+
 def _mode_cards(selected_mode: str) -> list:
     return [mode_card(mode_id, title, desc, selected=(mode_id == selected_mode))
             for mode_id, title, desc in _MODE_CARD_SPECS]
@@ -99,13 +102,24 @@ def _request_owner() -> str:
 
 # ─── Landing page (ported from reference_app/src/platform/pages.py) ─────────
 
-def home_layout() -> html.Div:
+def home_layout(default_mode: str = "playbook") -> html.Div:
+    """`default_mode` lets app.py preselect Explorer mode when the Skill
+    Library's "Start Explorer Mode" button navigates here with
+    `?mode=explorer` (D5.1) -- home_layout() called with no argument (every
+    other route, and tests/test_layout_parity.py's own call) renders
+    exactly the prototype's default "playbook" state, so the zero-diff
+    landing-page comparison is unaffected. Only style values (never id or
+    className -- tree.py's shape() does not even inspect style) change
+    between the two, the same show/hide mechanism select_mode_card already
+    uses at runtime for the same two sections."""
     skills = adapters.list_skills()
     # limit=4 matches the [:4] this page has always rendered -- passing it
     # through means row-count/classification lookups (real per-table
     # queries) only ever run for the cards actually shown here, not every
     # governed table (CLAUDE.md §5 UI item 3).
     assets = adapters.search_governed_data("", limit=4)
+    playbook_style = {} if default_mode == "playbook" else {"display": "none"}
+    explorer_style = {"display": "none"} if default_mode == "playbook" else {}
 
     return html.Div([
         # Hero section
@@ -191,7 +205,7 @@ def home_layout() -> html.Div:
         ], style={"marginTop": 24}),
 
         html.Div(
-            _mode_cards("playbook"),
+            _mode_cards(default_mode),
             className="plat-two-col", id="mode-selector-row",
         ),
 
@@ -202,7 +216,7 @@ def home_layout() -> html.Div:
                 className="plat-skill-grid",
                 id="skill-cards-container",
             ),
-        ], id="playbook-skills-section"),
+        ], id="playbook-skills-section", style=playbook_style),
 
         # Explorer section (hidden by default)
         html.Div([
@@ -219,12 +233,12 @@ def home_layout() -> html.Div:
                     html.Span("Explorer Mode requires auditor confirmation before execution",
                               style={"fontSize": 12, "color": "#6b4a00"}),
                 ], style={"marginBottom": 10}),
-                html.Button("Start new objective", className="btn-generate",
+                html.Button("Start new objective", id="explorer-start-btn", className="btn-generate",
                             style={"marginRight": 8}),
-                html.Button("Save completed approach as draft Skill", className="ghost",
-                            style={"width": "auto"}),
+                html.Button("Save completed approach as draft Skill", id="explorer-save-draft-btn",
+                            className="ghost", style={"width": "auto"}),
             ], className="panel"),
-        ], id="explorer-section", style={"display": "none"}),
+        ], id="explorer-section", style=explorer_style),
 
         # ── Run configuration ────────────────────────────────────────────
         html.Div([
@@ -402,6 +416,119 @@ def _auto_bind(skill_id: str) -> tuple[dict[str, str], list[str]]:
     return bindings, missing
 
 
+def _explorer_source_candidates() -> list[dict]:
+    """docs/specs/P6_P8_explorer_llm_design.md §5.1: "the same selection
+    mechanism the restored landing page uses for Playbook bindings" -- the
+    landing page has no per-asset selection control for EITHER mode
+    (data_asset_card carries no clickable id, unlike skill_card/mode_card;
+    Playbook works around this entirely via contract-driven auto-binding,
+    _auto_bind above). Explorer has no contract to auto-bind against, so
+    this takes the SAME governed-table results the page already shows (the
+    first 5, filtered to ones this identity can actually read) plus this
+    user's own Ready uploads, up to start_explorer_run's 5-source cap --
+    "as today" (D5.1), never a new selection UI (out of scope for D2-D4)."""
+    sources: list[dict] = []
+    is_local = adapters.is_local_backend()
+    for asset in adapters.search_governed_data("", limit=5):
+        if asset.get("access") != "Available" or not asset.get("name"):
+            continue
+        sources.append({"kind": "local_file" if is_local else "uc_table", "ref": asset["name"]})
+        if len(sources) >= 5:
+            break
+    if len(sources) < 5:
+        owner = _request_owner()
+        for row in adapters.list_uploaded_files(engagement_id=_DEFAULT_ENGAGEMENT_ID):
+            if row.get("status") != "Ready" or row.get("uploaded_by") != owner:
+                continue
+            sources.append({"kind": "upload", "ref": row["upload_id"]})
+            if len(sources) >= 5:
+                break
+    return sources
+
+
+def _explorer_error_panel(message: str) -> html.Div:
+    return html.Div([
+        html.Div([
+            html.Span("Mode", style={"fontSize": 11, "fontWeight": 700, "textTransform": "uppercase",
+                                      "color": "#6b7283", "letterSpacing": "0.03em"}),
+            html.Div(message, style={"fontSize": 13, "fontWeight": 600, "color": "#b85042"}),
+        ]),
+    ], className="panel", style={"marginTop": 12})
+
+
+def _explorer_note_panel(message: str, *, ok: bool = True) -> html.Div:
+    return html.Div([
+        html.Div(message, style={"fontSize": 13, "fontWeight": 600, "color": "#2c7a4b" if ok else "#b85042"}),
+    ], className="panel", style={"marginTop": 12})
+
+
+def _explorer_workflow_children(review: dict) -> list:
+    """docs/specs/P6_P8_explorer_llm_design.md §5.1: the existing nine
+    `workflow_stage` rows from real Explorer status, plus one row per
+    proposed test (ready for valid, pending/grey for greyed, reason as
+    detail), plus (D4) one dcc.Checklist -- an existing prototype control --
+    listing the valid tests for include/exclude editing."""
+    tests = review.get("tests", [])
+    n_valid, n_total = review.get("n_valid", 0), review.get("n_total", 0)
+
+    if review.get("llm_unavailable"):
+        plan_detail = review.get("label") or "LLM unavailable — deterministic output only"
+    elif review.get("plan_status") == "proposed":
+        plan_detail = f"{n_valid} test(s) proposed · {n_total - n_valid} greyed"
+    else:
+        plan_detail = "Profiling data and proposing tests…"
+
+    stages = [
+        {"stage": "Source data", "status": "ready", "detail": None},
+        {"stage": "Data quality & reconciliation", "status": "pending", "detail": None},
+        {"stage": "Skill / Explorer plan", "status": "needs_confirmation", "detail": plan_detail},
+        {"stage": "Deterministic audit tests", "status": "pending",
+         "detail": f"{n_total} test(s) defined" if n_total else None},
+        {"stage": "Exception classification", "status": "pending", "detail": None},
+        {"stage": "Evidence-linked findings", "status": "pending", "detail": None},
+        {"stage": "Insights & prioritisation", "status": "pending", "detail": None},
+        {"stage": "Management actions", "status": "pending", "detail": None},
+        {"stage": "Export & Jira preview", "status": "pending", "detail": None},
+    ]
+    for t in tests:
+        if t["valid"]:
+            detail = t.get("rationale") or "Valid"
+        else:
+            reasons = "; ".join(r.get("message", "") for r in t.get("reasons", []) if r.get("message"))
+            detail = reasons or "Not valid for this data"
+        stages.append({
+            "stage": t.get("name") or t["key"],
+            "status": "ready" if t["valid"] else "pending",
+            "detail": detail,
+        })
+
+    total = len(stages)
+    children = [
+        html.Div([workflow_stage(s, i, total) for i, s in enumerate(stages)], style={"padding": "12px 0"}),
+    ]
+    if review.get("llm_unavailable"):
+        children.append(demo_indicator(review.get("label") or "LLM unavailable — deterministic output only"))
+
+    valid_tests = [t for t in tests if t["valid"]]
+    if valid_tests:
+        children.append(dcc.Checklist(
+            id="explorer-test-checklist",
+            options=[
+                {"label": f" {t.get('name') or t['key']} — {t.get('rationale') or ''}", "value": t["key"]}
+                for t in valid_tests
+            ],
+            value=[t["key"] for t in valid_tests if t.get("included")],
+            style={"fontSize": 13, "color": "#3b4150", "marginTop": 12},
+            labelStyle={"display": "block", "marginBottom": 6},
+        ))
+    if review.get("proposal_errors"):
+        children.append(html.Div(
+            "; ".join(review["proposal_errors"]),
+            style={"fontSize": 11.5, "color": "#b85042", "marginTop": 8},
+        ))
+    return children
+
+
 # ─── Callbacks (ported from reference_app/app.py) ───────────────────────────
 
 def register_callbacks(app) -> None:
@@ -464,11 +591,36 @@ def register_callbacks(app) -> None:
 
     @app.callback(
         Output("workflow-preview-container", "children"),
+        Output("explorer-poll-interval", "disabled"),
         Input("audit-objective", "value"),
+        Input("selected-mode-store", "data"),
+        Input("explorer-run-store", "data"),
+        Input("explorer-poll-interval", "n_intervals"),
         prevent_initial_call=False,
     )
-    def render_workflow_preview(objective):
-        """Show the agent plan preview stages."""
+    def render_workflow_preview(objective, selected_mode, explorer_store, _n_intervals):
+        """Show the agent plan preview stages. In Explorer mode, once
+        "Start new objective" has set explorer-run-store, this polls
+        get_explorer_review (D3) instead -- and only THEN is
+        explorer-poll-interval enabled (disabled=not active), so there is no
+        idle polling before a run exists or after its plan phase finishes
+        (CLAUDE.md §11 cost incident)."""
+        explorer_store = explorer_store or {}
+        run_id = explorer_store.get("run_id")
+        if run_id:
+            review = adapters.get_explorer_review(run_id)
+            active = review["run_status"] in _EXPLORER_ACTIVE_STATUSES
+            return html.Div(_explorer_workflow_children(review), className="panel"), not active
+
+        if selected_mode == "explorer":
+            plan = adapters.propose_plan({"mode": "explorer", "skill": None})
+            stages = plan.get("stages", [])
+            total = len(stages)
+            return html.Div([
+                html.Div([workflow_stage(s, i, total) for i, s in enumerate(stages)],
+                         style={"padding": "12px 0"}),
+            ], className="panel"), True
+
         plan = adapters.propose_plan({"mode": "playbook", "skill": adapters.get_skill(_DEFAULT_SKILL_ID), "sources_count": 3})
         stages = plan.get("stages", [])
         total = len(stages)
@@ -478,7 +630,7 @@ def register_callbacks(app) -> None:
                 style={"padding": "12px 0"},
             ),
             demo_indicator("Preview only — workflow has not been executed") if plan.get("mock") else None,
-        ], className="panel")
+        ], className="panel"), True
 
     @app.callback(
         Output("run-summary-preview", "children"),
@@ -563,10 +715,11 @@ def register_callbacks(app) -> None:
         State("audit-materiality", "value"),
         State("audit-options", "value"),
         State("selected-skill-store", "data"),
+        State("explorer-run-store", "data"),
         prevent_initial_call=True,
     )
     def start_run(n_clicks, objective, start_date, end_date, business_unit, materiality, options,
-                   selected_skill_id):
+                   selected_skill_id, explorer_store):
         """Starts a real audit run (CLAUDE.md §2.1: start_audit_run only
         inserts the `runs` row and hands off to the executor).
 
@@ -576,9 +729,24 @@ def register_callbacks(app) -> None:
         complete the instant it is created (it must clear the mandatory
         plan-confirmation and findings-sign-off gates, CLAUDE.md §2.4
         non-negotiable 3), so this navigates to the run's own status page
-        instead. See the change report for the alternative considered."""
+        instead. See the change report for the alternative considered.
+
+        Explorer mode (D3): when explorer-run-store holds a run_id, this
+        button CONFIRMS that run's proposal (with any plan_edits already
+        applied) instead of starting a new Playbook run -- exactly the
+        "Start audit analysis... confirms the plan" behaviour §5.1
+        describes for "Start new objective" having already been clicked."""
         if not n_clicks:
             raise PreventUpdate
+
+        explorer_run_id = (explorer_store or {}).get("run_id")
+        if explorer_run_id:
+            try:
+                actor = _request_owner()
+                adapters.confirm_plan(explorer_run_id, actor)
+            except Exception as exc:  # NN14: fail loudly and visibly, never a silent default
+                return no_update, _explorer_error_panel(f"Could not confirm the plan: {exc}")
+            return f"/run/{explorer_run_id}", no_update
 
         options = options or []
         skill_id = selected_skill_id or _DEFAULT_SKILL_ID
@@ -621,3 +789,133 @@ def register_callbacks(app) -> None:
             ], className="panel", style={"marginTop": 12})
 
         return f"/run/{run_id}", no_update
+
+    @app.callback(
+        Output("explorer-run-store", "data"),
+        Output("run-summary-preview", "children", allow_duplicate=True),
+        Input("explorer-start-btn", "n_clicks"),
+        State("audit-objective", "value"),
+        State("audit-period", "start_date"),
+        State("audit-period", "end_date"),
+        State("audit-bu", "value"),
+        State("audit-materiality", "value"),
+        State("explorer-run-store", "data"),
+        prevent_initial_call=True,
+    )
+    def start_new_objective(n_clicks, objective, start_date, end_date, business_unit, materiality,
+                             prior_store):
+        """"Start new objective" (§5.1): starts Explorer planning for the
+        current objective and sources -- superseding this session's own
+        previous still-awaiting-confirmation Explorer run, if any, exactly
+        as §5.1's own row describes. Explorer-run-store is the one D2 Store
+        that render_workflow_preview then picks up (its own Input on this
+        same store) to switch the "Proposed workflow" panel into polling the
+        real Explorer run instead of showing the generic preview."""
+        if not n_clicks:
+            raise PreventUpdate
+        try:
+            sources = _explorer_source_candidates()
+            if not sources:
+                raise ValueError(
+                    "no available governed data or ready uploaded file to profile -- "
+                    "search governed data or upload a file first."
+                )
+            run_owner = _request_owner()
+            prior_run_id = (prior_store or {}).get("run_id")
+            run_id = adapters.start_explorer_run(
+                objective=(objective or "").strip(),
+                sources=sources,
+                audit_period=(start_date, end_date),
+                run_owner=run_owner,
+                supersedes_run_id=prior_run_id,
+                business_unit=(business_unit or "").strip() or None,
+                materiality=float(materiality) if materiality not in (None, "") else None,
+            )
+        except Exception as exc:  # NN14: fail loudly and visibly, never a silent default
+            return no_update, _explorer_error_panel(f"Could not start Explorer Mode: {exc}")
+        return {"run_id": run_id}, no_update
+
+    @app.callback(
+        Output("run-summary-preview", "children", allow_duplicate=True),
+        Input("explorer-test-checklist", "value"),
+        State("explorer-run-store", "data"),
+        prevent_initial_call=True,
+    )
+    def edit_explorer_checklist(included_keys, explorer_store):
+        """D4: the one include/exclude edit control -- a dcc.Checklist of
+        the proposal's currently VALID tests (greyed tests are never
+        offered, they can never be included, §4.9). Diffs the checklist's
+        new value against the review's own current included set and sends
+        only the resulting include_test/exclude_test ops to
+        edit_explorer_plan; a batch edit_explorer_plan rejects outright
+        (ExplorerEditRejected) is shown here, never silently dropped."""
+        run_id = (explorer_store or {}).get("run_id")
+        if not run_id:
+            raise PreventUpdate
+        review = adapters.get_explorer_review(run_id)
+        valid_keys = {t["key"] for t in review["tests"] if t["valid"]}
+        currently_included = {t["key"] for t in review["tests"] if t["valid"] and t["included"]}
+        new_included = set(included_keys or []) & valid_keys
+        to_exclude = currently_included - new_included
+        to_include = new_included - currently_included
+        if not to_exclude and not to_include:
+            raise PreventUpdate
+        edits = (
+            [{"op": "exclude_test", "test_key": k} for k in sorted(to_exclude)]
+            + [{"op": "include_test", "test_key": k} for k in sorted(to_include)]
+        )
+        try:
+            actor = _request_owner()
+            adapters.edit_explorer_plan(run_id, edits, actor)
+        except Exception as exc:  # NN14: fail loudly and visibly, never a silent default
+            return _explorer_error_panel(f"Could not update the plan: {exc}")
+        raise PreventUpdate
+
+    @app.callback(
+        Output("run-summary-preview", "children", allow_duplicate=True),
+        Input("explorer-save-draft-btn", "n_clicks"),
+        State("explorer-run-store", "data"),
+        prevent_initial_call=True,
+    )
+    def save_explorer_draft(n_clicks, explorer_store):
+        """"Save completed approach as draft Skill" (§5.1): enabled IN
+        EFFECT only when this session's Explorer run is completed --
+        otherwise this writes the reason to run-summary-preview rather than
+        pretending the click did nothing."""
+        if not n_clicks:
+            raise PreventUpdate
+        run_id = (explorer_store or {}).get("run_id")
+        if not run_id:
+            return _explorer_error_panel(
+                "No Explorer run in this session yet -- start a new objective first."
+            )
+        run = adapters.get_run(run_id)
+        if run is None or run.get("status") != "completed":
+            status = (run or {}).get("status", "unknown")
+            return _explorer_error_panel(
+                f"This Explorer run is not yet completed (status: {status}) -- "
+                "sign off and export before saving it as a draft Skill."
+            )
+        try:
+            actor = _request_owner()
+            saved = adapters.save_explorer_draft_skill(run_id, actor)
+        except Exception as exc:  # NN14: fail loudly and visibly, never a silent default
+            return _explorer_error_panel(f"Could not save draft Skill: {exc}")
+        return _explorer_note_panel(
+            f"Saved as draft Skill {saved['skill_id']} v{saved['version']} — "
+            "it now appears in the Skill Library."
+        )
+
+    @app.callback(
+        Output("url", "pathname", allow_duplicate=True),
+        Output("url", "search", allow_duplicate=True),
+        Input("start-explorer-from-library-btn", "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def start_explorer_from_library(n_clicks):
+        """Skill Library's "Start Explorer Mode" (§5.1): navigates to `/`
+        with Explorer mode preselected -- app.py's route_page reads
+        `?mode=explorer` and renders home_layout(default_mode="explorer")."""
+        if not n_clicks:
+            raise PreventUpdate
+        return "/", "?mode=explorer"

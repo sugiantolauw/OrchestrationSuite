@@ -208,6 +208,22 @@ def _stub_methodology(skill_id: str) -> dict:
 
     skill = get_skill(skill_id) or {}
     stub = _STUB_CONTENT.get(skill_id, {})
+
+    # docs/specs/P6_P8_explorer_llm_design.md §4.13 point 4/§5.2: a saved
+    # Explorer draft (origin 'explorer_saved') has no entry in
+    # _STUB_CONTENT -- its own ledger content (via get_skill's additive
+    # catalogue_tests/contract_sources fields) is the real "planned"
+    # catalogue for this draft, never invented boilerplate.
+    if skill.get("origin") == "explorer_saved":
+        planned_tests = [
+            f"{t.get('test_id', '')} — {t.get('test_name', '')}: {t.get('rule', '')}"
+            for t in skill.get("catalogue_tests", [])
+        ]
+        planned_sources = list(skill.get("contract_sources", []))
+    else:
+        planned_tests = stub.get("planned_tests", [])
+        planned_sources = stub.get("planned_sources", [])
+
     return {
         "skill_id": skill_id,
         "name": skill.get("name", "Unknown Skill"),
@@ -217,7 +233,7 @@ def _stub_methodology(skill_id: str) -> dict:
         "status": skill.get("status", "Draft"),
         "last_updated": skill.get("last_updated", ""),
         "purpose": stub.get("purpose", skill.get("description", "")),
-        "planned_tests": stub.get("planned_tests", []),
-        "planned_sources": stub.get("planned_sources", []),
+        "planned_tests": planned_tests,
+        "planned_sources": planned_sources,
         "is_stub": True,
     }
