@@ -46,7 +46,10 @@ from tests.test_explorer_service import (
 SOURCES = [{"kind": "local_file", "ref": "expense_report.csv"}]
 
 
-def _build_ctx(tmp_path: Path, *, model_sonnet: str | None = SONNET_ENDPOINT, worker_id: str = "worker-a") -> service.AppContext:
+def _build_ctx(
+    tmp_path: Path, *, model_sonnet: str | None = SONNET_ENDPOINT, worker_id: str = "worker-a",
+    narration_enabled: bool = False,
+) -> service.AppContext:
     env = {
         "ORCH_BACKEND": "local",
         "ORCH_LOCAL_DB": str(tmp_path / "orch.db"),
@@ -60,6 +63,8 @@ def _build_ctx(tmp_path: Path, *, model_sonnet: str | None = SONNET_ENDPOINT, wo
     if model_sonnet:
         env["MODEL_SONNET"] = model_sonnet
         env["MODEL_GPT_OSS"] = GPT_OSS_ENDPOINT
+    if narration_enabled:
+        env["NARRATION_ENABLED"] = "true"
     data_dir = tmp_path / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
     _write_expense_data(data_dir)
@@ -149,6 +154,80 @@ def test_explorer_e2e_propose_repair_exclude_confirm_execute_signoff_export_save
             assert c["messages_json"]
             assert c["endpoint"] in (SONNET_ENDPOINT, GPT_OSS_ENDPOINT)
             assert c["served_model_version"]
+    finally:
+        ctx.executor.stop()
+
+
+def test_explorer_e2e_narration_enabled_survives_the_explorer_shaped_profile_result(tmp_path):
+    """Live regression (independent review 2026-09-25): orchestrator.narration.
+    payloads.build_profile_payload assumed `state.profile_result` always has
+    the Playbook shape (`{source: {row_count, null_counts}}`), but an
+    Explorer run's profile_result is one level deeper -- `{"kind":
+    "explorer", "sources": {source: {row_count, null_counts, columns}}}`
+    (orchestrator.nodes.fieldwork._profile_explorer). Iterating that dict
+    directly yielded `("kind", "explorer")` as a (source, info) pair and
+    crashed every Explorer run with NARRATION_ENABLED=true with
+    `AttributeError: 'str' object has no attribute 'get'` inside the real
+    `narrate` node. None of this file's other tests caught it because none
+    of them enable narration -- this one drives the real state machine
+    (service.start_explorer_run + the real ThreadExecutor, never
+    orchestrator.nodes.narration.narrate called directly) with
+    NARRATION_ENABLED=true, so a regression here fails the same way a real
+    Explorer run would."""
+    ctx = _build_ctx(tmp_path, narration_enabled=True)
+    ctx.executor.start()
+    try:
+        client = FakeModelClient(responses={
+            SONNET_ENDPOINT: _model_response(_wire_proposal(), served_model_version="sonnet-v1"),
+            # narrate's "captions" job is the one narration task routed to
+            # GPT-OSS (NODE_MODELS); this response is schema-invalid for it
+            # (it's a PlanProposal, not a chart-captions/1 payload) on
+            # purpose -- narrate's own repair-then-fallback path (§4.1,
+            # orchestrator.narration.runner._generate_item) is designed to
+            # degrade to template text on bad content, never raise, so this
+            # test's only real assertion is that the OLD crash (a bare
+            # AttributeError out of build_profile_payload, well before any
+            # model call) is gone.
+            GPT_OSS_ENDPOINT: _model_response(_wire_proposal(), served_model_version="gpt-oss-v1"),
+        })
+        ctx.model_client = client
+        run_id = service.start_explorer_run(
+            ctx, objective="Assess high value claims", sources=SOURCES,
+            audit_period=AUDIT_PERIOD, run_owner="alice",
+        )
+        status = _wait_for(ctx, run_id, {"awaiting_confirmation", "failed"})
+        assert status == "awaiting_confirmation", service.get_run(ctx, run_id).get("status_reason")
+
+        service.confirm_plan(ctx, run_id, "alice")
+        status = _wait_for(ctx, run_id, {"awaiting_signoff", "failed"})
+        reason = service.get_run(ctx, run_id).get("status_reason")
+        assert "object has no attribute" not in (reason or ""), reason
+        assert status == "awaiting_signoff", reason
+
+        state = ctx.persistence.load_state(run_id)
+        assert state.profile_result.get("kind") == "explorer"
+        assert "expense_report" in state.profile_result.get("sources", {})
+
+        # the narrate node actually ran (not skipped/short-circuited) and
+        # wrote a profile narrative row -- proof build_profile_payload was
+        # exercised over the real Explorer-shaped profile_result, not just
+        # that the run happened to avoid calling it.
+        narratives = ctx.persistence.get_narratives(run_id)
+        profile_rows = [n for n in narratives if n["target_kind"] == "profile"]
+        assert profile_rows, narratives
+
+        # build_profile_payload itself, called directly over this run's real
+        # Explorer profile_result: the row count for the one bound source
+        # comes through, never a crash and never a fabricated 0/None.
+        from orchestrator.narration.payloads import build_profile_payload
+
+        payload, table = build_profile_payload(state)
+        assert table["rows_expense_report"].value == state.profile_result["sources"]["expense_report"]["row_count"]
+        assert table["rows_expense_report"].value is not None
+
+        service.sign_off(ctx, run_id, "alice")
+        status = _wait_for(ctx, run_id, {"completed", "failed"})
+        assert status == "completed", service.get_run(ctx, run_id).get("status_reason")
     finally:
         ctx.executor.stop()
 

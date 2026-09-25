@@ -767,7 +767,7 @@ fingerprint.
 |---|---|
 | V-C1 | **Currency.** A metric or threshold with unit `currency` requires its source to have exactly one `currency_code` column with exactly one profiled value (no suppressed values). That code becomes the unit, and the contract gets `allowed_values: [code]` on that column, so a later run on mixed-currency data fails (§0.5). Otherwise the test is invalid: `"currency not evidenced — amounts cannot be summed (CLAUDE.md §0.5)"`. |
 | V-C2 | `amount_column`: numeric, non-PII, `null_count == 0` (prioritise rejects null amounts). `date_column`: date/datetime. |
-| V-C3 | `entry_key`: every column exists. It is unique at the pinned version: a single column must have `unique: true` in the profile; a composite key is checked with `data_source.distinct_count(source, version, columns) == row_count`, a new adapter method (SQL `COUNT(DISTINCT ...)`, or pandas `drop_duplicates`). |
+| V-C3 | `entry_key` is optional: a row-grain source (row identity always exists and is always unique) needs none. A **declared** `entry_key` must be unique at the pinned version: every column exists; a single column must have `unique: true` in the profile; a composite key is checked with `data_source.distinct_count(source, version, columns) == row_count`, a new adapter method (SQL `COUNT(DISTINCT ...)`, or pandas `drop_duplicates`). |
 
 **Tests:**
 
@@ -788,7 +788,7 @@ fingerprint.
 |---|---|
 | V-N1 | `test_key` exists. `metrics_cited` ⊆ **metrics produced by that finding's own test**, which is stricter than `validate_skill`'s global check. `thresholds_cited` ⊆ proposal thresholds. |
 | V-N2 | `trigger` and every `when` compile under `orchestrator.expr.compile_expr` with `known_metrics` = that test's metrics and `known_thresholds` = the proposal thresholds. That rules out non-zero literals, calls and arithmetic. |
-| V-N3 | `monetary_basis` must agree with whether an additive currency metric is cited (the `validate_skill` B2 rule). If `spend`/`excess`, the population's source must have a valid `entry_key` (V-C3), because `prioritise` fails otherwise. |
+| V-N3 | `monetary_basis` must agree with whether an additive currency metric is cited (the `validate_skill` B2 rule). If `spend`/`excess`, the population's source must pass V-C3 — no `entry_key` declared (row-grain) is valid; a **declared** `entry_key` that is not unique is not — because `prioritise` fails otherwise. |
 
 **Thresholds:**
 

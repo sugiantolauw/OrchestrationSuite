@@ -504,11 +504,27 @@ def build_profile_payload(state) -> tuple[dict, dict[str, PlaceholderEntry]]:
     payload out arbitrarily) as `nulls_<source>_<col_slug>`. Column NAMES
     appear (never a column's VALUES) -- `state.profile_result` itself
     (orchestrator.nodes.fieldwork.profile) already carries only row/null
-    counts, so there is nothing further to mask here."""
+    counts, so there is nothing further to mask here.
+
+    `state.profile_result` has two shapes depending on `state.mode`
+    (orchestrator.nodes.fieldwork.profile/_profile_explorer): a Playbook run
+    stores `{source: {row_count, null_counts}}` directly; an Explorer run
+    stores `{"kind": "explorer", "sources": {source: {row_count,
+    null_counts, columns}}}` -- `sources` carries the same
+    Playbook-compatible `row_count`/`null_counts` keys per source
+    (orchestrator.explorer.profile.pandas_profile_columns/profile_source),
+    it is just one level deeper. Reading `profile_result.items()` directly
+    against the Explorer shape used to iterate `("kind", "explorer")` as a
+    (source, info) pair and crash on `"explorer".get(...)` -- branch on
+    `kind` first so both shapes reach the same per-source loop below."""
     profile_result = getattr(state, "profile_result", None) or {}
+    if profile_result.get("kind") == "explorer":
+        sources_by_name = profile_result.get("sources") or {}
+    else:
+        sources_by_name = profile_result
 
     table: dict[str, PlaceholderEntry] = {}
-    for source, info in profile_result.items():
+    for source, info in sources_by_name.items():
         name = f"rows_{source}"
         table[name] = PlaceholderEntry(
             name=name, unit="count", value=info.get("row_count"),
@@ -517,7 +533,7 @@ def build_profile_payload(state) -> tuple[dict, dict[str, PlaceholderEntry]]:
 
     used_slugs: set[str] = set()
     null_candidates: list[tuple[int, str, str, str]] = []
-    for source, info in profile_result.items():
+    for source, info in sources_by_name.items():
         for column, count in (info.get("null_counts") or {}).items():
             null_candidates.append((count, source, column, _slugify(column, used_slugs)))
     null_candidates.sort(key=lambda row: (-row[0], row[1], row[2]))
