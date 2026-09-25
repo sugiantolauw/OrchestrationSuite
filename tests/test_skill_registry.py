@@ -1,16 +1,58 @@
 from __future__ import annotations
 
+import contextlib
 import shutil
 from pathlib import Path
 
 import pytest
 import yaml
 
+from orchestrator.adapters.persistence_local import LocalPersistence
+from orchestrator.errors import SkillVersionConflict
 from orchestrator.skill_registry import register_skill
 from orchestrator.skills import SkillValidationError, load_skill
 from tests.conftest import canonical_ts
 
 SKILL_DIR = Path(__file__).parent.parent / "skills" / "tne_exco"
+
+
+@contextlib.contextmanager
+def _count_sql_statements():
+    """P3/P4 perf gap review 2026-09-25: same base pattern as
+    tests/test_p3_service.py's helper of the same name -- counts SQL
+    statements sqlite3 actually executes, across every connection
+    LocalPersistence opens during this block, via
+    `sqlite3.Connection.set_trace_callback`. Duplicated here (not imported)
+    so this file's statement-count tests do not depend on test_p3_service.py's
+    internals, with one difference: PRAGMA statements are excluded. Local's
+    file-mode `_connect()` opens a BRAND NEW connection per call
+    (LocalPersistence._open, CLAUDE.md build brief P1A/P3), and every new
+    connection runs `PRAGMA busy_timeout` + `PRAGMA journal_mode=WAL` before
+    any real query -- connection-setup noise with no DeltaPersistence
+    equivalent (its pooled connections pay that cost once, at pool
+    creation), not a round trip this fix is about. Counting only real
+    SELECT/INSERT/UPDATE/MERGE statements makes this comparable to
+    DeltaPersistence's FakeConnection statement counts in
+    tests/test_delta_sql.py."""
+    import orchestrator.adapters.persistence_local as pl
+
+    count = [0]
+    real_connect = pl.sqlite3.connect
+
+    def _trace(stmt):
+        if not stmt.upper().startswith("PRAGMA"):
+            count[0] += 1
+
+    def _traced_connect(*a, **k):
+        conn = real_connect(*a, **k)
+        conn.set_trace_callback(_trace)
+        return conn
+
+    pl.sqlite3.connect = _traced_connect
+    try:
+        yield count
+    finally:
+        pl.sqlite3.connect = real_connect
 
 # P2: register_skill (CLAUDE.md §4.6, §4.8, §4.9). Runs against every persistence
 # backend (local_memory, local_file, delta) via the `persistence` fixture in
@@ -182,3 +224,84 @@ def test_missing_risk_control_yaml_is_a_validation_error(tmp_path):
     (skill_copy / "risk_control.yaml").unlink()
     with pytest.raises(SkillValidationError):
         load_skill(skill_copy)
+
+
+# ── persistence-level idempotence (P3/P4 perf gap review 2026-09-25) ──────────
+# register_skill's own ~80s measured live cost was dominated by
+# upsert_risks/upsert_controls unconditionally re-running their full
+# risk/control seeding pass on EVERY call, even when this exact
+# (skill_id, version, content_hash) was already durably recorded. These pin
+# the fix at the register_skill level (persistence-level, correct across a
+# process restart -- unlike service._ensure_skill_registered's in-process-only
+# cache, which sits on top of this and is not exercised by calling
+# register_skill directly here) via a real sqlite statement count, and that
+# the changed-content contract is unchanged.
+
+def test_reregistering_an_unchanged_skill_issues_exactly_one_statement(tmp_path):
+    persistence = LocalPersistence(str(tmp_path / "ledger.db"))
+    persistence.migrate()
+    skill = load_skill(SKILL_DIR)
+    skill.validate()
+
+    register_skill(skill, persistence, actor="auditor@example.com", now=canonical_ts(0))
+
+    with _count_sql_statements() as count:
+        result = register_skill(skill, persistence, actor="auditor@example.com", now=canonical_ts(1))
+
+    assert count[0] == 1, (
+        f"re-registering an unchanged Skill issued {count[0]} SQL statements, not 1 -- "
+        "the persistence-level (skill_id, version, content_hash) check is not short-circuiting "
+        "before upsert_risks/upsert_controls"
+    )
+    assert result["skill_version"]["content_hash"] == skill.content_hash
+    assert result["risks_registered"] == 0
+    assert result["controls_registered"] == 0
+
+
+def test_first_registration_of_every_risk_and_control_is_a_small_constant_number_of_statements(tmp_path):
+    persistence = LocalPersistence(str(tmp_path / "ledger.db"))
+    persistence.migrate()
+    skill = load_skill(SKILL_DIR)
+    skill.validate()
+
+    with _count_sql_statements() as count:
+        result = register_skill(skill, persistence, actor="auditor@example.com", now=canonical_ts(0))
+
+    assert result["risks_registered"] == 13
+    assert result["controls_registered"] == 13
+    # Old per-row shape: 1 (get_skill_version) + 1 (record_skill_version's own
+    # SELECT+INSERT, ~2) + 13 risks x 2 (SELECT+UPDATE/INSERT) + 13 controls x
+    # 2 = ~55 statements. Batched: get_skill_version + record_skill_version's
+    # SELECT+INSERT + one batched risks existence-check SELECT + one batched
+    # risks write + one batched controls write, well under 20 regardless of
+    # risk/control count -- never 2x the row count.
+    assert count[0] <= 20, (
+        f"first registration of 13 risks + 13 controls issued {count[0]} SQL statements -- "
+        "check for a reintroduced per-row loop"
+    )
+
+
+def test_register_skill_still_raises_on_a_genuine_content_change_under_the_same_version(tmp_path):
+    persistence = LocalPersistence(str(tmp_path / "ledger.db"))
+    persistence.migrate()
+    skill = load_skill(SKILL_DIR)
+    skill.validate()
+    register_skill(skill, persistence, actor="auditor@example.com", now=canonical_ts(0))
+
+    skill_copy = tmp_path / "tne_exco_mutated"
+    shutil.copytree(SKILL_DIR, skill_copy, ignore=shutil.ignore_patterns("__pycache__"))
+    mutated = yaml.safe_load((skill_copy / "risk_control.yaml").read_text())
+    mutated["controls"][0]["title"] = mutated["controls"][0]["title"] + " (mutated)"
+    (skill_copy / "risk_control.yaml").write_text(yaml.safe_dump(mutated))
+    mutated_skill = load_skill(skill_copy)
+    assert mutated_skill.skill_id == skill.skill_id
+    assert mutated_skill.version == skill.version
+    assert mutated_skill.content_hash != skill.content_hash
+
+    # Same (skill_id, version), different content_hash -- the persistence-level
+    # idempotence check above must NOT swallow this: the contract is still a
+    # raise (CLAUDE.md §3 NN8), same as record_skill_version's own conflict
+    # check (test_record_skill_version_same_key_different_hash_conflicts in
+    # tests/test_persistence_p2.py).
+    with pytest.raises(SkillVersionConflict):
+        register_skill(mutated_skill, persistence, actor="auditor@example.com", now=canonical_ts(1))

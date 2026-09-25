@@ -1090,100 +1090,138 @@ class DeltaPersistence:
     # ── risk / control register (P2) ─────────────────────────────────────────
 
     def upsert_risks(self, risks: list[dict], *, now: str) -> None:
-        with self._cursor_ctx() as conn:
-            for risk in risks:
-                risk_id = risk["risk_id"]
+        # P3/P4 perf gap review 2026-09-25: was one SELECT + one UPDATE/INSERT
+        # PER RISK -- 2 round trips per risk, each 2-8s live, the dominant
+        # cost of register_skill's measured ~80s. The regression check
+        # (existing status accepted/rejected -> proposed is rejected) needs
+        # each risk's CURRENT status before any write, so that part stays a
+        # SELECT -- but batched into one IN-list query per _MERGE_BATCH_SIZE
+        # rows rather than one per risk_id, exactly as write_flagged_rows'
+        # own existence check is batched. The write itself is a single
+        # multi-row MERGE per batch (same VALUES-list-via-inner-SELECT shape
+        # write_flagged_rows/write_run_metrics use, since Spark SQL rejects a
+        # column-alias list directly on MERGE's USING clause) -- MERGE
+        # natively handles the insert-vs-update split a per-row SELECT used
+        # to decide in Python, so no second existence check is needed here.
+        if not risks:
+            return
+        risk_ids = [r["risk_id"] for r in risks]
+        existing_status: dict[str, str] = {}
+        for id_batch in _batched(risk_ids, _MERGE_BATCH_SIZE):
+            placeholders = ", ".join(f":r{i}" for i in range(len(id_batch)))
+            params = {f"r{i}": rid for i, rid in enumerate(id_batch)}
+            with self._cursor_ctx() as conn:
                 cur = self._execute(
                     conn,
-                    f"SELECT status FROM {self._table('risks')} WHERE risk_id = :risk_id",
-                    {"risk_id": risk_id},
+                    f"SELECT risk_id, status FROM {self._table('risks')} WHERE risk_id IN ({placeholders})",
+                    params,
                 )
-                existing = _fetchone_dict(cur)
-                if existing is not None:
-                    if existing["status"] in ("accepted", "rejected") and risk["status"] == "proposed":
-                        raise RiskStatusRegression(risk_id, existing["status"], risk["status"])
-                    self._execute(
-                        conn,
-                        f"UPDATE {self._table('risks')} SET engagement_id=:engagement_id, "
-                        "title=:title, description=:description, category=:category, "
-                        "owner=:owner, status=:status, source=:source, source_ref=:source_ref, "
-                        "as_of_date=:as_of_date, confidence=:confidence, "
-                        "prior_risk_id=:prior_risk_id WHERE risk_id = :risk_id",
-                        {
-                            "engagement_id": risk.get("engagement_id"), "title": risk["title"],
-                            "description": risk.get("description"), "category": risk.get("category"),
-                            "owner": risk.get("owner"), "status": risk["status"],
-                            "source": risk["source"], "source_ref": risk.get("source_ref"),
-                            "as_of_date": risk.get("as_of_date"), "confidence": risk.get("confidence"),
-                            "prior_risk_id": risk.get("prior_risk_id"), "risk_id": risk_id,
-                        },
-                    )
-                else:
-                    self._execute(
-                        conn,
-                        f"INSERT INTO {self._table('risks')} (risk_id, engagement_id, title, "
-                        "description, category, owner, status, source, source_ref, as_of_date, "
-                        "confidence, prior_risk_id, created_at) VALUES (:risk_id, :engagement_id, "
-                        ":title, :description, :category, :owner, :status, :source, :source_ref, "
-                        ":as_of_date, :confidence, :prior_risk_id, :created_at)",
-                        {
-                            "risk_id": risk_id, "engagement_id": risk.get("engagement_id"),
-                            "title": risk["title"], "description": risk.get("description"),
-                            "category": risk.get("category"), "owner": risk.get("owner"),
-                            "status": risk["status"], "source": risk["source"],
-                            "source_ref": risk.get("source_ref"), "as_of_date": risk.get("as_of_date"),
-                            "confidence": risk.get("confidence"),
-                            "prior_risk_id": risk.get("prior_risk_id"),
-                            "created_at": risk.get("created_at") or now,
-                        },
-                    )
+                existing_status.update({r["risk_id"]: r["status"] for r in _fetchall_dicts(cur)})
+
+        # Checked BEFORE any write, across the WHOLE call, same reasoning as
+        # write_findings' orphan check above: a rejected call must leave
+        # every row untouched, not just the rows after the offending one in
+        # Python iteration order (the old per-row loop wrote earlier rows in
+        # the same call before raising on a later one).
+        for risk in risks:
+            existing = existing_status.get(risk["risk_id"])
+            if existing is not None and existing in ("accepted", "rejected") and risk["status"] == "proposed":
+                raise RiskStatusRegression(risk["risk_id"], existing, risk["status"])
+
+        for batch in _batched(risks, _MERGE_BATCH_SIZE):
+            values_sql = ", ".join(
+                f"(:risk_id{i}, :engagement_id{i}, :title{i}, :description{i}, :category{i}, "
+                f":owner{i}, :status{i}, :source{i}, :source_ref{i}, :as_of_date{i}, "
+                f":confidence{i}, :prior_risk_id{i}, :created_at{i})"
+                for i in range(len(batch))
+            )
+            params: dict = {}
+            for i, risk in enumerate(batch):
+                params[f"risk_id{i}"] = risk["risk_id"]
+                params[f"engagement_id{i}"] = risk.get("engagement_id")
+                params[f"title{i}"] = risk["title"]
+                params[f"description{i}"] = risk.get("description")
+                params[f"category{i}"] = risk.get("category")
+                params[f"owner{i}"] = risk.get("owner")
+                params[f"status{i}"] = risk["status"]
+                params[f"source{i}"] = risk["source"]
+                params[f"source_ref{i}"] = risk.get("source_ref")
+                params[f"as_of_date{i}"] = risk.get("as_of_date")
+                params[f"confidence{i}"] = risk.get("confidence")
+                params[f"prior_risk_id{i}"] = risk.get("prior_risk_id")
+                params[f"created_at{i}"] = risk.get("created_at") or now
+            # See write_flagged_rows above for why the VALUES columns are
+            # named via an inner SELECT rather than a column-alias list
+            # directly on MERGE's USING clause. created_at is deliberately
+            # absent from WHEN MATCHED's UPDATE SET -- sticky first-seen
+            # timestamp, same as the old per-row UPDATE excluded it.
+            merge_sql = (
+                f"MERGE INTO {self._table('risks')} t "
+                "USING (SELECT col1 AS risk_id, col2 AS engagement_id, col3 AS title, "
+                "col4 AS description, col5 AS category, col6 AS owner, col7 AS status, "
+                "col8 AS source, col9 AS source_ref, col10 AS as_of_date, col11 AS confidence, "
+                "col12 AS prior_risk_id, col13 AS created_at "
+                f"FROM (VALUES {values_sql})) s "
+                "ON t.risk_id = s.risk_id "
+                "WHEN MATCHED THEN UPDATE SET engagement_id = s.engagement_id, title = s.title, "
+                "description = s.description, category = s.category, owner = s.owner, "
+                "status = s.status, source = s.source, source_ref = s.source_ref, "
+                "as_of_date = s.as_of_date, confidence = s.confidence, "
+                "prior_risk_id = s.prior_risk_id "
+                "WHEN NOT MATCHED THEN INSERT (risk_id, engagement_id, title, description, "
+                "category, owner, status, source, source_ref, as_of_date, confidence, "
+                "prior_risk_id, created_at) VALUES (s.risk_id, s.engagement_id, s.title, "
+                "s.description, s.category, s.owner, s.status, s.source, s.source_ref, "
+                "s.as_of_date, s.confidence, s.prior_risk_id, s.created_at)"
+            )
+            self._exec1(merge_sql, params)
 
     def upsert_controls(self, controls: list[dict], *, now: str) -> None:
-        with self._cursor_ctx() as conn:
-            for control in controls:
-                control_id = control["control_id"]
-                cur = self._execute(
-                    conn,
-                    f"SELECT control_id FROM {self._table('controls')} WHERE control_id = :control_id",
-                    {"control_id": control_id},
-                )
-                existing = _fetchone_dict(cur)
-                if existing is not None:
-                    self._execute(
-                        conn,
-                        f"UPDATE {self._table('controls')} SET risk_id=:risk_id, "
-                        "engagement_id=:engagement_id, title=:title, description=:description, "
-                        "type=:type, frequency=:frequency, owner=:owner, "
-                        "design_conclusion=:design_conclusion, "
-                        "operating_conclusion=:operating_conclusion WHERE control_id = :control_id",
-                        {
-                            "risk_id": control.get("risk_id"), "engagement_id": control.get("engagement_id"),
-                            "title": control["title"], "description": control.get("description"),
-                            "type": control.get("type"), "frequency": control.get("frequency"),
-                            "owner": control.get("owner"),
-                            "design_conclusion": control.get("design_conclusion"),
-                            "operating_conclusion": control.get("operating_conclusion"),
-                            "control_id": control_id,
-                        },
-                    )
-                else:
-                    self._execute(
-                        conn,
-                        f"INSERT INTO {self._table('controls')} (control_id, risk_id, engagement_id, "
-                        "title, description, type, frequency, owner, design_conclusion, "
-                        "operating_conclusion, created_at) VALUES (:control_id, :risk_id, "
-                        ":engagement_id, :title, :description, :type, :frequency, :owner, "
-                        ":design_conclusion, :operating_conclusion, :created_at)",
-                        {
-                            "control_id": control_id, "risk_id": control.get("risk_id"),
-                            "engagement_id": control.get("engagement_id"), "title": control["title"],
-                            "description": control.get("description"), "type": control.get("type"),
-                            "frequency": control.get("frequency"), "owner": control.get("owner"),
-                            "design_conclusion": control.get("design_conclusion"),
-                            "operating_conclusion": control.get("operating_conclusion"),
-                            "created_at": control.get("created_at") or now,
-                        },
-                    )
+        # Same fix as upsert_risks above, minus the regression check (controls
+        # carry no status), so no existence-check SELECT is needed at all --
+        # MERGE alone decides insert vs update.
+        if not controls:
+            return
+        for batch in _batched(controls, _MERGE_BATCH_SIZE):
+            values_sql = ", ".join(
+                f"(:control_id{i}, :risk_id{i}, :engagement_id{i}, :title{i}, :description{i}, "
+                f":type{i}, :frequency{i}, :owner{i}, :design_conclusion{i}, "
+                f":operating_conclusion{i}, :created_at{i})"
+                for i in range(len(batch))
+            )
+            params: dict = {}
+            for i, control in enumerate(batch):
+                params[f"control_id{i}"] = control["control_id"]
+                params[f"risk_id{i}"] = control.get("risk_id")
+                params[f"engagement_id{i}"] = control.get("engagement_id")
+                params[f"title{i}"] = control["title"]
+                params[f"description{i}"] = control.get("description")
+                params[f"type{i}"] = control.get("type")
+                params[f"frequency{i}"] = control.get("frequency")
+                params[f"owner{i}"] = control.get("owner")
+                params[f"design_conclusion{i}"] = control.get("design_conclusion")
+                params[f"operating_conclusion{i}"] = control.get("operating_conclusion")
+                params[f"created_at{i}"] = control.get("created_at") or now
+            merge_sql = (
+                f"MERGE INTO {self._table('controls')} t "
+                "USING (SELECT col1 AS control_id, col2 AS risk_id, col3 AS engagement_id, "
+                "col4 AS title, col5 AS description, col6 AS type, col7 AS frequency, "
+                "col8 AS owner, col9 AS design_conclusion, col10 AS operating_conclusion, "
+                "col11 AS created_at "
+                f"FROM (VALUES {values_sql})) s "
+                "ON t.control_id = s.control_id "
+                "WHEN MATCHED THEN UPDATE SET risk_id = s.risk_id, "
+                "engagement_id = s.engagement_id, title = s.title, description = s.description, "
+                "type = s.type, frequency = s.frequency, owner = s.owner, "
+                "design_conclusion = s.design_conclusion, "
+                "operating_conclusion = s.operating_conclusion "
+                "WHEN NOT MATCHED THEN INSERT (control_id, risk_id, engagement_id, title, "
+                "description, type, frequency, owner, design_conclusion, operating_conclusion, "
+                "created_at) VALUES (s.control_id, s.risk_id, s.engagement_id, s.title, "
+                "s.description, s.type, s.frequency, s.owner, s.design_conclusion, "
+                "s.operating_conclusion, s.created_at)"
+            )
+            self._exec1(merge_sql, params)
 
     def list_risks(self, engagement_id: str | None = None) -> list[dict]:
         with self._cursor_ctx() as conn:

@@ -61,6 +61,20 @@ _RUN_STATE_SUMMARY_COLUMNS = (
 
 _PROJECTION_RETRY_ATTEMPTS = 3
 
+# Rows per batched multi-row INSERT for upsert_risks/upsert_controls (P3/P4
+# perf gap review 2026-09-25), matching DeltaPersistence's _MERGE_BATCH_SIZE
+# in shape and value for parity across backends: a Skill's own risk/control
+# count is tiny in practice (SKILL-001 has 13 of each), so this bound is
+# never actually hit -- it exists so an unusually large risk_control.yaml
+# still issues a small, bounded number of statements rather than one
+# arbitrarily large SQL statement.
+_UPSERT_BATCH_SIZE = 250
+
+
+def _batched(items: list, size: int):
+    for i in range(0, len(items), size):
+        yield items[i:i + size]
+
 _REVIEW_STATE_ORDER = ("draft", "prepared", "reviewed", "approved")
 
 _FINDING_COLUMNS = (
@@ -751,71 +765,92 @@ class LocalPersistence:
     # ── risk / control register (P2) ─────────────────────────────────────────
 
     def upsert_risks(self, risks: list[dict], *, now: str) -> None:
+        # P3/P4 perf gap review 2026-09-25: was one SELECT + one UPDATE/INSERT
+        # PER RISK, mirroring the same shape that cost ~80s against the real
+        # Delta warehouse (see DeltaPersistence.upsert_risks). Local's own
+        # per-call cost is negligible either way (in-process sqlite), but the
+        # SAME fix applies here for shape and statement-count parity across
+        # backends: one batched existence check (a single IN-list SELECT, not
+        # one per risk_id) for the regression check, then one multi-row
+        # INSERT ... ON CONFLICT DO UPDATE per _UPSERT_BATCH_SIZE rows (one
+        # statement covering every row in the batch, not `executemany` --
+        # sqlite3's own trace/round-trip accounting treats `executemany` as
+        # one statement PER ROW, which would not actually fix the per-row
+        # shape this exists to remove) rather than a Python loop branching
+        # between UPDATE and INSERT per row.
+        if not risks:
+            return
+        risk_ids = [r["risk_id"] for r in risks]
+        existing_status: dict[str, str] = {}
         with self._writer() as conn:
+            for id_batch in _batched(risk_ids, _UPSERT_BATCH_SIZE):
+                placeholders = ",".join("?" for _ in id_batch)
+                existing_status.update({
+                    r["risk_id"]: r["status"]
+                    for r in conn.execute(
+                        f"SELECT risk_id, status FROM risks WHERE risk_id IN ({placeholders})", id_batch
+                    ).fetchall()
+                })
+
+            # Checked BEFORE any write, across the WHOLE call -- see
+            # DeltaPersistence.upsert_risks for why this differs from the old
+            # per-row loop's raise-partway-through behaviour.
             for risk in risks:
-                risk_id = risk["risk_id"]
-                existing = conn.execute(
-                    "SELECT status FROM risks WHERE risk_id = ?", (risk_id,)
-                ).fetchone()
-                if existing is not None:
-                    if existing["status"] in ("accepted", "rejected") and risk["status"] == "proposed":
-                        raise RiskStatusRegression(risk_id, existing["status"], risk["status"])
-                    conn.execute(
-                        "UPDATE risks SET engagement_id=?, title=?, description=?, category=?, "
-                        "owner=?, status=?, source=?, source_ref=?, as_of_date=?, confidence=?, "
-                        "prior_risk_id=? WHERE risk_id = ?",
-                        (
-                            risk.get("engagement_id"), risk["title"], risk.get("description"),
-                            risk.get("category"), risk.get("owner"), risk["status"], risk["source"],
-                            risk.get("source_ref"), risk.get("as_of_date"), risk.get("confidence"),
-                            risk.get("prior_risk_id"), risk_id,
-                        ),
-                    )
-                else:
-                    conn.execute(
-                        "INSERT INTO risks (risk_id, engagement_id, title, description, category, "
-                        "owner, status, source, source_ref, as_of_date, confidence, prior_risk_id, "
-                        "created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                        (
-                            risk_id, risk.get("engagement_id"), risk["title"], risk.get("description"),
-                            risk.get("category"), risk.get("owner"), risk["status"], risk["source"],
-                            risk.get("source_ref"), risk.get("as_of_date"), risk.get("confidence"),
-                            risk.get("prior_risk_id"), risk.get("created_at") or now,
-                        ),
-                    )
+                existing = existing_status.get(risk["risk_id"])
+                if existing is not None and existing in ("accepted", "rejected") and risk["status"] == "proposed":
+                    raise RiskStatusRegression(risk["risk_id"], existing, risk["status"])
+
+            for batch in _batched(risks, _UPSERT_BATCH_SIZE):
+                values_sql = ",".join("(?,?,?,?,?,?,?,?,?,?,?,?,?)" for _ in batch)
+                params: list = []
+                for r in batch:
+                    params.extend((
+                        r["risk_id"], r.get("engagement_id"), r["title"], r.get("description"),
+                        r.get("category"), r.get("owner"), r["status"], r["source"],
+                        r.get("source_ref"), r.get("as_of_date"), r.get("confidence"),
+                        r.get("prior_risk_id"), r.get("created_at") or now,
+                    ))
+                conn.execute(
+                    "INSERT INTO risks (risk_id, engagement_id, title, description, category, "
+                    "owner, status, source, source_ref, as_of_date, confidence, prior_risk_id, "
+                    f"created_at) VALUES {values_sql} "
+                    "ON CONFLICT(risk_id) DO UPDATE SET engagement_id = excluded.engagement_id, "
+                    "title = excluded.title, description = excluded.description, "
+                    "category = excluded.category, owner = excluded.owner, status = excluded.status, "
+                    "source = excluded.source, source_ref = excluded.source_ref, "
+                    "as_of_date = excluded.as_of_date, confidence = excluded.confidence, "
+                    "prior_risk_id = excluded.prior_risk_id",
+                    params,
+                )
 
     def upsert_controls(self, controls: list[dict], *, now: str) -> None:
+        # Same fix as upsert_risks above, minus the regression check (controls
+        # carry no status), so no existence-check SELECT is needed at all.
+        if not controls:
+            return
         with self._writer() as conn:
-            for control in controls:
-                control_id = control["control_id"]
-                existing = conn.execute(
-                    "SELECT control_id FROM controls WHERE control_id = ?", (control_id,)
-                ).fetchone()
-                if existing is not None:
-                    conn.execute(
-                        "UPDATE controls SET risk_id=?, engagement_id=?, title=?, description=?, "
-                        "type=?, frequency=?, owner=?, design_conclusion=?, operating_conclusion=? "
-                        "WHERE control_id = ?",
-                        (
-                            control.get("risk_id"), control.get("engagement_id"), control["title"],
-                            control.get("description"), control.get("type"), control.get("frequency"),
-                            control.get("owner"), control.get("design_conclusion"),
-                            control.get("operating_conclusion"), control_id,
-                        ),
-                    )
-                else:
-                    conn.execute(
-                        "INSERT INTO controls (control_id, risk_id, engagement_id, title, "
-                        "description, type, frequency, owner, design_conclusion, "
-                        "operating_conclusion, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                        (
-                            control_id, control.get("risk_id"), control.get("engagement_id"),
-                            control["title"], control.get("description"), control.get("type"),
-                            control.get("frequency"), control.get("owner"),
-                            control.get("design_conclusion"), control.get("operating_conclusion"),
-                            control.get("created_at") or now,
-                        ),
-                    )
+            for batch in _batched(controls, _UPSERT_BATCH_SIZE):
+                values_sql = ",".join("(?,?,?,?,?,?,?,?,?,?,?)" for _ in batch)
+                params: list = []
+                for c in batch:
+                    params.extend((
+                        c["control_id"], c.get("risk_id"), c.get("engagement_id"), c["title"],
+                        c.get("description"), c.get("type"), c.get("frequency"), c.get("owner"),
+                        c.get("design_conclusion"), c.get("operating_conclusion"),
+                        c.get("created_at") or now,
+                    ))
+                conn.execute(
+                    "INSERT INTO controls (control_id, risk_id, engagement_id, title, "
+                    "description, type, frequency, owner, design_conclusion, "
+                    f"operating_conclusion, created_at) VALUES {values_sql} "
+                    "ON CONFLICT(control_id) DO UPDATE SET risk_id = excluded.risk_id, "
+                    "engagement_id = excluded.engagement_id, title = excluded.title, "
+                    "description = excluded.description, type = excluded.type, "
+                    "frequency = excluded.frequency, owner = excluded.owner, "
+                    "design_conclusion = excluded.design_conclusion, "
+                    "operating_conclusion = excluded.operating_conclusion",
+                    params,
+                )
 
     def list_risks(self, engagement_id: str | None = None) -> list[dict]:
         conn = self._connect()
