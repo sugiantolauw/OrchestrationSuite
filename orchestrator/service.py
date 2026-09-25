@@ -1715,8 +1715,16 @@ def _queue_affinity_note(ctx: AppContext, status: str, fingerprint_id: str | Non
     return _queue_affinity_note_from_fingerprint(status, own_code_revision, stored_fingerprint)
 
 
-def get_run(ctx: AppContext, run_id: str) -> dict:
-    state = ctx.persistence.load_state(run_id)
+def get_run(ctx: AppContext, run_id: str, *, state: RunState | None = None) -> dict:
+    # `state`, when given, is a RunState the caller already loaded for this
+    # same run_id (never for a different run -- that is the caller's bug, not
+    # this function's to detect) -- skips a second persistence.load_state
+    # round trip. app/src/platform/adapters.get_run_and_narration is the one
+    # caller that passes it, to avoid the exact duplicate load /run/<id>'s
+    # poll callback used to make on every render (P3/P4 perf gap review
+    # 2026-09-25).
+    if state is None:
+        state = ctx.persistence.load_state(run_id)
     payload = json.loads(to_json(state))
     payload["status_label"] = state.status.replace("_", " ").title()
     payload["queue_note"] = _queue_affinity_note(ctx, state.status, state.fingerprint_id)

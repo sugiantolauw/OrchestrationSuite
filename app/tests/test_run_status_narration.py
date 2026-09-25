@@ -303,6 +303,88 @@ def test_regenerate_keeps_candidate_decisions(real_run):
     assert candidates[candidate_id]["decision_reason"] == "not applicable this run"
 
 
+# ── Render statement count (P3/P4 perf gap review 2026-09-25) ────────────
+#
+# A single real render of an awaiting_signoff /run/<id> (the exact poll
+# callback body -- run_status._run_and_narration, called by _poll and by
+# every action callback's _refresh) was measured at 183.9s against the real
+# Delta-backed warehouse under concurrent-run load. Root causes fixed
+# alongside this test: adapters.get_run and adapters.get_narration_review
+# each independently called persistence.load_state for the SAME run (fixed
+# by adapters.get_run_and_narration, sharing one load); and DeltaPersistence
+# held its single shared connection's lock for an entire batched write
+# (several MERGE round trips) instead of releasing it between statements,
+# so a concurrent render queued behind the whole write rather than one
+# statement of it (orchestrator/adapters/persistence_delta.py's _exec1).
+#
+# This backend is LocalPersistence/SQLite, not the live Delta warehouse --
+# it cannot reproduce the 183.9s figure or the connection-lock contention
+# directly. What it DOES share with DeltaPersistence is the call graph: each
+# list_findings/get_run_metrics/list_candidates/list_themes/get_narratives/
+# load_state is exactly one SELECT * ... WHERE run_id = ? in both backends
+# (compare orchestrator/adapters/persistence_delta.py's own list_findings
+# etc. to persistence_local.py's), so the STATEMENT COUNT this test locks in
+# is the same count DeltaPersistence would issue for the same render, and it
+# catches a regression to a per-item read (an N+1 that would inflate this
+# count in both backends identically) even though it cannot catch a
+# regression in how long DeltaPersistence's shared connection holds its lock.
+
+def _count_real_sql_statements(monkeypatch):
+    """Wraps every fresh sqlite3 connection LocalPersistence opens with a
+    trace callback that counts real statements (never the PRAGMA/BEGIN/
+    COMMIT/ROLLBACK bookkeeping _open/_writer already issue on every
+    connection regardless of what the caller asked for -- counting those
+    would make the assertion track connection-management details, not query
+    efficiency)."""
+    from orchestrator.adapters.persistence_local import LocalPersistence
+
+    statements: list[str] = []
+    original_open = LocalPersistence._open
+
+    def counting_open(self):
+        conn = original_open(self)
+
+        def _trace(sql_text: str) -> None:
+            if sql_text.strip().upper().startswith(("PRAGMA", "BEGIN", "COMMIT", "ROLLBACK")):
+                return
+            statements.append(sql_text.strip())
+
+        conn.set_trace_callback(_trace)
+        return conn
+
+    monkeypatch.setattr(LocalPersistence, "_open", counting_open)
+    return statements
+
+
+def test_render_issues_a_small_constant_number_of_statements(real_run, monkeypatch):
+    h, ctx_app, run_id, candidate_id = real_run
+    statements = _count_real_sql_statements(monkeypatch)
+
+    run, narration = run_status._run_and_narration(run_id)
+
+    assert run is not None
+    assert narration is not None and narration["narration_enabled"]
+
+    # One load_state, not two: adapters.get_run_and_narration loads this
+    # run's RunState once and passes it to both service.get_run and
+    # get_narration_review, rather than each loading it independently.
+    load_state_calls = [s for s in statements if "run_state" in s and "SELECT" in s.upper()]
+    assert len(load_state_calls) == 1, (
+        f"expected exactly one load_state read for this render, got {len(load_state_calls)}: "
+        f"{load_state_calls}"
+    )
+
+    # The whole render -- get_run's one load_state plus get_narration_review's
+    # list_findings/get_run_metrics/list_candidates/list_themes/get_narratives
+    # -- is a fixed, small number of statements, independent of how many
+    # findings/candidates/themes/narratives this run has (each of those is
+    # one SELECT * ... WHERE run_id = ?, never one per row). Generous upper
+    # bound (not the exact count) so an unrelated, deliberate addition of one
+    # more read does not make this test brittle; a regression to an N+1 --
+    # one query per finding or per narrative -- would blow well past it.
+    assert len(statements) <= 8, f"render issued {len(statements)} statements: {statements}"
+
+
 # ── Stale-confirm restart (CLAUDE.md §11 "Paused runs across a code
 # deploy") ─────────────────────────────────────────────────────────────
 
