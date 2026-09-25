@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import re
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -531,3 +533,87 @@ def test_delta_migration_comment_lines_have_no_semicolon():
         for lineno, line in enumerate(path.read_text().splitlines(), 1):
             if line.lstrip().startswith("--"):
                 assert ";" not in line, f"{path.name}:{lineno}: semicolon in a comment line"
+
+
+# ── lease operations use their own connection (RUN-5E0D4353A7BB, P3 gap-audit review follow-up) ──
+
+
+def _lease_handlers():
+    return {
+        "MERGE INTO cat1.sch1.run_leases": lambda sql_text, params: (["num_affected_rows"], [(1,)]),
+        "UPDATE cat1.sch1.run_leases": lambda sql_text, params: (["num_affected_rows"], [(1,)]),
+        "DELETE FROM cat1.sch1.run_leases": lambda sql_text, params: ([], []),
+        "SELECT run_id FROM cat1.sch1.run_leases": lambda sql_text, params: (["run_id"], []),
+    }
+
+
+def test_lease_operations_use_a_connection_and_lock_separate_from_the_main_one():
+    """A single DeltaPersistence instance is shared, per process, by
+    ThreadExecutor and every node it runs (orchestrator/service.py's
+    build_app_context). Before this fix, every method -- including
+    renew_lease -- shared one `_conn`/`_conn_lock`, so the heartbeat
+    thread's own renewal calls could queue behind whatever the pipeline
+    thread's node-output writes were doing on that same connection. Lease
+    methods must open (and lock) a connection distinct from the main one."""
+    conns_created = []
+
+    def factory():
+        conns_created.append(FakeConnection(_lease_handlers()))
+        return conns_created[-1]
+
+    p = DeltaPersistence(_settings(), connection_factory=factory)
+
+    assert p.acquire_lease("RUN-1", "worker-1", ttl_s=90, now=canonical_ts(1)) is True
+    assert len(conns_created) == 1
+    lease_conn = conns_created[0]
+
+    # A main-connection call (e.g. list_node_attempts) must open a SECOND,
+    # separate connection -- never reuse the lease connection.
+    with p._cursor_ctx() as conn:
+        pass
+    assert len(conns_created) == 2
+    main_conn = conns_created[1]
+
+    assert main_conn is not lease_conn
+    assert p._conn is main_conn
+    assert p._lease_conn is lease_conn
+    assert p._conn_lock is not p._lease_conn_lock
+
+    # A further lease call reuses the SAME lease connection (lazy-open-once),
+    # never the main one.
+    assert p.renew_lease("RUN-1", "worker-1", ttl_s=90, now=canonical_ts(2)) is True
+    assert len(conns_created) == 2
+
+
+def test_renew_lease_is_never_blocked_by_the_main_connections_lock():
+    """Structural proof of the fix: holding `_conn_lock` for a long time
+    (simulating a node's own multi-minute write_flagged_rows/
+    write_run_metrics batch loop on the main connection) must never delay
+    renew_lease, because it never touches `_conn_lock` at all."""
+    p = DeltaPersistence(_settings(), connection_factory=lambda: FakeConnection(_lease_handlers()))
+
+    main_lock_held = threading.Event()
+    release_main_lock = threading.Event()
+
+    def hold_main_lock():
+        with p._cursor_ctx():
+            main_lock_held.set()
+            release_main_lock.wait(timeout=10)
+
+    holder = threading.Thread(target=hold_main_lock, daemon=True)
+    holder.start()
+    try:
+        assert main_lock_held.wait(timeout=10)
+
+        start = time.monotonic()
+        renewed = p.renew_lease("RUN-1", "worker-1", ttl_s=90, now=canonical_ts(1))
+        elapsed = time.monotonic() - start
+
+        assert renewed is True
+        assert elapsed < 1.0, (
+            f"renew_lease took {elapsed:.2f}s while the main connection's lock was held -- "
+            "it must never queue behind it"
+        )
+    finally:
+        release_main_lock.set()
+        holder.join(timeout=10)

@@ -1381,3 +1381,81 @@ def test_reap_never_interrupts_a_live_run_whose_own_renewal_is_slow(local_persis
         renewal_may_return.set()
         node_release.set()
         executor.stop()
+
+
+def test_single_transient_renewal_failure_is_retried_not_fatal(local_persistence):
+    """Real-incident follow-up (RUN-5E0D4353A7BB, live false interrupt,
+    2026-09-25 -- CLAUDE.md §9C): the ledger showed three successful
+    heartbeat renewals ~20s apart, then exactly ONE renew_lease failure,
+    after which the run was permanently abandoned by this worker's own
+    heartbeat for the rest of its life (`_lease_lost` was add-only, and
+    every later tick filtered the run out before trying again) even though
+    the worker and its node were never dead -- the very next tick, 20s
+    later, would have renewed it fine. A single failure (indistinguishable
+    at the moment it happens from a permanent one -- an exception here,
+    exactly like a transient warehouse timeout under real contention) must
+    be retried, not treated as fatal on the first strike."""
+    persistence = local_persistence
+    run_id = "RUN-TRANSIENT-RENEWAL"
+    _create(persistence, run_id, lambda: canonical_ts(0))
+
+    node_entered = threading.Event()
+    node_release = threading.Event()
+
+    def node(ctx, state):
+        node_entered.set()
+        node_release.wait(timeout=10)
+        return dataclasses.replace(state, events=state.events + [{"node": "n"}])
+
+    nodes_for = {"fieldwork": {"plan": [("n", node)], "execute": [], "export": []}}
+
+    orig_renew = persistence.renew_lease
+    calls = {"n": 0}
+
+    def flaky_renew_lease(rid, wid, *, ttl_s, now):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise Exception("simulated transient warehouse timeout")
+        return orig_renew(rid, wid, ttl_s=ttl_s, now=now)
+
+    persistence.renew_lease = flaky_renew_lease
+
+    executor = ThreadExecutor(
+        persistence=persistence, settings=_Settings(), worker_id="worker-flaky-renew",
+        ctx_factory=lambda rid: object(),
+        fingerprint_factory=lambda rid: _fingerprint(f"FP-{rid}"),
+        clock=utc_now, nodes_for=nodes_for,
+        poll_interval_s=0.05, heartbeat_interval_s=0.15, lease_ttl_s=5,
+        lease_reap_grace_s=5.0,
+    )
+    try:
+        executor.start()
+        assert node_entered.wait(timeout=10)
+
+        # Enough real time for the injected failure plus at least one retry
+        # tick, while the node is still running.
+        deadline = time.time() + 10
+        while time.time() < deadline and calls["n"] < 2:
+            time.sleep(0.02)
+        assert calls["n"] >= 2, "expected the heartbeat to retry after the first failure"
+
+        assert executor.worker_alive(run_id) is True, (
+            "a single transient renew_lease failure permanently marked the "
+            "worker not-alive for a run that was never actually dead"
+        )
+        events = [
+            e for e in persistence.list_trace_events(run_id)
+            if e["event_type"] == "run_lease_lost"
+        ]
+        assert not events, "a single transient renewal failure must not emit run_lease_lost"
+
+        node_release.set()
+        deadline = time.time() + 10
+        status = persistence.load_state(run_id).status
+        while time.time() < deadline and status == "running":
+            time.sleep(0.05)
+            status = persistence.load_state(run_id).status
+        assert status != "interrupted", status
+    finally:
+        node_release.set()
+        executor.stop()

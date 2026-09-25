@@ -194,6 +194,7 @@ class ThreadExecutor:
         lease_ttl_s: float = _DEFAULT_LEASE_TTL_S,
         heartbeat_interval_s: float = _DEFAULT_HEARTBEAT_INTERVAL_S,
         lease_reap_grace_s: float | None = None,
+        lease_renewal_failure_tolerance: int = 2,
         tracing=None,
     ):
         self._persistence = persistence
@@ -278,6 +279,29 @@ class ThreadExecutor:
         # to notice on its own. Cleared in _on_done so a run_id can be retried clean
         # if it is ever re-admitted by this worker.
         self._lease_lost: set[str] = set()
+
+        # P3 gap-audit review follow-up (root cause of RUN-5E0D4353A7BB, live
+        # false-interrupt 2026-09-25): a SINGLE renew_lease failure -- an
+        # exception or a `renewed=False` -- must not be treated the same as a
+        # dead worker. The real run showed three successful renewals ~20s
+        # apart, then exactly one failure (a transient timeout under real
+        # shared-warehouse contention, indistinguishable from a permanent
+        # one at the moment it happens), after which the OLD code gave up on
+        # that run for the rest of this worker's life -- `_lease_lost` was
+        # add-only and every later heartbeat tick filtered the run out before
+        # ever trying again, even though the very next tick (in the real
+        # incident, 20s later) would have renewed it fine. A truly dead
+        # worker still fails EVERY subsequent tick too, so tolerating a
+        # bounded number of CONSECUTIVE failures before giving up costs
+        # nothing on detection of a genuine death (still caught within a
+        # couple of heartbeat intervals) while turning one flaky renewal
+        # into a retry instead of a guaranteed later false interrupt. This
+        # is a courtesy early-stop only -- the reaper's own decision is
+        # always the authoritative one, driven by the persisted
+        # `lease_expires_at` (+ lease_reap_grace_s) regardless of what this
+        # worker believes about itself.
+        self._lease_renewal_failure_tolerance = max(1, int(lease_renewal_failure_tolerance))
+        self._lease_renewal_failures: dict[str, int] = {}
 
         # Queue environment affinity (P3 gate review item 4): this worker's own
         # deployment identity, computed once from `settings` -- the same two
@@ -652,6 +676,7 @@ class ThreadExecutor:
         with self._lock:
             self._active_runs.discard(run_id)
             self._lease_lost.discard(run_id)
+            self._lease_renewal_failures.pop(run_id, None)
         try:
             self._persistence.release_lease(run_id, self._worker_id)
         except Exception:  # pragma: no cover - defensive
@@ -702,8 +727,26 @@ class ThreadExecutor:
                 # the loss so the pipeline stops before its next node write
                 # (orchestrator/pipeline.py checks worker_alive() before every
                 # node), rather than racing whoever holds the lease now.
-                if not renewed:
-                    self._mark_lease_lost(run_id, now)
+                #
+                # P3 gap-audit review follow-up (RUN-5E0D4353A7BB): a single
+                # failure is tolerated and retried on the next tick -- only
+                # `_lease_renewal_failure_tolerance` CONSECUTIVE failures for
+                # this run mark it lost. A success resets the count to zero.
+                if renewed:
+                    with self._lock:
+                        self._lease_renewal_failures.pop(run_id, None)
+                    continue
+                with self._lock:
+                    failures = self._lease_renewal_failures.get(run_id, 0) + 1
+                    self._lease_renewal_failures[run_id] = failures
+                if failures < self._lease_renewal_failure_tolerance:
+                    logger.warning(
+                        "run_id=%s: renew_lease failed (%d/%d consecutive) -- "
+                        "retrying on the next heartbeat tick before giving up",
+                        run_id, failures, self._lease_renewal_failure_tolerance,
+                    )
+                    continue
+                self._mark_lease_lost(run_id, now)
 
     def _mark_lease_lost(self, run_id: str, now: str) -> None:
         with self._lock:
