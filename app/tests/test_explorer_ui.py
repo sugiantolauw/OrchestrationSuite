@@ -825,3 +825,33 @@ def test_upload_source_resolves_format_from_filename_not_upload_id(monkeypatch, 
         flask_ctx.pop()
         real_ctx.executor.stop()
         adapters._ctx = None
+
+
+def test_workflow_preview_renders_proposal_errors_from_every_producer_shape():
+    """BUG-EXPLORER-PROPOSAL-ERRORS-TYPE: orchestrator.explorer.validate
+    (validate_proposal, s1 fallback) and orchestrator.nodes.fieldwork
+    (plan.get("validation")) both build review["proposal_errors"] as
+    list[{"rule", "message"}] (orchestrator/explorer/validate.py:336-342/850);
+    orchestrator.explorer.materialise.check_materialised_skill now emits the
+    same {"rule", "message"} shape rather than its former list[str]. A
+    review carrying either -- or a bare string, for defence in depth -- must
+    render through src.run_setup._explorer_workflow_children without a
+    TypeError, and the message text must actually appear (not just avoid a
+    crash), so the workflow-preview poll (app/src/run_setup.py ~671) never
+    500s once proposal_errors is non-empty."""
+    from src.run_setup import _explorer_workflow_children
+
+    for label, errors in [
+        ("validate.py dict shape", [{"rule": "V-S1", "message": "not valid PlanProposal JSON: boom"}]),
+        ("materialise.py dict shape", [{"rule": "V-Z1", "message": "orphan control reference"}]),
+        ("bare string, defence in depth", ["a plain string error"]),
+    ]:
+        review = {
+            "tests": [], "n_valid": 0, "n_total": 0, "plan_status": "proposed",
+            "llm_unavailable": False, "label": None, "proposal_errors": errors,
+        }
+        children = _explorer_workflow_children(review)
+        rendered = "\n".join(str(c) for c in children)
+        for e in errors:
+            expected = e["message"] if isinstance(e, dict) else e
+            assert expected in rendered, (label, expected, rendered)

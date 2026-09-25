@@ -508,13 +508,15 @@ def check_materialised_skill(
     owner: str,
     audit_timezone: str,
 ) -> dict[str, Any]:
-    """Returns `{"proposal_errors": [str, ...], "test_violations":
+    """Returns `{"proposal_errors": [{"rule", "message"}, ...], "test_violations":
     {original_test_key: [str, ...]}}` -- empty of both means V-Z1 passed.
     This should never fire in practice (every violation it could catch is
     already one of validate.py's own rules); it exists because
     `load_skill`/`validate_skill` are the ground truth every OTHER Skill
     is held to, and a proposal that passed every named rule but still
-    fails them would otherwise materialise silently."""
+    fails them would otherwise materialise silently. `proposal_errors` uses
+    the same {"rule", "message"} shape as validate.py's (the one consumer
+    shape the UI, app/src/run_setup.py, renders)."""
     from orchestrator.skills import SkillValidationError, load_skill
 
     test_ids = _renumber(effective.get("tests", []), "key", "EX")
@@ -532,7 +534,7 @@ def check_materialised_skill(
             skill = load_skill(skill_dir)
             skill.validate()
         except SkillValidationError as exc:
-            proposal_errors: list[str] = []
+            proposal_errors: list[dict] = []
             test_violations: dict[str, list[str]] = {}
             for v in exc.violations:
                 matched_key = next(
@@ -542,6 +544,6 @@ def check_materialised_skill(
                 if matched_key:
                     test_violations.setdefault(matched_key, []).append(v)
                 else:
-                    proposal_errors.append(v)
+                    proposal_errors.append({"rule": "V-Z1", "message": v})
             return {"proposal_errors": proposal_errors, "test_violations": test_violations}
     return {"proposal_errors": [], "test_violations": {}}
