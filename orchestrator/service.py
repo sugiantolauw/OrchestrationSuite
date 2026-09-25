@@ -936,7 +936,17 @@ def _ledger_skill_card(ctx: AppContext, row: dict) -> dict:
 
 
 def _get_ledger_skill(ctx: AppContext, skill_id: str) -> dict | None:
+    # P3/P4 perf gap review 2026-09-25 (/skills/<id> cold-load latency
+    # pass): _ledger_skill_card issues its OWN ctx.persistence.list_runs
+    # call per row -- this used to build a full card for every explorer_saved
+    # skill just to check its id, one runs query per candidate, when at most
+    # one row can ever match (the manifest's own "id" field is always set to
+    # the SAME value as the row's skill_id column at save time,
+    # save_explorer_draft_skill above) -- pre-filter on that column first,
+    # so only the one matching row (if any) pays _ledger_skill_card's cost.
     for row in ctx.persistence.list_skill_versions_by_origin("explorer_saved"):
+        if row["skill_id"] != skill_id:
+            continue
         card = _ledger_skill_card(ctx, row)
         if card["skill_id"] == skill_id:
             return card
@@ -963,6 +973,24 @@ def list_skills(ctx: AppContext, *, runs: list[dict] | None = None) -> list[dict
     for r in all_runs:
         runs_by_skill.setdefault(r.get("skill_id"), []).append(r)
 
+    # P3/P4 perf gap review 2026-09-25 (/skills, /skills/<id> and
+    # /workspace/tne cold-load latency pass): this used to call
+    # ctx.persistence.list_skill_versions(skill_id) ONCE PER SKILL DIRECTORY
+    # in the loop below, THEN a second, separate full-table scan
+    # (list_skill_versions_by_origin) for the explorer_saved cards -- N+1
+    # round trips against a table list_all_skill_versions already reads in
+    # full (its own docstring: unavoidably a full scan at this table's
+    # scale). One read, grouped by skill_id in Python, covers both uses:
+    # `last_updated` per repo skill (below, sorted by version the same way
+    # list_skill_versions(skill_id)'s own `ORDER BY version` would) and the
+    # explorer_saved cards (same "last write wins in created_at order" rule
+    # list_skill_versions_by_origin applied, since list_all_skill_versions
+    # is ordered by skill_id, created_at -- identical result, one call).
+    all_versions = ctx.persistence.list_all_skill_versions()
+    versions_by_skill: dict[str, list[dict]] = {}
+    for v in all_versions:
+        versions_by_skill.setdefault(v["skill_id"], []).append(v)
+
     out: list[dict] = []
     for d in sorted(ctx.skills_dir.iterdir()):
         if not d.is_dir():
@@ -982,7 +1010,7 @@ def list_skills(ctx: AppContext, *, runs: list[dict] | None = None) -> list[dict
         completed = [r for r in runs_rows if r.get("status") == "completed"]
         last_run = runs_rows[0]["created_at"] if runs_rows else None
 
-        versions = ctx.persistence.list_skill_versions(skill_id)
+        versions = sorted(versions_by_skill.get(skill_id, []), key=lambda v: v["version"])
         last_updated = versions[-1]["created_at"] if versions else None
 
         out.append(
@@ -1004,7 +1032,12 @@ def list_skills(ctx: AppContext, *, runs: list[dict] | None = None) -> list[dict
         )
 
     repo_ids = {e["skill_id"] for e in out}
-    for row in ctx.persistence.list_skill_versions_by_origin("explorer_saved"):
+    latest_explorer_saved: dict[str, dict] = {}
+    for v in all_versions:  # ordered by skill_id, created_at asc -- last write wins
+        if v["content"].get("origin") != "explorer_saved":
+            continue
+        latest_explorer_saved[v["skill_id"]] = v
+    for row in latest_explorer_saved.values():
         card = _ledger_skill_card(ctx, row)
         if card["skill_id"] not in repo_ids:
             out.append(card)
@@ -2863,12 +2896,20 @@ def resume_run(ctx: AppContext, run_id: str, actor: str) -> RunState:
 # ── Evidence / results ───────────────────────────────────────────────────────
 
 
-def get_run_payload(ctx: AppContext, run_id: str) -> dict:
+def get_run_payload(ctx: AppContext, run_id: str, *, state: RunState | None = None) -> dict:
     """The evidence payload, shaped like reference_app/app.py's
     compute_evidence_payload (CLAUDE.md build brief P3 §4) but built entirely
     from what the run already persisted (run_metrics, findings,
-    reconciliation) -- never recomputed from raw source data here."""
-    state = ctx.persistence.load_state(run_id)
+    reconciliation) -- never recomputed from raw source data here.
+
+    `state`, when given, is a RunState the caller already loaded for this
+    same run_id -- skips a second persistence.load_state round trip. See
+    get_run's own docstring for the pattern; app/src/platform/adapters.
+    get_run_payload_and_frames is the caller that shares one load across
+    get_run_payload/get_run_frames for /workspace/tne's _load_bundle (P3/P4
+    perf gap review 2026-09-25)."""
+    if state is None:
+        state = ctx.persistence.load_state(run_id)
     metrics = ctx.persistence.get_run_metrics(run_id)
     findings = ctx.persistence.list_findings(run_id)
 
@@ -2926,7 +2967,7 @@ def get_run_payload(ctx: AppContext, run_id: str) -> dict:
     }
 
 
-def get_run_frames(ctx: AppContext, run_id: str) -> dict[str, pd.DataFrame]:
+def get_run_frames(ctx: AppContext, run_id: str, *, state: RunState | None = None) -> dict[str, pd.DataFrame]:
     """Row-level frames for /workspace/tne: one DataFrame per contract source
     this run bound, holding that source's own contract-typed columns
     (__source, __row_key join keys included) plus one 0/1 int column per RF_*
@@ -2948,8 +2989,14 @@ def get_run_frames(ctx: AppContext, run_id: str) -> dict[str, pd.DataFrame]:
     bound source at its PINNED version (state.data_assets) and pivot
     flagged_rows into RF_* columns live. That fallback is logged -- it is the
     slow path this function exists to avoid, kept only for runs that predate
-    the fix."""
-    state = ctx.persistence.load_state(run_id)
+    the fix.
+
+    `state`, when given, is a RunState the caller already loaded for this
+    same run_id (see get_run_payload's own docstring -- same P3/P4 perf gap
+    review 2026-09-25 pattern, app/src/platform/adapters.
+    get_run_payload_and_frames)."""
+    if state is None:
+        state = ctx.persistence.load_state(run_id)
     skill = resolve_run_skill(ctx, state)
 
     frame_exports = (state.exports or {}).get("frames")

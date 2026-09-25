@@ -287,6 +287,20 @@ class PersistenceAdapter(Protocol):
         version, never per run)."""
         ...
 
+    def list_all_skill_versions(self) -> list[dict]:
+        """Every skill_versions row, ordered by skill_id then created_at
+        ascending -- the SAME full-table scan list_skill_versions_by_origin
+        already runs (see its own docstring: unavoidable at this table's
+        scale), exposed once so a caller needing more than one view of the
+        whole table (orchestrator.service.list_skills: per-skill last_updated
+        AND the explorer_saved cards) reads it ONCE rather than once per
+        view (P3/P4 perf gap review 2026-09-25, the /skills and /workspace/tne
+        cold-load latency pass: list_skills used to call
+        list_skill_versions(skill_id) once PER SKILL DIRECTORY plus
+        list_skill_versions_by_origin -- N+2 round trips against the exact
+        same table for what is, today, still one full scan's worth of data)."""
+        ...
+
     def upsert_risks(self, risks: list[dict], *, now: str) -> None:
         ...
 
