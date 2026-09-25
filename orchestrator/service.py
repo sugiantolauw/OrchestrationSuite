@@ -2000,6 +2000,40 @@ def publish_skill(ctx: AppContext, skill_id: str, version: str, reviewer: str | 
     return {"skill_id": skill_id, "version": version, "status": "requirements_met", "reviewed_by": reviewer}
 
 
+def record_skill_surface2(
+    ctx: AppContext, skill_id: str, version: str, results: dict, *, actor: str
+) -> dict:
+    """docs/specs/P7_mapping_authoring_design.md §2.2 "Recording Surface 2
+    results": records a scored result on the draft Skill's skill_versions
+    row -- the same row `publish_skill`'s `_surface2_all_pass` above already
+    reads. `results` is `orchestrator.authoring.score.score_fixtures`'s
+    return value (`{test_id: TestScore}`) or an equivalent plain dict;
+    either way this never checks the scores pass -- it RECORDS what the
+    caller measured, a passing OR failing run, so a failing Surface 2 result
+    is visible on the ledger too. Appends a trace-style audit event.
+    Publishing itself stays `publish_skill`'s existing guard -- this
+    function never publishes."""
+    row = ctx.persistence.get_skill_version(skill_id, version)
+    if row is None:
+        raise PromotionRequirementsNotMet([f"no skill_versions row for ({skill_id!r}, {version!r})"])
+
+    results_json = {
+        test_id: (score.to_dict() if hasattr(score, "to_dict") else score) for test_id, score in results.items()
+    }
+    ctx.persistence.record_skill_surface2_results(skill_id=skill_id, version=version, results_json=results_json)
+
+    now = utc_now()
+    event_id = hashlib.sha256(f"{skill_id}|{version}|skill_surface2_recorded|{actor}|{now}".encode("utf-8")).hexdigest()[:32]
+    ctx.persistence.append_trace_event({
+        "event_id": event_id, "run_id": f"skill-authoring:{skill_id}:{version}", "engagement_id": None,
+        "event_type": "skill_surface2_recorded", "event_time": now, "stage": "Skills", "status": "recorded",
+        "message": f"Surface 2 results recorded for {skill_id} v{version} by {actor}",
+        "duration_s": None, "node_name": None, "execution_key": None,
+        "actor": actor, "state_version": None,
+    })
+    return {"skill_id": skill_id, "version": version, "surface2_results": results_json}
+
+
 def _queue_affinity_note_from_fingerprint(
     status: str, own_code_revision: str | None, stored_fingerprint: dict | None
 ) -> str | None:

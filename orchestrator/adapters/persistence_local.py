@@ -765,6 +765,13 @@ class LocalPersistence:
             self._release(conn)
         return [_skill_version_dict_from_row(dict(r)) for r in rows]
 
+    def record_skill_surface2_results(self, *, skill_id: str, version: str, results_json: dict) -> None:
+        with self._writer() as conn:
+            conn.execute(
+                "UPDATE skill_versions SET surface2_results_json = ? WHERE skill_id = ? AND version = ?",
+                (_canonical_json(results_json), skill_id, version),
+            )
+
     # ── risk / control register (P2) ─────────────────────────────────────────
 
     def upsert_risks(self, risks: list[dict], *, now: str) -> None:
