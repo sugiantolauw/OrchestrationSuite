@@ -129,3 +129,93 @@ def test_fallback_is_skipped_when_it_is_the_same_endpoint_as_primary(local_persi
     profile_calls = [c for c in calls if c["task"] == "profile"]
     assert len(profile_calls) == 1  # not 2 -- the fallback attempt against the same endpoint never happens
     assert profile_calls[0]["endpoint_role"] == "model_sonnet"
+
+
+def test_batched_prioritise_repair_exhausting_retries_does_not_trip_the_breaker_for_act(
+    local_persistence, tmp_path,
+):
+    """RUN-E12561BA6322 (independent narration-content review 2026-09-25,
+    round 3): `prioritise`'s single batched call fell back for EVERY
+    finding on that live run, after its repair round exhausted 3 transport
+    attempts against a genuinely rate-limited endpoint (verified from that
+    run's own `llm_calls` rows -- `tests/test_model_databricks.py`'s two
+    `test_live_..._429_is_rate_limited_not_permanent` tests use the
+    VERBATIM error messages). The review asked whether this was a circuit-
+    breaker misclassification. It was not: `prioritise` and `act` share the
+    exact same (model_sonnet, model_gpt_oss) role pair (`orchestrator.llm.
+    tasks.FALLBACK_ROLE`), and on the live run `act` still made its own
+    independent call afterwards and succeeded -- proof the breaker was
+    never tripped, because `LLMGateway` correctly returns `permanent=False`
+    for a RateLimited that only exhausted ONE item's retry budget
+    (`orchestrator.llm.gateway._call_live`), and `orchestrator.narration.
+    runner._generate_item` only calls `mark_role_pair_dead` when
+    `result.permanent` is True.
+
+    Reproduced here with a fake client, same-endpoint override (matching
+    the live run's dev-workspace config, CLAUDE.md §6) so no fallback
+    attempt intervenes: `prioritise`'s generate call returns a policy-
+    assertion violation ("breach") forcing a repair round; the repair round
+    exhausts its 3 transport attempts with the real live `RateLimited`
+    messages; `act` -- same role pair, a later, independent
+    `_generate_item` call within the same `narrate()` execution -- must
+    still be ATTEMPTED (a real `llm_calls` row, origin `model`), not
+    skipped by `is_role_pair_dead`."""
+    from orchestrator.llm.errors import RateLimited
+    from tests.narration_test_support import (
+        MARKER_PRIORITY,
+        DispatchingModelClient,
+        happy_responses,
+        resp,
+    )
+
+    live_message_1 = (
+        "REQUEST_LIMIT_EXCEEDED: Exceeded workspace output tokens per minute rate limit "
+        "for databricks-gpt-oss-120b."
+    )
+    live_message_2 = "REQUEST_LIMIT_EXCEEDED: Exceeded workspace QPS rate limit for databricks-gpt-oss-120b."
+
+    responses = happy_responses()
+    responses[MARKER_PRIORITY] = [
+        resp({
+            "schema_version": "priority-rationale/1",
+            "items": [
+                {"key": "T1", "rationale": "This finding may indicate a breach of policy in this run."},
+                {"key": "T2", "rationale": "This matter carries a Low severity rating in this run."},
+            ],
+        }),
+        RateLimited("ep", live_message_1),
+        RateLimited("ep", live_message_2),
+        RateLimited("ep", live_message_1),
+    ]
+
+    client = DispatchingModelClient(responses)
+    h = make_narration_harness(
+        local_persistence, tmp_path, model_client=client,
+        model_sonnet=MODEL_SONNET_ENDPOINT, model_gpt_oss=MODEL_SONNET_ENDPOINT,
+    )
+    state = run_to_narrate_input(h)
+    narrate(h.ctx, state)
+
+    narratives_by_target = {
+        (row["target_kind"], row["target_id"], row["field"]): row for row in local_persistence.get_narratives(state.run_id)
+    }
+    findings = local_persistence.list_findings(state.run_id)
+    for f in findings:
+        assert narratives_by_target[("finding", f["finding_id"], "rationale")]["origin"] == "fallback_unavailable"
+        # `act` -- the SAME role pair -- still got its own attempt, and
+        # succeeded: the breaker never trips on a non-permanent
+        # (retries-exhausted) unavailability.
+        assert narratives_by_target[("finding", f["finding_id"], "remediation")]["origin"] == "model"
+
+    calls = local_persistence.list_llm_calls(state.run_id)
+    act_calls = [c for c in calls if c["task"] == "act"]
+    assert act_calls  # act really was attempted, not skipped by the breaker
+    assert all(c["outcome"] == "succeeded" for c in act_calls)
+
+    priority_calls = sorted(
+        (c for c in calls if c["task"] == "prioritise"), key=lambda c: (c["seq"], c["transport_attempt"]),
+    )
+    assert [c["outcome"] for c in priority_calls] == [
+        "succeeded", "failed_transport", "failed_transport", "unavailable",
+    ]
+    assert [c["error_status_code"] for c in priority_calls if c["error_status_code"] is not None] == [429, 429, 429]

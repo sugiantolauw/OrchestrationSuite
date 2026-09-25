@@ -30,6 +30,7 @@ __all__ = [
     "find_count_noun_after",
     "find_currency_symbols",
     "find_percent_words",
+    "find_exposure_superlative_claims",
 ]
 
 
@@ -304,3 +305,33 @@ def find_currency_symbols(text: str) -> list[LexiconHit]:
 
 def find_percent_words(text: str) -> list[LexiconHit]:
     return _find_all(_PERCENT_WORD_RE, text)
+
+
+# --------------------------------------------------------------------------
+# N-S5 (independent narration-content review 2026-09-25, round 3, live
+# example: the exec summary opened "The issue with the highest exposure is
+# ... duplicate expense claims ... $1,994.79" while this SAME run's own
+# largest-exposure contributor, High-Value Claims at $318,785.60, was named
+# two sentences later). `payloads.build_exec_summary_payload`'s
+# `top_findings` is ordered "most severe, tie-broken by exposure" -- NOT
+# "ranked first by exposure" -- so a model describing `top_findings[0]` (or
+# any other finding) with an exposure/amount superlative when it is not the
+# payload's own declared `run_exposure_dominant_title` is asserting a false
+# fact the payload never gave it. Deliberately narrow: only a superlative
+# word directly (within a few filler words) modifying "exposure" or "amount
+# at risk" trips this -- never a blanket ban on "highest"/"top"/"primary"
+# etc, which remain ordinary audit vocabulary elsewhere (a caption correctly
+# naming "the top finding ... contributing $X" must not be flagged).
+# `validate.py` decides whether the SAME TEXT also names the payload's
+# actual dominant-exposure finding title before raising this.
+# --------------------------------------------------------------------------
+_EXPOSURE_SUPERLATIVE_RE = re.compile(
+    r"\b(?:highest|largest|biggest|most|primary|main)\b"
+    r"(?:\s+\w+){0,3}?\s+"
+    r"(?:exposure|amount[\s-]at[\s-]risk)\b",
+    re.IGNORECASE,
+)
+
+
+def find_exposure_superlative_claims(text: str) -> list[LexiconHit]:
+    return _find_all(_EXPOSURE_SUPERLATIVE_RE, text)

@@ -451,11 +451,22 @@ _GOLDEN_PROMPT_SHA256: dict[str, str] = {
     # suffix, and that a finding's `key` is never a valid identifier -- see
     # tests/test_narration_validate_quality_regression.py for the real-data regression this
     # closes (a bare "T6.1d" used instead of the run's actual "T6.1d_dom").
-    "find_synthesis": "d970df4c030dea09f9b18a15f5f1b9ded67b752155ab90c5cf71777063d21670",
+    # Updated 2026-09-25 (independent narration-content review, round 3, task item 3):
+    # synthesis_user.md's root-cause instruction now bans a generic hypothesis that could
+    # describe any theme ("gaps in oversight procedures") and requires naming which of the
+    # theme's own test_ids and what pattern across them the hypothesis draws on, grounded
+    # only in facts PAYLOAD.findings already gives for that theme's members.
+    "find_synthesis": "4900f36b954825f3b6dac9b197bff224363141ae47cd7ca20b5a0cf880812994",
     "find_candidates": "8f3a5d7fd6677e52e08f01dccc9612ecbdb380caa5f6ff477de0a609ae666ab7",
     "prioritise": "7285b8504f492a7e9761ba12577ac5d9662b130fd78d8c6d1229cce437ca3218",
     "act": "d107386ecaefbcdc670530019bfde4b7a6872497a1d79d35a11bdff4e0029157",
-    "export_summary": "a28ea3ec616cb3d2fe2b19a1cc06f9118cc4ba3d38e8a837f633570e9e918c2f",
+    # Updated 2026-09-25 (independent narration-content review, round 3, task item 1):
+    # exec_summary_user.md now explains top_findings' own ranking (severity, tie-broken by
+    # exposure) is a different ranking from "largest amount at risk", and bans a superlative
+    # about exposure/amount for any finding other than PAYLOAD.placeholders' own declared
+    # {value:run_exposure_dominant_title} -- see orchestrator.narration.validate's N-S5 for
+    # the matching deterministic check.
+    "export_summary": "b11b87f081d10c043bae683c66d4e3a5a3df8092846ee9b1007c37835b425f52",
     "export_caption": "2daab21292416c8a9c919876ce622ed59e1415568202ad5e059e8db019123698",
 }
 
