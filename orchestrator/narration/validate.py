@@ -36,6 +36,7 @@ from orchestrator.narration.lexicon import (
     find_code_like_text,
     find_count_noun_after,
     find_currency_symbols,
+    find_exposure_superlative_claims,
     find_hedge_markers,
     find_number_words,
     find_ordinal_words,
@@ -70,7 +71,7 @@ __all__ = [
 # lexicon addition, a coverage change, the sentence-split regex -- must bump
 # this, because it enters the run fingerprint's `prompt_template_version`
 # hash input (via the node that owns the fingerprint, outside N1's scope).
-NARRATION_VALIDATOR_VERSION = "1"
+NARRATION_VALIDATOR_VERSION = "2"
 
 # §3.4, the paragraph under the rule table: sentence boundaries for the
 # same-sentence exception in N-Q2, computed after placeholders have been
@@ -474,6 +475,41 @@ def validate_prose(
                             "N-Q2",
                             f"universal quantifier {hit.text!r} needs a 0%% or 100%% placeholder "
                             "in the same sentence",
+                            hit.text,
+                        )
+                    )
+
+        # N-S5 (independent narration-content review 2026-09-25, round 3):
+        # a superlative exposure/amount claim ("the highest exposure",
+        # "the primary contributor to the amount at risk", ...) is only
+        # ever true of the payload's OWN declared largest-exposure finding
+        # (`run_exposure_dominant_title`, `orchestrator.narration.
+        # run_values._dominant_exposure_entries`) -- `top_findings[0]` is
+        # ordered by severity, tie-broken by exposure, which is a different
+        # ranking and is NOT guaranteed to be the same finding. Checked at
+        # the whole-TEXT level (one exec-summary paragraph, one caption, ...)
+        # rather than per-sentence: legitimate audit prose routinely
+        # disambiguates in a following sentence of the SAME paragraph
+        # ("The primary contributor ... is the high-value claims finding
+        # ... This figure ... specifically the finding titled High-Value
+        # Claims Requiring Enhanced Scrutiny." -- both sentences are one
+        # paragraph, one `validate_prose` call). Only runs when this item's
+        # own table carries `run_exposure_dominant_title` with a real
+        # value -- a finding-scoped field (`observation`, `recommendation`,
+        # ...) never merges that run-level placeholder into its own table,
+        # so this is a no-op there, not a false negative.
+        dominant_entry = table.get("run_exposure_dominant_title")
+        dominant_title = dominant_entry.value if dominant_entry is not None else None
+        if dominant_title:
+            if str(dominant_title).casefold() not in rendered_for_lexicon.casefold():
+                for hit in find_exposure_superlative_claims(rendered_for_lexicon):
+                    violations.append(
+                        Violation(
+                            "N-S5",
+                            f"{hit.text!r} claims a finding is ranked first by exposure/amount, but "
+                            f"this text never names {dominant_title!r} -- the payload's own "
+                            "largest-exposure finding (run_exposure_dominant_title); only that "
+                            "finding may be described with an exposure/amount superlative",
                             hit.text,
                         )
                     )

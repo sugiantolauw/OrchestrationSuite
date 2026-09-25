@@ -375,6 +375,94 @@ def test_n_s4_negative_interrogative_exemption_does_not_hide_a_declarative_sente
 
 
 # ---------------------------------------------------------------------------
+# N-S5 (independent narration-content review 2026-09-25, round 3): a
+# superlative exposure/amount claim ("the highest exposure", "the primary
+# contributor to the amount at risk") attached to a finding that is not the
+# payload's own declared `run_exposure_dominant_title`. The negative case is
+# the actual live exec-summary sentence the round-3 review reported
+# (RUN-E12561BA6322): it called duplicate claims ($1,994.79) "the highest
+# exposure" while this same run's real largest contributor, High-Value
+# Claims, was $318,785.60.
+# ---------------------------------------------------------------------------
+DOMINANT_TABLE = {
+    **TABLE,
+    "run_exposure_dominant_title": PlaceholderEntry(
+        "run_exposure_dominant_title", "value", "High-Value Claims Requiring Enhanced Scrutiny",
+    ),
+    "run_exposure_dominant_amount": PlaceholderEntry("run_exposure_dominant_amount", "AUD", 318785.60),
+}
+
+
+def test_n_s5_positive_superlative_on_the_declared_dominant_finding_is_not_flagged():
+    r = validate_prose(
+        "The finding with the highest exposure is {value:run_exposure_dominant_title}, "
+        "contributing {money:run_exposure_dominant_amount} of the amount at risk.",
+        DOMINANT_TABLE, field="exec_paragraph",
+    )
+    assert "N-S5" not in _rule_ids(r)
+
+
+def test_n_s5_positive_disambiguation_later_in_the_same_paragraph_is_not_flagged():
+    # Real round-3 AFTER paragraph 2 shape: the superlative sentence and the
+    # sentence that names the finding by its exact title are two sentences
+    # of the SAME paragraph (one `validate_prose` call) -- legitimate audit
+    # prose routinely disambiguates this way, and must not be flagged.
+    r = validate_prose(
+        "The primary contributor to the headline exposure is the high-value claims finding, "
+        "which accounts for {money:run_exposure_dominant_amount} of the amount at risk. "
+        "This figure reflects spend on the identified transactions, specifically the finding "
+        "titled {value:run_exposure_dominant_title}.",
+        DOMINANT_TABLE, field="exec_paragraph",
+    )
+    assert "N-S5" not in _rule_ids(r)
+
+
+def test_n_s5_negative_live_highest_exposure_on_the_wrong_finding_is_flagged():
+    # RUN-E12561BA6322, live exec summary (round-3 BEFORE): duplicate claims
+    # was called "the highest exposure" although High-Value Claims
+    # ($318,785.60, this table's declared dominant) is never named here.
+    r = validate_prose(
+        "The issue with the highest exposure is the identification of duplicate expense "
+        "claims representing an amount at risk of $1,994.79. These duplicates occur across "
+        "29 groups, involving 60 individual lines.",
+        DOMINANT_TABLE, field="exec_paragraph",
+    )
+    assert "N-S5" in _rule_ids(r)
+
+
+def test_n_s5_negative_primary_contributor_with_no_disambiguation_is_flagged():
+    r = validate_prose(
+        "The primary contributor to the amount at risk is the duplicate claims finding.",
+        DOMINANT_TABLE, field="exec_paragraph",
+    )
+    assert "N-S5" in _rule_ids(r)
+
+
+def test_n_s5_positive_no_dominant_declared_in_table_is_not_flagged():
+    # A finding-scoped field's table never carries `run_exposure_dominant_
+    # title` (`payloads.build_finding_table` never merges it in) -- the rule
+    # must be a no-op there, not a false positive on ordinary audit prose.
+    r = validate_prose(
+        "This is the finding with the highest exposure this quarter.",
+        TABLE, field="observation",
+    )
+    assert "N-S5" not in _rule_ids(r)
+
+
+def test_n_s5_positive_ordinary_top_finding_caption_naming_the_dominant_is_not_flagged():
+    # Live round-3 AFTER caption: correctly names the actual dominant
+    # finding, so "top finding" here is not a superlative-without-backing.
+    r = validate_prose(
+        "The chart shows the amount-at-risk headline of {money:run_exposure_headline} and the "
+        "top finding {value:run_exposure_dominant_title} contributing "
+        "{money:run_exposure_dominant_amount} based on spend.",
+        {**DOMINANT_TABLE, "run_exposure_headline": PlaceholderEntry("run_exposure_headline", "AUD", 324614.65)},
+        field="caption",
+    )
+    assert "N-S5" not in _rule_ids(r)
+
+
+# ---------------------------------------------------------------------------
 # N-S3: code-like text.
 # ---------------------------------------------------------------------------
 def test_n_s3_positive_ordinary_prose_is_not_flagged():

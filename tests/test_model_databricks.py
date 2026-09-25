@@ -218,6 +218,44 @@ def test_429_without_retry_after_header_leaves_it_none():
     assert exc_info.value.retry_after_s is None
 
 
+# ── independent narration-content review 2026-09-25, round 3: `prioritise`
+# and `act` both fell back entirely on RUN-E12561BA6322 (live, local
+# backend, real GPT-OSS). The review asked whether a transient 429 had been
+# misclassified as the permanent "rate limit of 0"/403 case. It was not --
+# both messages below are the VERBATIM `error_message` this run's own
+# `llm_calls` rows recorded (queried from that run's sqlite db) -- and both
+# must classify as RateLimited (permanent=False downstream, §6's fallback
+# rule / the circuit breaker in orchestrator.narration.runner), never as
+# ModelUnavailable(permanent=True). Neither string contains the literal
+# `_RATE_LIMIT_ZERO_MARKER` ("rate limit of 0"); both are ordinary
+# Databricks Model Serving throttling, not a disabled endpoint.
+# ─────────────────────────────────────────────────────────────────────────
+_LIVE_OUTPUT_TOKENS_RATE_LIMIT_MESSAGE = (
+    "Error code: 429 - {'error_code': 'REQUEST_LIMIT_EXCEEDED', 'message': "
+    "'REQUEST_LIMIT_EXCEEDED: Exceeded workspace output tokens per minute rate limit "
+    "for databricks-gpt-oss-120b. Please use a provisioned throughput Foundation Model "
+    "APIs endpoint for a higher rate limit.'}"
+)
+_LIVE_QPS_RATE_LIMIT_MESSAGE = (
+    "Error code: 429 - {'error_code': 'REQUEST_LIMIT_EXCEEDED', 'message': "
+    "'REQUEST_LIMIT_EXCEEDED: Exceeded workspace QPS rate limit for "
+    "databricks-gpt-oss-120b. Please use a provisioned throughput Foundation Model "
+    "APIs endpoint for a higher rate limit.'}"
+)
+
+
+def test_live_output_tokens_rate_limit_429_is_rate_limited_not_permanent():
+    client, _ = _client_with(_FakeAPIError(_LIVE_OUTPUT_TOKENS_RATE_LIMIT_MESSAGE, status_code=429))
+    with pytest.raises(RateLimited):
+        client.chat(endpoint="ep1", messages=[], params={}, timeout_s=30)
+
+
+def test_live_qps_rate_limit_429_is_rate_limited_not_permanent():
+    client, _ = _client_with(_FakeAPIError(_LIVE_QPS_RATE_LIMIT_MESSAGE, status_code=429))
+    with pytest.raises(RateLimited):
+        client.chat(endpoint="ep1", messages=[], params={}, timeout_s=30)
+
+
 def test_500_with_retry_after_header_is_captured_on_the_exception():
     client, _ = _client_with(
         _FakeAPIError("server blew up", status_code=500, response_headers={"Retry-After": "3.5"})
