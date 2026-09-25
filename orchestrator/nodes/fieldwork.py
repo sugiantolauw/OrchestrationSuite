@@ -50,8 +50,7 @@ from orchestrator.frames import build_row_snapshots, frame_parquet_bytes, sha256
 from orchestrator.llm.gateway import CallContext
 from orchestrator.llm.tasks import TASK_PROFILES
 from orchestrator.narration import resolve as narration_resolve
-from orchestrator.narration.payloads import build_finding_table, build_theme_table
-from orchestrator.narration.run_values import run_values as narration_run_values
+from orchestrator.narration.payloads import build_caption_payload, build_finding_table, build_run_table, build_theme_table
 from orchestrator.nodes.context import NodeContext
 from orchestrator.nodes.narration import finalise, narrate
 from orchestrator.populations import PopulationContext, build_populations
@@ -1293,8 +1292,24 @@ def _build_export_narration(ctx: NodeContext, state: RunState, findings: list[di
 
     from orchestrator.catalogue_counts import catalogue_tests_for_skill
 
-    run_table = narration_run_values(
-        state, findings, metrics, catalogue_tests=catalogue_tests_for_skill(ctx.skill) if ctx.skill else [],
+    # Independent narration-content review 2026-09-25 (BUG-4c, found live):
+    # `narrate_exec_summary`/`build_exec_summary_payload` (generation time)
+    # builds its table with `build_run_table`, which merges each top
+    # finding's own placeholders (`run_exposure_dominant_amount`/`_title`/
+    # `_basis` among them, `orchestrator.narration.run_values.run_values`'s
+    # own new entries) into the bare run-level table -- a model may
+    # therefore write one of those into its exec summary. Reading it back
+    # here with the bare `run_values()` (this table's OLD source) does not
+    # carry those names, so `render()` raises `NarrationConfigError` on a
+    # perfectly valid, already-validated row and the reader falls back to
+    # `render_error`/"model text failed validation" for the WHOLE exec
+    # summary -- exactly BUG-4b's own shape (a mismatched re-validation
+    # table), reproduced live by this WP. `build_run_table` is the same
+    # table `orchestrator.service._narrative_table`'s "run" case already
+    # uses for the human-edit path; this is the third and last caller that
+    # must build it the same way.
+    run_table = build_run_table(
+        state, findings, metrics, skill=ctx.skill, catalogue_tests=catalogue_tests_for_skill(ctx.skill) if ctx.skill else [],
     )
     exec_resolved = narration_resolve.effective_prose(
         target_kind="run", target_id="run", field="exec_summary",
@@ -1313,7 +1328,18 @@ def _build_export_narration(ctx: NodeContext, state: RunState, findings: list[di
         _narrative_sheet_row(target_kind="run", target_id="run", field="exec_summary", resolved=exec_resolved)
     )
 
-    caption_table = narration_resolve.metrics_placeholder_table(["run_exposure_headline"], metrics)
+    # Independent narration-content review 2026-09-25 (BUG-4c, same shape as
+    # the exec-summary fix above): `narrate_captions`/`_chart_specs`
+    # (generation time) may add `run_exposure_dominant_amount`/`_title`/
+    # `_basis` to the 'risk_and_exposure' chart's own table -- reconstruct
+    # the SAME per-chart table here, exactly as `orchestrator.service.
+    # _narrative_table`'s "chart" case (BUG-4b) already does, rather than a
+    # bare single-metric table that cannot resolve those names.
+    from orchestrator.nodes.narration import _chart_specs
+
+    chart_specs, chart_metrics = _chart_specs(findings, metrics)
+    _, chart_tables = build_caption_payload(chart_specs, chart_metrics)
+    caption_table = chart_tables.get("risk_and_exposure", {})
     caption_resolved = narration_resolve.effective_prose(
         target_kind="chart", target_id="risk_and_exposure", field="caption",
         narratives_by_target=narratives_by_target, table=caption_table, fallback_text=None, versions=versions,
