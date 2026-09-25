@@ -451,3 +451,251 @@ def test_main_dry_run_app_yaml_includes_forwarded_settings_and_no_token(monkeypa
 
     assert "DATABRICKS_TOKEN" not in app_yaml
     assert "dapi-should-never-appear" not in app_yaml
+
+
+# ── BUG-DEPLOY-1: the App must be started before w.apps.deploy() will
+# accept it, and CLAUDE.md's own cost-saving guidance (§11) leaves the App
+# STOPPED between sessions -- deploy_app.py must start it itself, not fail
+# and tell the operator to. ──────────────────────────────────────────────
+
+
+class _FakeComputeStatus:
+    def __init__(self, state):
+        self.state = state
+
+
+class _FakeApp:
+    def __init__(self, *, state, name="ai-audit-analyst", url="https://example.databricksapps.com"):
+        from databricks.sdk.service.apps import ComputeState
+
+        self.name = name
+        self.url = url
+        self.service_principal_client_id = "sp-client-id"
+        self.service_principal_id = None
+        self.service_principal_name = None
+        self.compute_status = _FakeComputeStatus(state) if state is not None else None
+        self._ComputeState = ComputeState
+
+
+class _FakeWait:
+    """Mirrors the SDK's Wait[T] -- .result(timeout=...) returns the final
+    value; some SDK calls (App.create) instead return the value directly,
+    which is why deploy_app.py's own code guards with hasattr(wait, "result")."""
+
+    def __init__(self, value):
+        self._value = value
+
+    def result(self, timeout=None):
+        return self._value
+
+
+def test_ensure_app_started_starts_a_stopped_app_and_waits_for_active(capsys):
+    from databricks.sdk.service.apps import ComputeState
+
+    class _FakeAppsAPI:
+        def __init__(self):
+            self.start_calls = []
+
+        def start(self, name):
+            self.start_calls.append(name)
+            return _FakeWait(_FakeApp(state=ComputeState.ACTIVE))
+
+        def get(self, name):
+            return _FakeApp(state=ComputeState.ACTIVE)
+
+    apps_api = _FakeAppsAPI()
+    w = type("W", (), {"apps": apps_api})()
+
+    stopped_app = _FakeApp(state=ComputeState.STOPPED)
+    result = deploy_app._ensure_app_started(w, "ai-audit-analyst", stopped_app)
+
+    assert apps_api.start_calls == ["ai-audit-analyst"]
+    assert result.compute_status.state == ComputeState.ACTIVE
+    out = capsys.readouterr().out
+    assert "STOPPED" in out
+    assert "starting it" in out
+    assert "$0.58/h" in out
+    assert "now ACTIVE" in out
+
+
+def test_ensure_app_started_is_a_noop_when_already_active(capsys):
+    from databricks.sdk.service.apps import ComputeState
+
+    class _FakeAppsAPI:
+        def __init__(self):
+            self.start_calls = []
+
+        def start(self, name):  # pragma: no cover - must not be called
+            self.start_calls.append(name)
+            raise AssertionError("must not start an App that is already ACTIVE")
+
+    apps_api = _FakeAppsAPI()
+    w = type("W", (), {"apps": apps_api})()
+
+    active_app = _FakeApp(state=ComputeState.ACTIVE)
+    result = deploy_app._ensure_app_started(w, "ai-audit-analyst", active_app)
+
+    assert apps_api.start_calls == []
+    assert result is active_app
+    assert capsys.readouterr().out == ""
+
+
+def test_ensure_app_started_leaves_a_transient_state_alone(capsys):
+    """STARTING/STOPPING/UPDATING are already in flight -- only a genuinely
+    STOPPED App needs this function to act; anything else is left for
+    w.apps.deploy() itself to accept or reject."""
+    from databricks.sdk.service.apps import ComputeState
+
+    class _FakeAppsAPI:
+        def start(self, name):  # pragma: no cover - must not be called
+            raise AssertionError("must not start an App that is not STOPPED")
+
+    w = type("W", (), {"apps": _FakeAppsAPI()})()
+
+    starting_app = _FakeApp(state=ComputeState.STARTING)
+    result = deploy_app._ensure_app_started(w, "ai-audit-analyst", starting_app)
+
+    assert result is starting_app
+    assert capsys.readouterr().out == ""
+
+
+def test_build_parser_has_stop_after_flag_defaulting_to_false():
+    args = deploy_app.build_parser().parse_args([])
+    assert args.stop_after is False
+
+
+def test_build_parser_stop_after_flag_can_be_set():
+    args = deploy_app.build_parser().parse_args(["--stop-after"])
+    assert args.stop_after is True
+
+
+# ── _finish_deploy end to end (mocked SDK client, no workspace) -- covers
+# BUG-DEPLOY-1's start-before-deploy path and the --stop-after path
+# together, since both live in the same function. ─────────────────────────
+
+
+class _FakeGrantsAPI:
+    def update(self, securable_type, full_name, *, changes=None):
+        pass
+
+
+class _FakeAppsAPIFull:
+    """A fuller fake of AppsAPI covering everything _finish_deploy touches:
+    list/create_update_and_wait/get (via _ensure_app, an existing App),
+    start (BUG-DEPLOY-1), deploy, and stop (--stop-after)."""
+
+    def __init__(self, *, initial_state, deploy_state, post_deploy_state=None):
+        from databricks.sdk.service.apps import ComputeState
+
+        self._state = initial_state
+        self._deploy_state = deploy_state
+        self._post_deploy_state = post_deploy_state if post_deploy_state is not None else ComputeState.ACTIVE
+        self.start_calls = []
+        self.stop_calls = []
+        self.deploy_calls = []
+
+    def list(self):
+        return [_FakeApp(state=self._state)]
+
+    def create_update_and_wait(self, name, *, update_mask=None, app=None, timeout=None):
+        return _FakeApp(state=self._state, name=name)
+
+    def get(self, name):
+        return _FakeApp(state=self._state, name=name)
+
+    def start(self, name):
+        from databricks.sdk.service.apps import ComputeState
+
+        self.start_calls.append(name)
+        self._state = ComputeState.ACTIVE
+        return _FakeWait(_FakeApp(state=self._state, name=name))
+
+    def deploy(self, name, deployment):
+        from databricks.sdk.service.apps import AppDeployment, AppDeploymentStatus
+
+        self.deploy_calls.append(name)
+        self._state = self._post_deploy_state
+        result = AppDeployment(deployment_id="dep-1", status=AppDeploymentStatus(state=self._deploy_state))
+        return _FakeWait(result)
+
+    def stop(self, name):
+        from databricks.sdk.service.apps import ComputeState
+
+        self.stop_calls.append(name)
+        self._state = ComputeState.STOPPED
+        return _FakeWait(_FakeApp(state=self._state, name=name))
+
+
+def _fake_workspace_client_for_finish_deploy(apps_api):
+    experiments = _FakeExperimentsAPI(existing_path_to_id={"/Shared/ai-audit-analyst-audit-runs": "exp-1"})
+    return type("W", (), {"apps": apps_api, "grants": _FakeGrantsAPI(), "experiments": experiments})()
+
+
+def _finish_deploy_settings():
+    from orchestrator.config import Settings
+
+    return Settings(catalog="cat", schema="sch", host="https://x.cloud.databricks.com", app_name="ai-audit-analyst")
+
+
+def test_finish_deploy_starts_a_stopped_app_before_deploying(capsys):
+    from databricks.sdk.service.apps import AppDeploymentState, ComputeState
+
+    apps_api = _FakeAppsAPIFull(initial_state=ComputeState.STOPPED, deploy_state=AppDeploymentState.SUCCEEDED)
+    w = _fake_workspace_client_for_finish_deploy(apps_api)
+
+    deploy_app._finish_deploy(
+        w, app_name="ai-audit-analyst", warehouse_id="wh-1", workspace_dir="/Workspace/Users/me/ai-audit-analyst",
+        settings=_finish_deploy_settings(), source_schemas=[],
+        env_vars={"MLFLOW_EXPERIMENT_PATH": "/Shared/ai-audit-analyst-audit-runs"},
+    )
+
+    assert apps_api.start_calls == ["ai-audit-analyst"]
+    assert apps_api.deploy_calls == ["ai-audit-analyst"]
+    assert apps_api.stop_calls == []  # stop_after defaults to False
+    out = capsys.readouterr().out
+    assert "starting it" in out
+    assert "Deployed" in out
+
+
+def test_finish_deploy_stop_after_stops_the_app_once_deployment_succeeds(capsys):
+    from databricks.sdk.service.apps import AppDeploymentState, ComputeState
+
+    apps_api = _FakeAppsAPIFull(
+        initial_state=ComputeState.STOPPED, deploy_state=AppDeploymentState.SUCCEEDED,
+        post_deploy_state=ComputeState.ACTIVE,
+    )
+    w = _fake_workspace_client_for_finish_deploy(apps_api)
+
+    deploy_app._finish_deploy(
+        w, app_name="ai-audit-analyst", warehouse_id="wh-1", workspace_dir="/Workspace/Users/me/ai-audit-analyst",
+        settings=_finish_deploy_settings(), source_schemas=[],
+        env_vars={"MLFLOW_EXPERIMENT_PATH": "/Shared/ai-audit-analyst-audit-runs"},
+        stop_after=True,
+    )
+
+    assert apps_api.start_calls == ["ai-audit-analyst"]
+    assert apps_api.stop_calls == ["ai-audit-analyst"]
+    out = capsys.readouterr().out
+    assert "stopping it now" in out
+    assert "now STOPPED" in out
+
+
+def test_finish_deploy_stop_after_does_not_stop_when_deployment_did_not_succeed(capsys):
+    from databricks.sdk.service.apps import AppDeploymentState, ComputeState
+
+    apps_api = _FakeAppsAPIFull(
+        initial_state=ComputeState.STOPPED, deploy_state=AppDeploymentState.FAILED,
+        post_deploy_state=ComputeState.ACTIVE,
+    )
+    w = _fake_workspace_client_for_finish_deploy(apps_api)
+
+    deploy_app._finish_deploy(
+        w, app_name="ai-audit-analyst", warehouse_id="wh-1", workspace_dir="/Workspace/Users/me/ai-audit-analyst",
+        settings=_finish_deploy_settings(), source_schemas=[],
+        env_vars={"MLFLOW_EXPERIMENT_PATH": "/Shared/ai-audit-analyst-audit-runs"},
+        stop_after=True,
+    )
+
+    assert apps_api.stop_calls == []
+    out = capsys.readouterr().out
+    assert "not stopping" in out

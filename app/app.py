@@ -30,7 +30,7 @@ import dash_bootstrap_components as dbc  # noqa: E402
 from dash import Input, Output, dcc, html  # noqa: E402
 from flask import jsonify  # noqa: E402
 
-from src import run_setup, run_status, workspace_tne  # noqa: E402
+from src import run_setup, run_status, trace_page, workspace_tne  # noqa: E402
 from src.platform import adapters  # noqa: E402
 from src.platform.pages import (  # noqa: E402
     audit_runs_page,
@@ -135,6 +135,7 @@ def _parse_query_param(search: str | None, name: str) -> str | None:
 run_setup.register_callbacks(app)
 run_status.register_callbacks(app)
 workspace_tne.register_callbacks(app)
+trace_page.register_callbacks(app)
 
 
 @server.route("/health")
