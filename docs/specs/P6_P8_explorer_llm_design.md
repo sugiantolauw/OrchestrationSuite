@@ -1058,7 +1058,7 @@ No text, class or style changes. The UI agent wires these after the D2–D4 deci
 | Prototype element (landing page) | Explorer behaviour | Service call |
 |---|---|---|
 | `mode-select-card` explorer | Shows `explorer-section` and hides `playbook-skills-section` (the prototype's own behaviour) | — |
-| Source selection (governed data results and uploads) | The same selection mechanism the restored landing page uses for Playbook bindings. Explorer takes the selected UC tables and `Ready` uploads. | — |
+| Source selection (`explorer-source-checklist`) | (D5a) A `dcc.Checklist` of the governed tables this identity can read (up to 25 search matches) plus the user's own `Ready` uploads. The auditor ticks 1-5 sources; nothing is auto-picked, and 0 or more than 5 ticked gives a visible error. | — |
 | `audit-objective`, `audit-period`, `audit-bu`, `audit-materiality` | The objective, period, business unit and materiality | — |
 | **"Start new objective"** | Starts planning for the current objective and sources. If this session's previous Explorer run is still `awaiting_confirmation`, it is superseded. | `start_explorer_run(..., supersedes_run_id=...)` |
 | `workflow-preview-container` ("Proposed workflow") | Polls the Explorer run. It renders the existing nine `workflow_stage` rows from real status: "Skill / Explorer plan" has status `needs_confirmation`, with detail `"N tests proposed · M greyed"` or the label `"LLM unavailable — deterministic output only"`. Directly below, one `workflow_stage` row per proposed test: `ready` for valid, `pending` (grey) for greyed, with the reason as detail. | `get_explorer_review` |
