@@ -15,7 +15,9 @@ import pytest
 from pptx import Presentation
 
 from orchestrator.config import DEFAULT_PPTX_TEMPLATE_PATH
-from orchestrator.nodes.fieldwork import act, classify, discover, execute, export, find, prioritise
+from orchestrator.nodes.fieldwork import (
+    _code_revision_export_note, act, classify, discover, execute, export, find, prioritise,
+)
 from orchestrator.pptx_export import (
     ALL_FINDINGS_ROWS_PER_SLIDE,
     COVERAGE_ROWS_PER_SLIDE,
@@ -364,6 +366,113 @@ def test_g13_exec_summary_and_risk_exposure_potential_exposure_callouts_agree(re
     assert set(callouts) == {"Executive Summary", "Risk and Exposure"}
     assert callouts["Executive Summary"] == expected_text
     assert callouts["Risk and Exposure"] == expected_text
+
+
+# ── code_revision_note: CLAUDE.md §11 "Paused runs across a code deploy" /
+# independent review 2026-09-24 gap #11 -- both exports state "Computed
+# under code revision X, exported under Y" once orchestrator.pipeline.
+# run_phase has recorded a differing runs.export_code_revision for this
+# run's export phase, and say nothing at all otherwise ──────────────────────
+
+
+def test_code_revision_export_note_present_when_the_two_revisions_differ():
+    assert (
+        _code_revision_export_note("rev1", "rev2-deployed-later")
+        == "Computed under code revision rev1, exported under rev2-deployed-later"
+    )
+
+
+@pytest.mark.parametrize(
+    "computed,exported",
+    [
+        ("rev1", "rev1"),  # export phase re-ran on the SAME deployment
+        ("rev1", None),  # export_code_revision never recorded (the common case)
+        (None, "rev2"),  # a fingerprint with no code_revision at all
+        (None, None),
+    ],
+)
+def test_code_revision_export_note_absent_when_equal_or_unset(computed, exported):
+    assert _code_revision_export_note(computed, exported) is None
+
+
+def _run_to_export_with_export_code_revision(*, run_id: str, export_code_revision: str | None):
+    """Runs the SKILL-001 planted fixture through discover..act (same node
+    sequence as `real_deck` above), optionally recording an export_code_
+    revision that differs from the fingerprint's own code_revision ("rev1",
+    `_fingerprint`'s own fixed value) BEFORE calling `export` -- exactly the
+    order orchestrator.pipeline.run_phase uses in production (it records the
+    override, then runs the export-phase nodes)."""
+    from tests.conftest import canonical_ts
+
+    from orchestrator.adapters.persistence_local import LocalPersistence
+
+    persistence = LocalPersistence(":memory:")
+    persistence.migrate()
+    ctx, state = _make_ctx_and_state(persistence, DATA_DIR, run_id=run_id)
+    state = discover(ctx, state)
+    state = execute(ctx, state)
+    state = classify(ctx, state)
+    state = find(ctx, state)
+    state = prioritise(ctx, state)
+    state = act(ctx, state)
+    if export_code_revision is not None:
+        persistence.record_export_code_revision(
+            state.run_id, fingerprint_id=state.fingerprint_id,
+            code_revision=export_code_revision, now=canonical_ts(3),
+        )
+    state = export(ctx, state)
+    return ctx, state
+
+
+def _cover_sheet_values(ctx, state) -> list:
+    import io
+
+    import openpyxl
+
+    xlsx_bytes = ctx.export_storage.read(state.exports["xlsx"]["path"])
+    wb = openpyxl.load_workbook(io.BytesIO(xlsx_bytes), data_only=True)
+    return [cell.value for row in wb["Cover"].iter_rows() for cell in row]
+
+
+def test_code_revision_note_appears_on_both_exports_when_recorded_export_code_revision_differs():
+    ctx, state = _run_to_export_with_export_code_revision(
+        run_id="RUN-PPTX-CODEREV-DIFF", export_code_revision="rev2-deployed-later",
+    )
+    expected = "Computed under code revision rev1, exported under rev2-deployed-later"
+
+    import io
+
+    prs = Presentation(io.BytesIO(ctx.export_storage.read(state.exports["pptx"]["path"])))
+    assert expected in "\n".join(_all_slide_text(prs))
+
+    assert expected in _cover_sheet_values(ctx, state)
+
+
+def test_code_revision_note_absent_from_both_exports_when_recorded_export_code_revision_equals_computed():
+    ctx, state = _run_to_export_with_export_code_revision(
+        run_id="RUN-PPTX-CODEREV-SAME", export_code_revision="rev1",
+    )
+
+    import io
+
+    prs = Presentation(io.BytesIO(ctx.export_storage.read(state.exports["pptx"]["path"])))
+    all_text = " ".join(_all_slide_text(prs))
+    assert "Computed under code revision" not in all_text
+
+    cover_values = _cover_sheet_values(ctx, state)
+    assert not any(isinstance(v, str) and v.startswith("Computed under code revision") for v in cover_values)
+
+
+def test_code_revision_note_absent_from_both_exports_when_never_recorded(real_deck):
+    """The common case, on the SAME `real_deck` fixture every other G13 test
+    above already exercises: no orchestrator.pipeline.run_phase override
+    was ever recorded, so runs.export_code_revision is unset and neither
+    export carries the note."""
+    all_text = " ".join(_all_slide_text(real_deck["prs"]))
+    assert "Computed under code revision" not in all_text
+
+    cover_values = _cover_sheet_values(real_deck["ctx"], real_deck["state"])
+    assert not any(isinstance(v, str) and v.startswith("Computed under code revision") for v in cover_values)
 
 
 # ── zero-findings deck: an honest empty state, not a broken or fabricated

@@ -15,11 +15,13 @@ over the SAME real moments."""
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pandas as pd
 import pyarrow as pa
 import pytest
 
+from orchestrator import service
 from orchestrator.adapters.datasource_uc import UCTableDataSource, _normalise_datetime_dtypes
 from orchestrator.config import Settings
 from orchestrator.contract import ContractViolation, LocalFileDataSource
@@ -371,3 +373,53 @@ def test_execute_skill_fails_loudly_when_contract_timezone_is_empty_string(tmp_p
     ds = LocalFileDataSource(root_dir=tmp_path, sources=skill.contract["sources"])
     with pytest.raises(ContractViolation):
         execute_skill(skill, data_source=ds, audit_period=AUDIT_PERIOD, run_context={"run_id": "empty-tz"})
+
+
+# ── orchestrator.service._get_run_frames_from_sources (the pre-frame-snapshot
+# fallback for old runs, CLAUDE.md §0.5/NN14) threads the SAME declared
+# contract timezone into read_population that execute_skill does, on the UC
+# path -- a regression test for the fallback having called read_population
+# with no audit_timezone at all ─────────────────────────────────────────────
+
+
+def test_get_run_frames_from_sources_uc_path_applies_contract_timezone(tmp_path: Path):
+    skill = _skill(tmp_path)
+    ds = _uc_data_source(_uc_rows())  # a real UCTableDataSource, fake connection, tz-aware UTC rows
+    ctx = SimpleNamespace(
+        persistence=SimpleNamespace(list_flagged_rows=lambda run_id: []),
+        data_source_factory=lambda bindings, contract_sources, skill_id: ds,
+    )
+    state = SimpleNamespace(
+        run_id="run-uc-frames-tz",
+        skill_id=skill.manifest["id"],
+        data_assets=[{"source": "claims", "table_fqn": "cat.sch.claims", "version": 5}],
+    )
+
+    frames = service._get_run_frames_from_sources(ctx, state, skill)
+
+    assert set(frames) == {"claims"}
+    # The fake UC connector hands back tz-aware UTC, exactly like a real
+    # TIMESTAMP column. If _get_run_frames_from_sources forgot to pass
+    # audit_timezone through (the bug this test guards), the column would
+    # still carry raw UTC instants instead of Sydney local wall-clock time --
+    # the 23:30/00:30 boundary rows would land on the wrong calendar day.
+    assert frames["claims"]["Transaction Date"].tolist() == [_LOCAL_MID, _LOCAL_IN, _LOCAL_OUT]
+
+
+def test_get_run_frames_from_sources_fails_loudly_when_contract_has_no_timezone(tmp_path: Path):
+    skill = _skill(tmp_path, timezone=None)
+    assert "timezone" not in skill.contract
+    ds = _uc_data_source(_uc_rows())
+    ctx = SimpleNamespace(
+        persistence=SimpleNamespace(list_flagged_rows=lambda run_id: []),
+        data_source_factory=lambda bindings, contract_sources, skill_id: ds,
+    )
+    state = SimpleNamespace(
+        run_id="run-uc-frames-no-tz",
+        skill_id=skill.manifest["id"],
+        data_assets=[{"source": "claims", "table_fqn": "cat.sch.claims", "version": 5}],
+    )
+
+    with pytest.raises(ContractViolation) as exc:
+        service._get_run_frames_from_sources(ctx, state, skill)
+    assert "timezone" in str(exc.value)

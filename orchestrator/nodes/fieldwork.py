@@ -1331,9 +1331,25 @@ def _build_export_narration(ctx: NodeContext, state: RunState, findings: list[di
     }
 
 
+def _code_revision_export_note(computed_code_revision: str | None, export_code_revision: str | None) -> str | None:
+    """CLAUDE.md §11 "Paused runs across a code deploy" / independent review
+    2026-09-24 gap #11: once orchestrator.pipeline.run_phase has recorded an
+    export_code_revision for this run that differs from the code_revision
+    its (immutable) run_fingerprints row was created under -- meaning
+    `execute` computed this run's numbers on one deployment and `export` ran
+    on a later one -- both exported artefacts say so. Absent (never a
+    fabricated "unchanged" line) whenever export_code_revision was never
+    recorded, or was recorded but happens to equal computed_code_revision
+    (an export re-run on the SAME deployment that created the run)."""
+    if computed_code_revision and export_code_revision and export_code_revision != computed_code_revision:
+        return f"Computed under code revision {computed_code_revision}, exported under {export_code_revision}"
+    return None
+
+
 def _write_xlsx_workpaper(
     state: RunState, findings: list[dict], metrics: dict[str, dict], flagged_rows: list[dict], now: str,
     ticket_previews: list[dict] | None = None, narration: dict | None = None,
+    code_revision_note: str | None = None,
 ) -> bytes:
     # P6 WP N11: `findings` here is already the export narration bundle's
     # OWN resolved list (its observation/recommendation/management_questions
@@ -1366,6 +1382,10 @@ def _write_xlsx_workpaper(
         ("objective", state.objective),
         ("run_owner", state.run_owner),
     ]
+    # CLAUDE.md §11 "Paused runs across a code deploy": absent for the
+    # common case (see _code_revision_export_note's own docstring).
+    if code_revision_note:
+        cover_fields.append(("code_revision_note", code_revision_note))
     signoff = state.signoff or {}
     if signoff:
         cover_fields.append(("signed_off_by", signoff.get("approver")))
@@ -1572,6 +1592,18 @@ def export(ctx: NodeContext, state: RunState) -> RunState:
     flagged_rows = ctx.persistence.list_flagged_rows(state.run_id)
     now = ctx.clock()
 
+    # CLAUDE.md §11 "Paused runs across a code deploy" / independent review
+    # 2026-09-24 gap #11: the SAME two reads service.get_run already makes
+    # for its own run-page label (run_fingerprints stays immutable, so
+    # `execute`'s own code_revision lives only on the fingerprint;
+    # orchestrator.pipeline.run_phase records what actually ran export on
+    # `runs.export_code_revision` when the two differ).
+    fingerprint = ctx.persistence.get_fingerprint(state.fingerprint_id)
+    computed_code_revision = (fingerprint or {}).get("code_revision")
+    run_row = ctx.persistence.get_run_row(state.run_id)
+    export_code_revision = (run_row or {}).get("export_code_revision")
+    code_revision_note = _code_revision_export_note(computed_code_revision, export_code_revision)
+
     # "Prepare Jira ticket previews" (CLAUDE.md §5 UI item 4, NN13) -- the
     # checkbox label is unchanged, but the option key stays
     # jira_preview_requested for backward compatibility with runs already
@@ -1593,6 +1625,7 @@ def export(ctx: NodeContext, state: RunState) -> RunState:
 
     content = _write_xlsx_workpaper(
         state, resolved_findings, metrics, flagged_rows, now, ticket_previews, narration=narration,
+        code_revision_note=code_revision_note,
     )
     sha256 = hashlib.sha256(content).hexdigest()
     rel_path = f"exports/{state.run_id}/workpaper.xlsx"
@@ -1612,6 +1645,7 @@ def export(ctx: NodeContext, state: RunState) -> RunState:
     pptx_content = generate_pptx(
         state, resolved_findings, metrics, catalogue_rows, ctx.skill,
         data_mode=data_mode, template_path=ctx.settings.pptx_template_path, now=now, narration=narration,
+        code_revision_note=code_revision_note,
     )
     pptx_sha256 = hashlib.sha256(pptx_content).hexdigest()
     pptx_rel_path = f"exports/{state.run_id}/audit_pack.pptx"

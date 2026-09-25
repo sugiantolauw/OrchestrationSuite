@@ -32,6 +32,7 @@ import pandas as pd
 import yaml
 
 from orchestrator.explorer.iso4217 import ISO4217_CODES
+from orchestrator.timeutil import to_business_local
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 DEFAULT_SKILLS_DIR = _REPO_ROOT / "skills"
@@ -157,9 +158,15 @@ def _value_counts(non_null: pd.Series, *, min_count: int, date_only: bool) -> tu
     return kept, suppressed
 
 
-def _in_period_count(non_null: pd.Series, audit_period: tuple[str, str]) -> int:
+def _in_period_count(non_null: pd.Series, audit_period: tuple[str, str], audit_timezone: str) -> int:
+    """CLAUDE.md §0.5/NN14: the SAME business-calendar rule execute_skill applies
+    (orchestrator.timeutil.to_business_local) -- a naive value already represents
+    local wall-clock time in `audit_timezone` and is left unchanged, a tz-aware one
+    (a UC TIMESTAMP column) is converted to it before the boundary comparison, so
+    Explorer's profile counts agree with what the engine will actually test."""
     start, end = audit_period
-    dates = pd.to_datetime(non_null).dt.normalize()
+    local = to_business_local(non_null, audit_timezone)
+    dates = pd.to_datetime(local).dt.normalize()
     start_ts, end_ts = pd.Timestamp(start), pd.Timestamp(end)
     return int(((dates >= start_ts) & (dates <= end_ts)).sum())
 
@@ -220,7 +227,7 @@ def pandas_profile_columns(
             col["min"] = _scalar_to_jsonable(non_null.min(), date_only=date_only)
             col["max"] = _scalar_to_jsonable(non_null.max(), date_only=date_only)
             if audit_period and audit_timezone:
-                col["in_period_count"] = _in_period_count(non_null, audit_period)
+                col["in_period_count"] = _in_period_count(non_null, audit_period, audit_timezone)
 
         if distinct_count <= max_distinct:
             values, suppressed = _value_counts(

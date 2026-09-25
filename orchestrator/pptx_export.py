@@ -291,7 +291,10 @@ def _reconciliation_ok(rec: dict) -> bool:
 # ── slide builders ───────────────────────────────────────────────────────────
 
 
-def _build_cover(prs, state: RunState, skill_manifest: dict, data_mode: str, now: str):
+def _build_cover(
+    prs, state: RunState, skill_manifest: dict, data_mode: str, now: str,
+    code_revision_note: str | None = None,
+):
     slide = _new_slide(prs, LY_COVER)
     title_ph = slide.placeholders[0]
     title_ph.text = skill_manifest.get("domain") or skill_manifest.get("name", "Audit Report")
@@ -316,6 +319,14 @@ def _build_cover(prs, state: RunState, skill_manifest: dict, data_mode: str, now
         lines.append(f"Signed off by {signoff.get('approver', '—')} — {SELF_APPROVED_LABEL}")
     elif signoff.get("approver"):
         lines.append(f"Signed off by {signoff.get('approver')}")
+    # CLAUDE.md §11 "Paused runs across a code deploy" / independent review
+    # 2026-09-24 gap #11: absent for the common case (exported under the
+    # SAME code revision `execute` computed this run's numbers under, or no
+    # export_code_revision recorded at all) -- present, never fabricated,
+    # only once orchestrator.pipeline.run_phase has actually recorded a
+    # differing export_code_revision for this run.
+    if code_revision_note:
+        lines.append(code_revision_note)
     detail_ph.text = lines[0]
     tf = detail_ph.text_frame
     tf.word_wrap = True
@@ -805,6 +816,7 @@ def generate_pptx(
     template_path: str | Path,
     now: str,
     narration: dict | None = None,
+    code_revision_note: str | None = None,
 ) -> bytes:
     """Builds the full PPTX audit pack and returns bytes. `skill` is the
     Skill this run used (orchestrator.skills.Skill) -- its `manifest` and
@@ -823,7 +835,10 @@ def generate_pptx(
     findings, and the one chart caption. `None` (no caller outside
     `orchestrator.nodes.fieldwork.export` passes it) degrades to "nothing
     narrated" -- every slide below still renders its own reviewed
-    deterministic fallback, labelled."""
+    deterministic fallback, labelled. `code_revision_note` (CLAUDE.md §11
+    "Paused runs across a code deploy") is the cover-slide line stating
+    "Computed under code revision X, exported under Y" -- `None` (the
+    common case) adds no line at all."""
     narration = narration or {}
     template_path = Path(template_path)
     if not template_path.is_file():
@@ -848,7 +863,7 @@ def generate_pptx(
     # 14-test catalogue was exactly that miscount.
     n_catalogue_tests = len(catalogue_rows)
 
-    _build_cover(prs, state, skill.manifest, data_mode, now)
+    _build_cover(prs, state, skill.manifest, data_mode, now, code_revision_note)
     _build_exec_summary(prs, state, findings, metrics, n_catalogue_tests, now, narration)
     _build_what_we_found(prs, findings, catalogue_rows, state, now, narration)
 

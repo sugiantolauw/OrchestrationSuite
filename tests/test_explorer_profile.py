@@ -138,6 +138,35 @@ def test_pandas_profile_columns_in_period_count_only_when_period_and_timezone_gi
     assert date_col2["in_period_count"] == 4
 
 
+def test_pandas_profile_columns_in_period_count_applies_audit_timezone_at_the_boundary():
+    # CLAUDE.md §0.5/NN14, same rule orchestrator.timeutil.to_business_local /
+    # engine.execute_skill apply: 23:30 Sydney local on the last day of the
+    # period is IN, 00:30 local the NEXT day is OUT. A UC TIMESTAMP column
+    # comes back tz-aware UTC -- 2026-04-30 is well after Sydney's 2026
+    # DST-end (AEST, +10), so 00:30 local May 1 is 14:30 UTC April 30, the
+    # SAME UTC calendar day as the 23:30-local row (13:30 UTC April 30).
+    # Comparing the raw UTC instants (the bug this test guards) would put
+    # BOTH rows in-period; converting to Sydney local first puts only one.
+    tz = "Australia/Sydney"
+    local_in = pd.Timestamp("2026-04-30 23:30:00")
+    local_out = pd.Timestamp("2026-05-01 00:30:00")
+    utc_in = local_in.tz_localize(tz).tz_convert("UTC")
+    utc_out = local_out.tz_localize(tz).tz_convert("UTC")
+    assert utc_in.normalize() == utc_out.normalize()  # same UTC calendar day, by construction above
+
+    df = pd.DataFrame({
+        "__source": ["s"] * 2,
+        "__row_key": ["k1", "k2"],
+        "Transaction Date": [utc_in, utc_out],
+    })
+    result = pandas_profile_columns(
+        df, max_distinct=30, min_count=1,
+        audit_period=("2026-04-01", "2026-04-30"), audit_timezone=tz,
+    )
+    date_col = next(c for c in result["columns"] if c["name"] == "Transaction Date")
+    assert date_col["in_period_count"] == 1  # only the 23:30-local row is IN
+
+
 def test_pandas_profile_columns_currency_code_column():
     df = _sample_df()
     result = pandas_profile_columns(df, max_distinct=30, min_count=1)
