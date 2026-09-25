@@ -73,6 +73,22 @@ _D2_LIBRARY_HIDDEN_ID = (
     "Button id=None class='ghost'", "Button id='start-explorer-from-library-btn' class='ghost'",
 )
 
+# Allow-list: D5a (CLAUDE.md §6 Explorer decisions, 2026-09-25 -- "Explorer
+# gets a source checklist inside the existing Explorer Mode panel") adds
+# exactly two NEW elements the prototype has no equivalent of at all: one
+# label and one dcc.Checklist, inserted directly above the two Explorer
+# buttons inside the existing explorer-section panel. Applied as an exact,
+# position-anchored insertion immediately before the (already D2-rewritten)
+# "Start new objective" button, so this stays a zero-diff comparison in
+# every other respect, and a future reshuffle of the prototype's
+# explorer-section panel makes this assertion fail loudly rather than
+# silently stop inserting.
+_D5A_SOURCE_CHECKLIST_ANCHOR = "\n      Button id='explorer-start-btn' class='btn-generate'"
+_D5A_SOURCE_CHECKLIST_BLOCK = (
+    "\n      Label id=None class=None\n      Checklist id='explorer-source-checklist' class=None"
+    + _D5A_SOURCE_CHECKLIST_ANCHOR
+)
+
 
 def _apply_allow_list(reference: str, substitutions: list[tuple[str, str]]) -> str:
     for old, new in substitutions:
@@ -106,6 +122,11 @@ def test_landing_page_matches_prototype(monkeypatch, reference_fixtures):
     monkeypatch.setattr(adapters, "get_upload_base_path", lambda: "/Volumes/placeholder/uploads")
 
     reference = _apply_allow_list(_reference_tree("landing"), _D2_HIDDEN_IDS)
+    assert reference.count(_D5A_SOURCE_CHECKLIST_ANCHOR) == 1, (
+        f"expected exactly one {_D5A_SOURCE_CHECKLIST_ANCHOR!r} in the reference tree -- "
+        f"update _D5A_SOURCE_CHECKLIST_BLOCK rather than silently mismatching"
+    )
+    reference = reference.replace(_D5A_SOURCE_CHECKLIST_ANCHOR, _D5A_SOURCE_CHECKLIST_BLOCK, 1)
     assert _app_tree(home_layout()) == reference
 
 

@@ -37,6 +37,7 @@ keeps home_layout() itself pixel-for-pixel the prototype's tree.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from dash import ALL, Input, Output, State, callback_context, dcc, html, no_update
@@ -233,6 +234,15 @@ def home_layout(default_mode: str = "playbook") -> html.Div:
                     html.Span("Explorer Mode requires auditor confirmation before execution",
                               style={"fontSize": 12, "color": "#6b4a00"}),
                 ], style={"marginBottom": 10}),
+                html.Label("Data sources for this objective (choose 1–5)",
+                           style={"fontSize": 12, "fontWeight": 700, "color": "#1a1d26"}),
+                dcc.Checklist(
+                    id="explorer-source-checklist",
+                    options=[],
+                    value=[],
+                    style={"fontSize": 13, "color": "#3b4150"},
+                    labelStyle={"display": "block", "marginBottom": 6},
+                ),
                 html.Button("Start new objective", id="explorer-start-btn", className="btn-generate",
                             style={"marginRight": 8}),
                 html.Button("Save completed approach as draft Skill", id="explorer-save-draft-btn",
@@ -416,34 +426,50 @@ def _auto_bind(skill_id: str) -> tuple[dict[str, str], list[str]]:
     return bindings, missing
 
 
-def _explorer_source_candidates() -> list[dict]:
-    """docs/specs/P6_P8_explorer_llm_design.md §5.1: "the same selection
-    mechanism the restored landing page uses for Playbook bindings" -- the
-    landing page has no per-asset selection control for EITHER mode
-    (data_asset_card carries no clickable id, unlike skill_card/mode_card;
-    Playbook works around this entirely via contract-driven auto-binding,
-    _auto_bind above). Explorer has no contract to auto-bind against, so
-    this takes the SAME governed-table results the page already shows (the
-    first 5, filtered to ones this identity can actually read) plus this
-    user's own Ready uploads, up to start_explorer_run's 5-source cap --
-    "as today" (D5.1), never a new selection UI (out of scope for D2-D4)."""
-    sources: list[dict] = []
+_EXPLORER_SOURCE_SEARCH_LIMIT = 25  # governed-table matches offered per search keystroke in the
+# checklist -- a human ticks these by hand, so a generous but bounded list is enough; distinct
+# from the 1-5 SELECTION cap (_MAX_EXPLORER_SOURCES) start_new_objective enforces below.
+
+_MAX_EXPLORER_SOURCES = 5  # matches orchestrator.service.start_explorer_run's own inline
+# "1 <= len(sources) <= 5" bound -- no importable named constant exists there, so this must be
+# kept in sync with it by hand if that bound ever changes.
+
+
+def _explorer_source_options(query: str | None) -> list[dict]:
+    """(D5a, 2026-09-25) The explorer-source-checklist's real option list --
+    governed tables this identity can read (Available only, via
+    adapters.search_governed_data narrowed by `query` exactly as Route A's
+    own data-search-input search does, capped at
+    _EXPLORER_SOURCE_SEARCH_LIMIT) plus this user's own Ready uploads
+    (adapters.list_uploaded_files, filtered by status/uploaded_by exactly as
+    _auto_bind filters Playbook uploads above). Restricted tables are never
+    offered. Replaces this module's old auto-pick behaviour (formerly
+    `_explorer_source_candidates`, which silently chose "the first 5
+    available" with nothing shown for confirmation) -- D5a instead surfaces
+    every eligible source as a checklist option and lets the auditor tick
+    1-5 of them; nothing here is auto-selected.
+
+    Each option's value is a JSON-encoded {"kind", "ref"} pair -- exactly
+    the shape adapters.start_explorer_run's `sources` entries need -- so a
+    ticked value round-trips back into a source dict with a plain
+    json.loads, never a fuzzy re-lookup."""
+    options: list[dict] = []
     is_local = adapters.is_local_backend()
-    for asset in adapters.search_governed_data("", limit=5):
+    for asset in adapters.search_governed_data(query or "", limit=_EXPLORER_SOURCE_SEARCH_LIMIT):
         if asset.get("access") != "Available" or not asset.get("name"):
             continue
-        sources.append({"kind": "local_file" if is_local else "uc_table", "ref": asset["name"]})
-        if len(sources) >= 5:
-            break
-    if len(sources) < 5:
-        owner = _request_owner()
-        for row in adapters.list_uploaded_files(engagement_id=_DEFAULT_ENGAGEMENT_ID):
-            if row.get("status") != "Ready" or row.get("uploaded_by") != owner:
-                continue
-            sources.append({"kind": "upload", "ref": row["upload_id"]})
-            if len(sources) >= 5:
-                break
-    return sources
+        value = json.dumps(
+            {"kind": "local_file" if is_local else "uc_table", "ref": asset["name"]}, sort_keys=True
+        )
+        options.append({"label": asset["name"], "value": value})
+
+    owner = _request_owner()
+    for row in adapters.list_uploaded_files(engagement_id=_DEFAULT_ENGAGEMENT_ID):
+        if row.get("status") != "Ready" or row.get("uploaded_by") != owner:
+            continue
+        value = json.dumps({"kind": "upload", "ref": row["upload_id"]}, sort_keys=True)
+        options.append({"label": f"Upload: {row['filename']}", "value": value})
+    return options
 
 
 def _explorer_error_panel(message: str) -> html.Div:
@@ -588,6 +614,32 @@ def register_callbacks(app) -> None:
         if not results:
             return html.P("No matching data assets found.", style={"color": "#6b7283", "fontSize": 13})
         return [data_asset_card(a) for a in results[:6]]
+
+    @app.callback(
+        Output("explorer-source-checklist", "options"),
+        Output("explorer-source-checklist", "value"),
+        Input("selected-mode-store", "data"),
+        Input("data-search-input", "value"),
+        Input("uploaded-files-list", "children"),
+        State("explorer-source-checklist", "value"),
+        prevent_initial_call=False,
+    )
+    def refresh_explorer_source_checklist(selected_mode, query, _uploaded_children, current_value):
+        """(D5a) Rebuilds the explorer-source-checklist's options -- entering
+        Explorer mode (selected-mode-store becomes "explorer"), every
+        data-search-input keystroke (the same Route A search box), and every
+        completed upload (uploaded-files-list changes) each retrigger this.
+        A PreventUpdate while not in Explorer mode means this never queries
+        governed data on page load or while browsing Playbook. Ticks the
+        auditor already made are kept, but only for values still offered
+        (an option that drops out of a narrower search or a since-restricted
+        table cannot stay ticked); nothing is ever auto-picked."""
+        if selected_mode != "explorer":
+            raise PreventUpdate
+        options = _explorer_source_options(query)
+        offered = {opt["value"] for opt in options}
+        kept_value = [v for v in (current_value or []) if v in offered]
+        return options, kept_value
 
     @app.callback(
         Output("workflow-preview-container", "children"),
@@ -800,26 +852,32 @@ def register_callbacks(app) -> None:
         State("audit-bu", "value"),
         State("audit-materiality", "value"),
         State("explorer-run-store", "data"),
+        State("explorer-source-checklist", "value"),
         prevent_initial_call=True,
     )
     def start_new_objective(n_clicks, objective, start_date, end_date, business_unit, materiality,
-                             prior_store):
-        """"Start new objective" (§5.1): starts Explorer planning for the
-        current objective and sources -- superseding this session's own
-        previous still-awaiting-confirmation Explorer run, if any, exactly
-        as §5.1's own row describes. Explorer-run-store is the one D2 Store
-        that render_workflow_preview then picks up (its own Input on this
-        same store) to switch the "Proposed workflow" panel into polling the
-        real Explorer run instead of showing the generic preview."""
+                             prior_store, selected_source_values):
+        """(D5a) "Start new objective": starts Explorer planning over
+        exactly the sources the auditor ticked in explorer-source-checklist,
+        in the order shown -- superseding this session's own previous
+        still-awaiting-confirmation Explorer run, if any, exactly as §5.1's
+        own row describes. Explorer-run-store is the one D2 Store that
+        render_workflow_preview then picks up (its own Input on this same
+        store) to switch the "Proposed workflow" panel into polling the real
+        Explorer run instead of showing the generic preview.
+
+        0 ticked and >5 ticked each fail here with the stated message,
+        before any run is started (D5a: "no selection gives a visible
+        error" -- there is no silent auto-pick fallback any more)."""
         if not n_clicks:
             raise PreventUpdate
+        selected = list(selected_source_values or [])
+        if len(selected) == 0:
+            return no_update, _explorer_error_panel("Select at least one data source for Explorer Mode.")
+        if len(selected) > _MAX_EXPLORER_SOURCES:
+            return no_update, _explorer_error_panel("Select at most 5 data sources.")
         try:
-            sources = _explorer_source_candidates()
-            if not sources:
-                raise ValueError(
-                    "no available governed data or ready uploaded file to profile -- "
-                    "search governed data or upload a file first."
-                )
+            sources = [json.loads(v) for v in selected]
             run_owner = _request_owner()
             prior_run_id = (prior_store or {}).get("run_id")
             run_id = adapters.start_explorer_run(
