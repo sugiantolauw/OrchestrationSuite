@@ -1983,6 +1983,13 @@ Measured live, "Start audit analysis" needed about 10 s once connections were wa
 - If the App dies before the record is written, the click is lost and nothing is created. This is acceptable because no evidence exists yet.
 - A creation failure (contract, bindings, fingerprint) must still reach the user visibly on that page. It is never silent.
 
+### Run cards on /runs (user decision, 2026-09-25)
+
+The run card's existing View, Export and Trace buttons are wired as follows:
+- **View:** a SKILL-001 run with results (awaiting sign-off or completed) opens `/workspace/tne?run_id=<id>`, the dashboard for that run. Every other run opens `/run/<id>`: Explorer runs, which have no dashboard (D5), and runs that are in progress or failed.
+- **Export:** downloads that run's XLSX workpaper, the same file the run page offers. Before sign-off no export exists yet, so it states that the run must be signed off first.
+- **Trace:** opens `/trace` filtered to that run.
+
 ### Paused runs across a code deploy (user decision, 2026-09-24)
 
 A run pins the code revision it started on. When new code is deployed:
