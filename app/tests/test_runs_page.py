@@ -298,7 +298,7 @@ def test_trace_button_click_navigates_to_trace_filtered_by_run(real_ctx):
     assert search == "?run_id=RUN-A"
 
 
-def test_export_button_downloads_the_clicked_runs_xlsx(real_ctx, monkeypatch):
+def test_export_button_downloads_the_clicked_runs_xlsx_and_clears_the_message(real_ctx, monkeypatch):
     _make_run(real_ctx, "RUN-A", objective="x", status="completed")
     calls = []
 
@@ -310,16 +310,18 @@ def test_export_button_downloads_the_clicked_runs_xlsx(real_ctx, monkeypatch):
     callbacks = _register()
     _set_triggered({"type": "run-export-btn", "index": "RUN-A"})
 
-    data = callbacks["_export_run"]([1])
+    data, message = callbacks["_export_run"]([1])
     assert calls == [("RUN-A", "xlsx")]
     assert data["filename"] == "RUN-A.xlsx"
+    assert message == ""
 
 
-def test_export_button_no_ops_before_signoff_when_no_export_is_recorded(real_ctx, monkeypatch):
-    """CLAUDE.md §11 "Before sign-off no export exists yet, so it states
-    that the run must be signed off first." /runs has no existing element
-    to state that on (see this phase's report), so the click no-ops
-    (PreventUpdate) rather than crashing or inventing a new element."""
+def test_export_button_shows_the_signoff_message_and_triggers_no_download_before_signoff(real_ctx, monkeypatch):
+    """CLAUDE.md §11 "Message line" (2026-09-25): before sign-off no xlsx
+    export is recorded yet (orchestrator/service.py get_export raises
+    FileNotFoundError), so the click sets the new "runs-export-error" Div
+    (src/platform/pages.py) to the stated message and triggers no
+    download — never a silent no-op."""
     _make_run(real_ctx, "RUN-A", objective="x", status="running")
 
     def _raise(run_id, kind):
@@ -329,8 +331,28 @@ def test_export_button_no_ops_before_signoff_when_no_export_is_recorded(real_ctx
     callbacks = _register()
     _set_triggered({"type": "run-export-btn", "index": "RUN-A"})
 
-    with pytest.raises(PreventUpdate):
-        callbacks["_export_run"]([1])
+    data, message = callbacks["_export_run"]([1])
+    assert data is None
+    assert message == "This run must be signed off before its export is available."
+
+
+def test_export_button_shows_an_unexpected_errors_message_too(real_ctx, monkeypatch):
+    """CLAUDE.md NN14 — never silent: an export error other than "not
+    signed off yet" (here, get_export's own sha256 integrity-check
+    ValueError, orchestrator/service.py) also surfaces its message on
+    "runs-export-error" rather than crashing the callback or no-opping."""
+    _make_run(real_ctx, "RUN-A", objective="x", status="completed")
+
+    def _raise(run_id, kind):
+        raise ValueError(f"export {kind!r} for run {run_id!r} failed integrity check")
+
+    monkeypatch.setattr(adapters, "get_export", _raise)
+    callbacks = _register()
+    _set_triggered({"type": "run-export-btn", "index": "RUN-A"})
+
+    data, message = callbacks["_export_run"]([1])
+    assert data is None
+    assert "RUN-A" in message and "integrity check" in message
 
 
 def test_view_export_trace_callbacks_are_registered_on_the_real_app(real_ctx):
@@ -343,4 +365,4 @@ def test_view_export_trace_callbacks_are_registered_on_the_real_app(real_ctx):
     keys = list(entry.app.callback_map.keys())
     url_pair_keys = [k for k in keys if k.startswith("..url.pathname") and "url.search" in k]
     assert len(url_pair_keys) == 3, keys
-    assert "runs-export-download.data" in keys
+    assert "..runs-export-download.data...runs-export-error.children.." in keys
