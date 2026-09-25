@@ -458,10 +458,13 @@ def _run_and_narration(run_id: str) -> tuple[dict | None, dict | None]:
     Refetched after every action below so the panel a click just acted on
     (accept/reject/edit/regenerate) reflects that action immediately, the
     same "re-render from a fresh get_run" pattern every other button on
-    this page already follows."""
-    run = adapters.get_run(run_id)
-    narration = adapters.get_narration_review(run_id) if run and run.get("status") == "awaiting_signoff" else None
-    return run, narration
+    this page already follows.
+
+    adapters.get_run_and_narration loads this run's state once and reuses
+    it for both (P3/P4 perf gap review 2026-09-25) -- calling adapters.get_run
+    and adapters.get_narration_review here separately, as this used to,
+    loaded it twice per render."""
+    return adapters.get_run_and_narration(run_id)
 
 
 def _refresh(run_id: str) -> html.Div:

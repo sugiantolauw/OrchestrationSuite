@@ -517,6 +517,27 @@ class DeltaPersistence:
     def _cursor_ctx(self):
         return _CursorCtx(self)
 
+    # Runs exactly one statement under its own (short) acquire/release of the
+    # shared connection's lock, rather than a caller holding `_cursor_ctx()`
+    # across a whole batched write. A batched write can still be dozens of
+    # round trips for a large population (_MERGE_BATCH_SIZE's own docstring:
+    # a several-hundred-row write already needed this once for row-by-row
+    # MERGEs) -- holding the lock for the WHOLE write serialises every other
+    # thread's persistence call behind it, not just one statement of it,
+    # including a concurrent /run/<id> render's get_run/get_narration_review
+    # (P3/P4 perf gap review 2026-09-25: a single render measured 183.9s
+    # against the real warehouse under concurrent-run load). Delta statements
+    # here are individually atomic (no explicit BEGIN/COMMIT spans one), so
+    # releasing the lock between them changes only how long OTHER threads
+    # wait, never what this write itself commits.
+    def _exec1(self, sql_text: str, params: dict | None = None):
+        with self._cursor_ctx() as conn:
+            return self._execute(conn, sql_text, params)
+
+    def _exec1_typed(self, sql_text: str, params: dict | None = None):
+        with self._cursor_ctx() as conn:
+            return self._execute_typed(conn, sql_text, params)
+
     def _get_connection_locked(self):
         if self._conn is None:
             self._conn = self._connection_factory()
@@ -1485,45 +1506,47 @@ class DeltaPersistence:
             )
             existing_keys = {(r["source"], r["row_key"], r["flag"]) for r in _fetchall_dicts(cur)}
 
-            for batch in _batched(rows, _MERGE_BATCH_SIZE):
-                values_sql = ", ".join(
-                    f"(:run_id, :s{i}, :rk{i}, :f{i}, :g{i})" for i in range(len(batch))
-                )
-                params: dict = {"run_id": run_id}
-                for i, r in enumerate(batch):
-                    params[f"s{i}"] = r["source"]
-                    params[f"rk{i}"] = r["row_key"]
-                    params[f"f{i}"] = r["flag"]
-                    params[f"g{i}"] = r.get("group_id")
-                # Spark SQL rejects a direct "USING (...) AS s(col, ...)" column
-                # alias list on MERGE ([COLUMN_ALIASES_NOT_ALLOWED]) -- name the
-                # VALUES columns (Spark's own default col1, col2, ...) via an
-                # inner SELECT instead, and alias only the SELECT itself as `s`.
-                merge_sql = (
-                    f"MERGE INTO {self._table('flagged_rows')} t "
-                    "USING (SELECT col1 AS run_id, col2 AS source, col3 AS row_key, "
-                    f"col4 AS flag, col5 AS group_id FROM (VALUES {values_sql})) s "
-                    "ON t.run_id = s.run_id AND t.source = s.source AND t.row_key = s.row_key AND t.flag = s.flag "
-                    "WHEN MATCHED THEN UPDATE SET group_id = s.group_id "
-                    "WHEN NOT MATCHED THEN INSERT (run_id, source, row_key, flag, group_id) "
-                    "VALUES (s.run_id, s.source, s.row_key, s.flag, s.group_id)"
-                )
-                self._execute(conn, merge_sql, params)
+        # Each batch (and the prune below) runs under its own _exec1 -- its own
+        # short lock acquire/release -- rather than one `with self._cursor_ctx()`
+        # spanning every batch (see _exec1's docstring).
+        for batch in _batched(rows, _MERGE_BATCH_SIZE):
+            values_sql = ", ".join(
+                f"(:run_id, :s{i}, :rk{i}, :f{i}, :g{i})" for i in range(len(batch))
+            )
+            params: dict = {"run_id": run_id}
+            for i, r in enumerate(batch):
+                params[f"s{i}"] = r["source"]
+                params[f"rk{i}"] = r["row_key"]
+                params[f"f{i}"] = r["flag"]
+                params[f"g{i}"] = r.get("group_id")
+            # Spark SQL rejects a direct "USING (...) AS s(col, ...)" column
+            # alias list on MERGE ([COLUMN_ALIASES_NOT_ALLOWED]) -- name the
+            # VALUES columns (Spark's own default col1, col2, ...) via an
+            # inner SELECT instead, and alias only the SELECT itself as `s`.
+            merge_sql = (
+                f"MERGE INTO {self._table('flagged_rows')} t "
+                "USING (SELECT col1 AS run_id, col2 AS source, col3 AS row_key, "
+                f"col4 AS flag, col5 AS group_id FROM (VALUES {values_sql})) s "
+                "ON t.run_id = s.run_id AND t.source = s.source AND t.row_key = s.row_key AND t.flag = s.flag "
+                "WHEN MATCHED THEN UPDATE SET group_id = s.group_id "
+                "WHEN NOT MATCHED THEN INSERT (run_id, source, row_key, flag, group_id) "
+                "VALUES (s.run_id, s.source, s.row_key, s.flag, s.group_id)"
+            )
+            self._exec1(merge_sql, params)
 
-            orphans = existing_keys - new_keys
-            if orphans:
-                clauses = []
-                params: dict = {"run_id": run_id}
-                for i, (source, row_key, flag) in enumerate(orphans):
-                    clauses.append(f"(source = :s{i} AND row_key = :rk{i} AND flag = :f{i})")
-                    params[f"s{i}"] = source
-                    params[f"rk{i}"] = row_key
-                    params[f"f{i}"] = flag
-                self._execute(
-                    conn,
-                    f"DELETE FROM {self._table('flagged_rows')} WHERE run_id = :run_id AND ({' OR '.join(clauses)})",
-                    params,
-                )
+        orphans = existing_keys - new_keys
+        if orphans:
+            clauses = []
+            params: dict = {"run_id": run_id}
+            for i, (source, row_key, flag) in enumerate(orphans):
+                clauses.append(f"(source = :s{i} AND row_key = :rk{i} AND flag = :f{i})")
+                params[f"s{i}"] = source
+                params[f"rk{i}"] = row_key
+                params[f"f{i}"] = flag
+            self._exec1(
+                f"DELETE FROM {self._table('flagged_rows')} WHERE run_id = :run_id AND ({' OR '.join(clauses)})",
+                params,
+            )
 
     def list_flagged_rows(self, run_id: str, flag: str | None = None) -> list[dict]:
         with self._cursor_ctx() as conn:
@@ -1557,49 +1580,51 @@ class DeltaPersistence:
             )
             existing_names = {r["metric_name"] for r in _fetchall_dicts(cur)}
 
-            for batch in _batched(metrics, _MERGE_BATCH_SIZE):
-                values_sql = ", ".join(
-                    f"(:run_id, :n{i}, :v{i}, :vt{i}, :u{i}, :sr{i}, :t{i})" for i in range(len(batch))
-                )
-                params: dict = {"run_id": run_id}
-                for i, m in enumerate(batch):
-                    value, value_text = _metric_value_columns(m.get("value"))
-                    params[f"n{i}"] = m["metric_name"]
-                    params[f"v{i}"] = value
-                    params[f"vt{i}"] = value_text
-                    params[f"u{i}"] = m.get("unit")
-                    params[f"sr{i}"] = _canonical_json(m.get("source_ref", {}))
-                    params[f"t{i}"] = m.get("test_id")
-                # See write_flagged_rows above for why the VALUES columns are
-                # named via an inner SELECT rather than a column-alias list
-                # directly on MERGE's USING clause.
-                merge_sql = (
-                    f"MERGE INTO {self._table('run_metrics')} t "
-                    "USING (SELECT col1 AS run_id, col2 AS metric_name, col3 AS value, "
-                    "col4 AS value_text, col5 AS unit, col6 AS source_ref_json, col7 AS test_id "
-                    f"FROM (VALUES {values_sql})) s "
-                    "ON t.run_id = s.run_id AND t.metric_name = s.metric_name "
-                    "WHEN MATCHED THEN UPDATE SET value = s.value, value_text = s.value_text, "
-                    "unit = s.unit, source_ref_json = s.source_ref_json, test_id = s.test_id "
-                    "WHEN NOT MATCHED THEN INSERT (run_id, metric_name, value, value_text, unit, "
-                    "source_ref_json, test_id) VALUES (s.run_id, s.metric_name, s.value, "
-                    "s.value_text, s.unit, s.source_ref_json, s.test_id)"
-                )
-                # metric value is money/count data (CLAUDE.md P2/P3 gate review item 1)
-                # -- bind it as an explicit DOUBLE rather than the driver's inference.
-                self._execute_typed(conn, merge_sql, params)
+        # Each batch (and the prune below) runs under its own _exec1_typed/
+        # _exec1 rather than one `with self._cursor_ctx()` spanning every
+        # batch (see _exec1's docstring).
+        for batch in _batched(metrics, _MERGE_BATCH_SIZE):
+            values_sql = ", ".join(
+                f"(:run_id, :n{i}, :v{i}, :vt{i}, :u{i}, :sr{i}, :t{i})" for i in range(len(batch))
+            )
+            params: dict = {"run_id": run_id}
+            for i, m in enumerate(batch):
+                value, value_text = _metric_value_columns(m.get("value"))
+                params[f"n{i}"] = m["metric_name"]
+                params[f"v{i}"] = value
+                params[f"vt{i}"] = value_text
+                params[f"u{i}"] = m.get("unit")
+                params[f"sr{i}"] = _canonical_json(m.get("source_ref", {}))
+                params[f"t{i}"] = m.get("test_id")
+            # See write_flagged_rows above for why the VALUES columns are
+            # named via an inner SELECT rather than a column-alias list
+            # directly on MERGE's USING clause.
+            merge_sql = (
+                f"MERGE INTO {self._table('run_metrics')} t "
+                "USING (SELECT col1 AS run_id, col2 AS metric_name, col3 AS value, "
+                "col4 AS value_text, col5 AS unit, col6 AS source_ref_json, col7 AS test_id "
+                f"FROM (VALUES {values_sql})) s "
+                "ON t.run_id = s.run_id AND t.metric_name = s.metric_name "
+                "WHEN MATCHED THEN UPDATE SET value = s.value, value_text = s.value_text, "
+                "unit = s.unit, source_ref_json = s.source_ref_json, test_id = s.test_id "
+                "WHEN NOT MATCHED THEN INSERT (run_id, metric_name, value, value_text, unit, "
+                "source_ref_json, test_id) VALUES (s.run_id, s.metric_name, s.value, "
+                "s.value_text, s.unit, s.source_ref_json, s.test_id)"
+            )
+            # metric value is money/count data (CLAUDE.md P2/P3 gate review item 1)
+            # -- bind it as an explicit DOUBLE rather than the driver's inference.
+            self._exec1_typed(merge_sql, params)
 
-            orphans = existing_names - new_names
-            if orphans:
-                placeholders = ", ".join(f":m{i}" for i in range(len(orphans)))
-                params = {f"m{i}": name for i, name in enumerate(orphans)}
-                params["run_id"] = run_id
-                self._execute(
-                    conn,
-                    f"DELETE FROM {self._table('run_metrics')} WHERE run_id = :run_id "
-                    f"AND metric_name IN ({placeholders})",
-                    params,
-                )
+        orphans = existing_names - new_names
+        if orphans:
+            placeholders = ", ".join(f":m{i}" for i in range(len(orphans)))
+            params = {f"m{i}": name for i, name in enumerate(orphans)}
+            params["run_id"] = run_id
+            self._exec1(
+                f"DELETE FROM {self._table('run_metrics')} WHERE run_id = :run_id "
+                f"AND metric_name IN ({placeholders})",
+                params,
+            )
 
     def get_run_metrics(self, run_id: str) -> dict[str, dict]:
         with self._cursor_ctx() as conn:
@@ -1632,40 +1657,63 @@ class DeltaPersistence:
     def write_issues_for_findings(
         self, run_id: str, findings: list[dict], *, engagement_id, now: str
     ) -> list[dict]:
-        created: list[dict] = []
-        with self._cursor_ctx() as conn:
-            for finding in findings:
-                issue_id = f"ISS-{finding['finding_id']}"
+        # Was a per-finding SELECT-then-INSERT (2 round trips per finding --
+        # the exact row-by-row shape _MERGE_BATCH_SIZE's docstring already
+        # names as the pattern that made a large write take 20+ minutes live).
+        # findings is at most a run's finding count (bounded, but every extra
+        # round trip is extra time the caller -- the `find` node -- holds up
+        # the run, and (before the _exec1 fix above) extra time the shared
+        # connection's lock was held against a concurrent /run/<id> render.
+        # Now one batched existence check plus one batched multi-row INSERT
+        # for whatever is actually new, each its own short _exec1/cursor_ctx.
+        if not findings:
+            return []
+        issue_id_by_finding = {f["finding_id"]: f"ISS-{f['finding_id']}" for f in findings}
+        all_issue_ids = list(issue_id_by_finding.values())
+
+        existing: set[str] = set()
+        for id_batch in _batched(all_issue_ids, _MERGE_BATCH_SIZE):
+            placeholders = ", ".join(f":i{i}" for i in range(len(id_batch)))
+            params = {f"i{i}": iid for i, iid in enumerate(id_batch)}
+            with self._cursor_ctx() as conn:
                 cur = self._execute(
                     conn,
-                    f"SELECT issue_id FROM {self._table('issues')} WHERE issue_id = :issue_id",
-                    {"issue_id": issue_id},
+                    f"SELECT issue_id FROM {self._table('issues')} WHERE issue_id IN ({placeholders})",
+                    params,
                 )
-                if _fetchone_dict(cur) is not None:
-                    continue
-                self._execute(
-                    conn,
-                    f"INSERT INTO {self._table('issues')} (issue_id, engagement_id, rule_id, title, "
-                    "description, rating, status, raised_by, raised_at, owner, due_date, "
-                    "remediation_plan, management_response, prior_issue_id, finding_ids_json, "
-                    "run_ids_json, created_at, updated_at) VALUES (:issue_id, :engagement_id, "
-                    ":rule_id, :title, :description, :rating, :status, NULL, NULL, NULL, NULL, "
-                    "NULL, NULL, NULL, :finding_ids_json, :run_ids_json, :created_at, :updated_at)",
-                    {
-                        "issue_id": issue_id,
-                        "engagement_id": engagement_id,
-                        "rule_id": finding.get("rule_id"),
-                        "title": finding["title"],
-                        "description": finding.get("observation"),
-                        "rating": finding.get("severity"),
-                        "status": "draft",
-                        "finding_ids_json": _canonical_json([finding["finding_id"]]),
-                        "run_ids_json": _canonical_json([run_id]),
-                        "created_at": now,
-                        "updated_at": now,
-                    },
-                )
-                created.append({"issue_id": issue_id, "finding_id": finding["finding_id"]})
+                existing.update(r["issue_id"] for r in _fetchall_dicts(cur))
+
+        to_create = [f for f in findings if issue_id_by_finding[f["finding_id"]] not in existing]
+        created = [
+            {"issue_id": issue_id_by_finding[f["finding_id"]], "finding_id": f["finding_id"]}
+            for f in to_create
+        ]
+        for batch in _batched(to_create, _MERGE_BATCH_SIZE):
+            values_sql = ", ".join(
+                f"(:iss{i}, :eng{i}, :rule{i}, :title{i}, :desc{i}, :rating{i}, :status{i}, "
+                f"NULL, NULL, NULL, NULL, NULL, NULL, NULL, :fid{i}, :rid{i}, :created{i}, :updated{i})"
+                for i in range(len(batch))
+            )
+            params = {}
+            for i, finding in enumerate(batch):
+                params[f"iss{i}"] = issue_id_by_finding[finding["finding_id"]]
+                params[f"eng{i}"] = engagement_id
+                params[f"rule{i}"] = finding.get("rule_id")
+                params[f"title{i}"] = finding["title"]
+                params[f"desc{i}"] = finding.get("observation")
+                params[f"rating{i}"] = finding.get("severity")
+                params[f"status{i}"] = "draft"
+                params[f"fid{i}"] = _canonical_json([finding["finding_id"]])
+                params[f"rid{i}"] = _canonical_json([run_id])
+                params[f"created{i}"] = now
+                params[f"updated{i}"] = now
+            self._exec1(
+                f"INSERT INTO {self._table('issues')} (issue_id, engagement_id, rule_id, title, "
+                "description, rating, status, raised_by, raised_at, owner, due_date, "
+                "remediation_plan, management_response, prior_issue_id, finding_ids_json, "
+                f"run_ids_json, created_at, updated_at) VALUES {values_sql}",
+                params,
+            )
         return created
 
     def write_management_actions(self, run_id: str, actions: list[dict], *, now: str) -> None:
@@ -2027,51 +2075,53 @@ class DeltaPersistence:
             )
             existing_keys = {(r["test_id"], r["source"], r["row_key"]) for r in _fetchall_dicts(cur)}
 
-            for batch in _batched(rows, _MERGE_BATCH_SIZE):
-                values_sql = ", ".join(
-                    f"(:run_id, :t{i}, :s{i}, :rk{i}, :lk{i}, :sp{i}, :ex{i})" for i in range(len(batch))
-                )
-                params: dict = {"run_id": run_id}
-                for i, r in enumerate(batch):
-                    params[f"t{i}"] = r["test_id"]
-                    params[f"s{i}"] = r["source"]
-                    params[f"rk{i}"] = r["row_key"]
-                    params[f"lk{i}"] = r["line_key"]
-                    params[f"sp{i}"] = r["spend_amount"]
-                    params[f"ex{i}"] = r.get("excess_amount")
-                merge_sql = (
-                    f"MERGE INTO {self._table('test_line_values')} t "
-                    "USING (SELECT col1 AS run_id, col2 AS test_id, col3 AS source, "
-                    "col4 AS row_key, col5 AS line_key, col6 AS spend_amount, col7 AS excess_amount "
-                    f"FROM (VALUES {values_sql})) s "
-                    "ON t.run_id = s.run_id AND t.test_id = s.test_id AND t.source = s.source "
-                    "AND t.row_key = s.row_key "
-                    "WHEN MATCHED THEN UPDATE SET line_key = s.line_key, "
-                    "spend_amount = s.spend_amount, excess_amount = s.excess_amount "
-                    "WHEN NOT MATCHED THEN INSERT (run_id, test_id, source, row_key, line_key, "
-                    "spend_amount, excess_amount) VALUES (s.run_id, s.test_id, s.source, s.row_key, "
-                    "s.line_key, s.spend_amount, s.excess_amount)"
-                )
-                # spend_amount/excess_amount are money (CLAUDE.md P2/P3 gate review
-                # item 1) -- bind them as explicit DOUBLEs rather than the driver's
-                # inference.
-                self._execute_typed(conn, merge_sql, params)
+        # Each batch (and the prune below) runs under its own _exec1_typed/
+        # _exec1 rather than one `with self._cursor_ctx()` spanning every
+        # batch (see _exec1's docstring).
+        for batch in _batched(rows, _MERGE_BATCH_SIZE):
+            values_sql = ", ".join(
+                f"(:run_id, :t{i}, :s{i}, :rk{i}, :lk{i}, :sp{i}, :ex{i})" for i in range(len(batch))
+            )
+            params: dict = {"run_id": run_id}
+            for i, r in enumerate(batch):
+                params[f"t{i}"] = r["test_id"]
+                params[f"s{i}"] = r["source"]
+                params[f"rk{i}"] = r["row_key"]
+                params[f"lk{i}"] = r["line_key"]
+                params[f"sp{i}"] = r["spend_amount"]
+                params[f"ex{i}"] = r.get("excess_amount")
+            merge_sql = (
+                f"MERGE INTO {self._table('test_line_values')} t "
+                "USING (SELECT col1 AS run_id, col2 AS test_id, col3 AS source, "
+                "col4 AS row_key, col5 AS line_key, col6 AS spend_amount, col7 AS excess_amount "
+                f"FROM (VALUES {values_sql})) s "
+                "ON t.run_id = s.run_id AND t.test_id = s.test_id AND t.source = s.source "
+                "AND t.row_key = s.row_key "
+                "WHEN MATCHED THEN UPDATE SET line_key = s.line_key, "
+                "spend_amount = s.spend_amount, excess_amount = s.excess_amount "
+                "WHEN NOT MATCHED THEN INSERT (run_id, test_id, source, row_key, line_key, "
+                "spend_amount, excess_amount) VALUES (s.run_id, s.test_id, s.source, s.row_key, "
+                "s.line_key, s.spend_amount, s.excess_amount)"
+            )
+            # spend_amount/excess_amount are money (CLAUDE.md P2/P3 gate review
+            # item 1) -- bind them as explicit DOUBLEs rather than the driver's
+            # inference.
+            self._exec1_typed(merge_sql, params)
 
-            orphans = existing_keys - new_keys
-            if orphans:
-                clauses = []
-                params = {"run_id": run_id}
-                for i, (test_id, source, row_key) in enumerate(orphans):
-                    clauses.append(f"(test_id = :t{i} AND source = :s{i} AND row_key = :rk{i})")
-                    params[f"t{i}"] = test_id
-                    params[f"s{i}"] = source
-                    params[f"rk{i}"] = row_key
-                self._execute(
-                    conn,
-                    f"DELETE FROM {self._table('test_line_values')} WHERE run_id = :run_id "
-                    f"AND ({' OR '.join(clauses)})",
-                    params,
-                )
+        orphans = existing_keys - new_keys
+        if orphans:
+            clauses = []
+            params = {"run_id": run_id}
+            for i, (test_id, source, row_key) in enumerate(orphans):
+                clauses.append(f"(test_id = :t{i} AND source = :s{i} AND row_key = :rk{i})")
+                params[f"t{i}"] = test_id
+                params[f"s{i}"] = source
+                params[f"rk{i}"] = row_key
+            self._exec1(
+                f"DELETE FROM {self._table('test_line_values')} WHERE run_id = :run_id "
+                f"AND ({' OR '.join(clauses)})",
+                params,
+            )
 
     def list_test_line_values(self, run_id: str) -> list[dict]:
         with self._cursor_ctx() as conn:
@@ -2260,43 +2310,44 @@ class DeltaPersistence:
             )
             existing_keys = {r["row_key"] for r in _fetchall_dicts(cur)}
 
-            for batch in _batched(rows, _MERGE_BATCH_SIZE):
-                values_sql = ", ".join(f"(:run_id, :k{i}, :pe{i}, :c{i}, :r{i}, :ci{i}, :t{i})" for i in range(len(batch)))
-                params: dict = {"run_id": run_id}
-                for i, r in enumerate(batch):
-                    params[f"k{i}"] = r["row_key"]
-                    params[f"pe{i}"] = bool(r["personal_expense"])
-                    params[f"c{i}"] = float(r["confidence"])
-                    params[f"r{i}"] = r.get("rationale")
-                    params[f"ci{i}"] = r["call_id"]
-                    params[f"t{i}"] = r["created_at"]
-                self._execute(
-                    conn,
-                    f"MERGE INTO {self._table('t43_classifications')} t "
-                    "USING (SELECT col1 AS run_id, col2 AS row_key, col3 AS personal_expense, "
-                    "col4 AS confidence, col5 AS rationale, col6 AS call_id, col7 AS created_at "
-                    f"FROM (VALUES {values_sql})) s "
-                    "ON t.run_id = s.run_id AND t.row_key = s.row_key "
-                    "WHEN MATCHED THEN UPDATE SET personal_expense = s.personal_expense, "
-                    "confidence = s.confidence, rationale = s.rationale, call_id = s.call_id, "
-                    "created_at = s.created_at "
-                    "WHEN NOT MATCHED THEN INSERT (run_id, row_key, personal_expense, confidence, "
-                    "rationale, call_id, created_at) VALUES (s.run_id, s.row_key, s.personal_expense, "
-                    "s.confidence, s.rationale, s.call_id, s.created_at)",
-                    params,
-                )
+        # Each batch (and the prune below) runs under its own _exec1 rather
+        # than one `with self._cursor_ctx()` spanning every batch (see
+        # _exec1's docstring).
+        for batch in _batched(rows, _MERGE_BATCH_SIZE):
+            values_sql = ", ".join(f"(:run_id, :k{i}, :pe{i}, :c{i}, :r{i}, :ci{i}, :t{i})" for i in range(len(batch)))
+            params: dict = {"run_id": run_id}
+            for i, r in enumerate(batch):
+                params[f"k{i}"] = r["row_key"]
+                params[f"pe{i}"] = bool(r["personal_expense"])
+                params[f"c{i}"] = float(r["confidence"])
+                params[f"r{i}"] = r.get("rationale")
+                params[f"ci{i}"] = r["call_id"]
+                params[f"t{i}"] = r["created_at"]
+            self._exec1(
+                f"MERGE INTO {self._table('t43_classifications')} t "
+                "USING (SELECT col1 AS run_id, col2 AS row_key, col3 AS personal_expense, "
+                "col4 AS confidence, col5 AS rationale, col6 AS call_id, col7 AS created_at "
+                f"FROM (VALUES {values_sql})) s "
+                "ON t.run_id = s.run_id AND t.row_key = s.row_key "
+                "WHEN MATCHED THEN UPDATE SET personal_expense = s.personal_expense, "
+                "confidence = s.confidence, rationale = s.rationale, call_id = s.call_id, "
+                "created_at = s.created_at "
+                "WHEN NOT MATCHED THEN INSERT (run_id, row_key, personal_expense, confidence, "
+                "rationale, call_id, created_at) VALUES (s.run_id, s.row_key, s.personal_expense, "
+                "s.confidence, s.rationale, s.call_id, s.created_at)",
+                params,
+            )
 
-            orphans = existing_keys - new_keys
-            if orphans:
-                placeholders = ", ".join(f":k{i}" for i in range(len(orphans)))
-                params = {f"k{i}": key for i, key in enumerate(orphans)}
-                params["run_id"] = run_id
-                self._execute(
-                    conn,
-                    f"DELETE FROM {self._table('t43_classifications')} WHERE run_id = :run_id "
-                    f"AND row_key IN ({placeholders})",
-                    params,
-                )
+        orphans = existing_keys - new_keys
+        if orphans:
+            placeholders = ", ".join(f":k{i}" for i in range(len(orphans)))
+            params = {f"k{i}": key for i, key in enumerate(orphans)}
+            params["run_id"] = run_id
+            self._exec1(
+                f"DELETE FROM {self._table('t43_classifications')} WHERE run_id = :run_id "
+                f"AND row_key IN ({placeholders})",
+                params,
+            )
 
     def list_classification_results(self, run_id: str) -> list[dict]:
         with self._cursor_ctx() as conn:

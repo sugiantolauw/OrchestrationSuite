@@ -195,6 +195,36 @@ def get_run(run_id: str) -> dict | None:
         return None
 
 
+def get_run_and_narration(run_id: str) -> tuple[dict | None, dict | None]:
+    """`/run/<id>`'s poll callback (app/src/run_status.py's
+    `_run_and_narration`) needs both get_run's payload and, on an
+    awaiting_signoff run, get_narration_review's panel data. Calling them
+    separately used to load this run's RunState from Delta twice per render
+    -- every poll, every action re-render -- on top of whatever else that
+    render was already waiting on under concurrent load (P3/P4 perf gap
+    review 2026-09-25, the 183.9s single-render measurement). One
+    persistence.load_state, reused for both.
+
+    Falls back to the two separate calls, unchanged, when there is no real
+    `.persistence` to share a load across (app/tests/fake_service.py) --
+    `service.get_run` there has no `state=` parameter to accept."""
+    from orchestrator.errors import RunNotFound
+
+    ctx = get_context()
+    persistence = getattr(ctx, "persistence", None)
+    if persistence is None:
+        run = get_run(run_id)
+        narration = get_narration_review(run_id) if run and run.get("status") == "awaiting_signoff" else None
+        return run, narration
+    try:
+        state = persistence.load_state(run_id)
+    except RunNotFound:
+        return None, None
+    run = service.get_run(ctx, run_id, state=state)
+    narration = get_narration_review(run_id, state=state) if run.get("status") == "awaiting_signoff" else None
+    return run, narration
+
+
 def confirm_plan(run_id: str, actor: str) -> None:
     service.confirm_plan(get_context(), run_id, actor)
 
@@ -229,7 +259,7 @@ _EMPTY_NARRATION_REVIEW = {
 }
 
 
-def get_narration_review(run_id: str) -> dict | None:
+def get_narration_review(run_id: str, *, state=None) -> dict | None:
     """Resolves this run's model-written text and AI-proposed candidates for
     the `/run/<id>` review panel (UI-1/UI-2/UI-7). No `orchestrator.service`
     read-model exists for this yet (`decide_candidate`/`edit_narrative`/
@@ -248,6 +278,15 @@ def get_narration_review(run_id: str) -> dict | None:
     `run_values` builders (§4.6) just to show a reviewer what the model
     wrote.
 
+    `state`, when given, is a RunState the caller already loaded for this
+    same run_id (get_run_and_narration below, the one real caller) -- skips
+    a second persistence.load_state round trip on top of get_run's own
+    (P3/P4 perf gap review 2026-09-25: /run/<id>'s poll callback used to
+    call get_run and get_narration_review back to back, each loading this
+    run's state independently). A caller passing `state` is asserting it is
+    already this run's state; RunNotFound cannot be raised in that case, so
+    it is only caught below when this function loads state itself.
+
     The fake backend (app/tests/fake_service.py) has no `.persistence` to
     read candidates/narratives from -- there is genuinely nothing to review
     there (a fake run never had narration), not a hidden default (CLAUDE.md
@@ -262,10 +301,11 @@ def get_narration_review(run_id: str) -> dict | None:
     persistence = getattr(ctx, "persistence", None)
     if persistence is None:
         return dict(_EMPTY_NARRATION_REVIEW)
-    try:
-        state = persistence.load_state(run_id)
-    except RunNotFound:
-        return None
+    if state is None:
+        try:
+            state = persistence.load_state(run_id)
+        except RunNotFound:
+            return None
 
     findings = persistence.list_findings(run_id)
     metrics = persistence.get_run_metrics(run_id)

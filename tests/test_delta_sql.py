@@ -23,10 +23,20 @@ class FakeCursor:
         self._pos = 0
 
     def execute(self, sql_text, params=None):
-        self.conn.calls.append((sql_text, dict(params or {})))
+        # `params` is a plain dict for _execute's calls, but a list of typed
+        # Parameter objects (each carrying .name/.value) for _execute_typed's
+        # -- normalise both into the same plain dict shape callers/handlers
+        # below actually work with.
+        if params is None:
+            named = {}
+        elif isinstance(params, dict):
+            named = dict(params)
+        else:
+            named = {p.name: p.value for p in params}
+        self.conn.calls.append((sql_text, named))
         handler = self.conn.handlers.get(self._match(sql_text))
         if handler is not None:
-            cols, rows = handler(sql_text, params or {})
+            cols, rows = handler(sql_text, named)
             self.description = [(c,) for c in cols]
             self._rows = list(rows)
         else:
@@ -429,6 +439,189 @@ def test_connection_reused_across_calls_not_reopened_every_time():
     with pytest.raises(RunNotFound):
         p.get_fingerprint("FP-2")
     assert factory_calls["n"] == 1  # same connection reused, not reopened per call
+
+
+# ── write_issues_for_findings: batched, not one SELECT+INSERT per finding
+# (P3/P4 perf gap review 2026-09-25 -- the exact row-by-row shape
+# _MERGE_BATCH_SIZE's own docstring already names as the pattern that made a
+# large write take 20+ minutes live; this one was missed when
+# write_flagged_rows/write_run_metrics were fixed) ─────────────────────────
+
+def _finding_for_issue(finding_id: str, **overrides) -> dict:
+    row = {
+        "finding_id": finding_id, "rule_id": f"SKILL.{finding_id}", "title": f"Finding {finding_id}",
+        "observation": "obs", "severity": "Medium",
+    }
+    row.update(overrides)
+    return row
+
+
+def test_write_issues_for_findings_is_two_statements_not_two_per_finding():
+    handlers = {
+        "SELECT issue_id FROM cat1.sch1.issues": lambda sql_text, params: (["issue_id"], []),
+        "INSERT INTO cat1.sch1.issues": lambda sql_text, params: ([], []),
+    }
+    conn = FakeConnection(handlers)
+    p = DeltaPersistence(_settings(), connection_factory=lambda: conn)
+
+    findings = [_finding_for_issue(f"F{i}") for i in range(12)]
+    created = p.write_issues_for_findings("RUN-1", findings, engagement_id="ENG-1", now=canonical_ts(0))
+
+    assert {c["finding_id"] for c in created} == {f"F{i}" for i in range(12)}
+    select_calls = [c for c in conn.calls if c[0].startswith("SELECT issue_id FROM cat1.sch1.issues")]
+    insert_calls = [c for c in conn.calls if c[0].startswith("INSERT INTO cat1.sch1.issues")]
+    # One existence check for all 12 findings (a single IN-list, not 12 separate
+    # SELECTs) and one batched multi-row INSERT for whatever is new (not 12
+    # separate INSERTs) -- 12 findings is well under _MERGE_BATCH_SIZE (250),
+    # so each is exactly one statement.
+    assert len(select_calls) == 1
+    assert len(insert_calls) == 1
+    # The single INSERT's VALUES list carries all 12 rows -- 11 params per row
+    # (iss/eng/rule/title/desc/rating/status/fid/rid/created/updated).
+    assert len(insert_calls[0][1]) == 12 * 11
+
+
+def test_write_issues_for_findings_skips_existing_and_only_inserts_new():
+    existing_issue_id = "ISS-F1"
+
+    def _select_handler(sql_text, params):
+        # The existence check's IN-list should be asked about every finding's
+        # issue_id -- only ISS-F1 is reported back as already present.
+        assert set(params.values()) == {"ISS-F0", "ISS-F1", "ISS-F2"}
+        return (["issue_id"], [(existing_issue_id,)])
+
+    handlers = {
+        "SELECT issue_id FROM cat1.sch1.issues": _select_handler,
+        "INSERT INTO cat1.sch1.issues": lambda sql_text, params: ([], []),
+    }
+    conn = FakeConnection(handlers)
+    p = DeltaPersistence(_settings(), connection_factory=lambda: conn)
+
+    findings = [_finding_for_issue("F0"), _finding_for_issue("F1"), _finding_for_issue("F2")]
+    created = p.write_issues_for_findings("RUN-1", findings, engagement_id="ENG-1", now=canonical_ts(0))
+
+    assert {c["finding_id"] for c in created} == {"F0", "F2"}  # F1 already had an issue
+    insert_calls = [c for c in conn.calls if c[0].startswith("INSERT INTO cat1.sch1.issues")]
+    assert len(insert_calls) == 1
+    assert len(insert_calls[0][1]) == 2 * 11  # only F0 and F2's rows, not F1's
+
+
+def test_write_issues_for_findings_empty_list_issues_no_statements():
+    conn = FakeConnection({})
+    p = DeltaPersistence(_settings(), connection_factory=lambda: conn)
+    assert p.write_issues_for_findings("RUN-1", [], engagement_id="ENG-1", now=canonical_ts(0)) == []
+    assert conn.calls == []
+
+
+# ── Batched writers release the connection's lock between statements
+# (P3/P4 perf gap review 2026-09-25): write_flagged_rows/write_run_metrics/
+# put_test_line_values/write_classification_results used to hold one
+# `with self._cursor_ctx()` (and so one acquisition of `_conn_lock`) across
+# their entire existence-check SELECT + every MERGE batch + the prune
+# DELETE. A concurrent caller (a /run/<id> render on another thread) waited
+# for the whole write, not one statement of it. The fix (`_exec1`) trades a
+# single held lock for several short ones; these tests assert nothing about
+# locking directly (FakeConnection is single-threaded) but pin the exact
+# statement sequence the fix depends on, and that results are unchanged. ───
+
+def test_write_flagged_rows_issues_one_select_then_one_merge_per_batch():
+    handlers = {
+        "SELECT source, row_key, flag FROM cat1.sch1.flagged_rows": lambda s, p: (["source", "row_key", "flag"], []),
+        "MERGE INTO cat1.sch1.flagged_rows": lambda s, p: ([], []),
+    }
+    conn = FakeConnection(handlers)
+    p = DeltaPersistence(_settings(), connection_factory=lambda: conn)
+
+    rows = [{"source": "expense", "row_key": f"R{i}", "flag": "RF_X", "group_id": None} for i in range(5)]
+    p.write_flagged_rows("RUN-1", rows)
+
+    select_calls = [c for c in conn.calls if c[0].startswith("SELECT source, row_key, flag")]
+    merge_calls = [c for c in conn.calls if c[0].startswith("MERGE INTO cat1.sch1.flagged_rows")]
+    assert len(select_calls) == 1
+    assert len(merge_calls) == 1  # 5 rows is one batch (_MERGE_BATCH_SIZE=250)
+
+
+def test_write_run_metrics_issues_one_select_then_one_merge_per_batch():
+    handlers = {
+        "SELECT metric_name FROM cat1.sch1.run_metrics": lambda s, p: (["metric_name"], []),
+        "MERGE INTO cat1.sch1.run_metrics": lambda s, p: ([], []),
+    }
+    conn = FakeConnection(handlers)
+    p = DeltaPersistence(_settings(), connection_factory=lambda: conn)
+
+    metrics = [{"metric_name": f"m{i}", "value": 1.0, "unit": "count", "source_ref": {}, "test_id": "T1"} for i in range(5)]
+    p.write_run_metrics("RUN-1", metrics)
+
+    select_calls = [c for c in conn.calls if c[0].startswith("SELECT metric_name FROM cat1.sch1.run_metrics")]
+    merge_calls = [c for c in conn.calls if c[0].startswith("MERGE INTO cat1.sch1.run_metrics")]
+    assert len(select_calls) == 1
+    assert len(merge_calls) == 1
+
+
+def test_batched_write_releases_the_lock_between_batches_for_a_concurrent_reader():
+    """The actual point of _exec1 (see its docstring): a concurrent reader
+    (a /run/<id> render on another thread, going through the same shared
+    connection's `_conn_lock`) must not have to wait for a whole multi-batch
+    write to finish -- only for whichever single statement is in flight when
+    it asks. Simulates warehouse latency with a sleep inside the MERGE
+    handler and measures how long a reader thread waits to acquire
+    `_cursor_ctx()` while a 3-batch write is in progress on another thread."""
+    import threading
+    import time
+
+    batch_sleep_s = 0.05
+    n_batches = 3
+
+    def _merge_handler(sql_text, params):
+        time.sleep(batch_sleep_s)
+        return ([], [])
+
+    handlers = {
+        "SELECT source, row_key, flag FROM cat1.sch1.flagged_rows": lambda s, p: (["source", "row_key", "flag"], []),
+        "MERGE INTO cat1.sch1.flagged_rows": _merge_handler,
+    }
+    conn = FakeConnection(handlers)
+    p = DeltaPersistence(_settings(), connection_factory=lambda: conn)
+    rows = [
+        {"source": "expense", "row_key": f"R{i}", "flag": "RF_X", "group_id": None}
+        for i in range(n_batches * 250)
+    ]
+
+    writer_started = threading.Event()
+    writer_done = threading.Event()
+    reader_acquired_at: list[float] = []
+
+    def _writer():
+        writer_started.set()
+        p.write_flagged_rows("RUN-1", rows)
+        writer_done.set()
+
+    def _reader():
+        writer_started.wait(timeout=5)
+        time.sleep(batch_sleep_s * 0.5)  # land mid-write, after its first MERGE batch
+        with p._cursor_ctx():
+            reader_acquired_at.append(time.monotonic())
+
+    t_writer = threading.Thread(target=_writer)
+    t_reader = threading.Thread(target=_reader)
+    start = time.monotonic()
+    t_writer.start()
+    t_reader.start()
+    t_writer.join(timeout=5)
+    t_reader.join(timeout=5)
+
+    assert writer_done.is_set(), "writer thread did not finish"
+    assert reader_acquired_at, "reader thread never acquired the connection"
+    reader_wait = reader_acquired_at[0] - start
+    # A whole write is n_batches MERGE round trips (~batch_sleep_s each) plus
+    # the existence-check SELECT -- if the lock were held for the entire
+    # method (the pre-fix shape), the reader could not acquire it until
+    # close to n_batches * batch_sleep_s had elapsed. Releasing the lock
+    # between batches lets the reader in well before that.
+    assert reader_wait < (n_batches - 0.75) * batch_sleep_s, (
+        f"reader waited {reader_wait:.3f}s -- looks like the lock was held for the whole write, "
+        f"not released between batches"
+    )
 
 
 def test_migrate_swallows_already_exists_errors_on_alter_statements(tmp_path):
