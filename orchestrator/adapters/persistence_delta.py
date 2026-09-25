@@ -6,6 +6,7 @@ import json
 import logging
 import threading
 import time
+import weakref
 from pathlib import Path
 from typing import Callable
 
@@ -491,21 +492,40 @@ class DeltaPersistence:
         self.ddl_dir = Path(ddl_dir) if ddl_dir else _DEFAULT_DDL_DIR
         self._connection_factory = connection_factory or self._default_connection_factory
         self._prefix = f"{settings.catalog}.{settings.schema}"
-        self._conn_lock = threading.Lock()
-        self._conn = None
-        # P3 gap-audit review follow-up (RUN-5E0D4353A7BB, 2026-09-25): lease
-        # operations (acquire_lease/renew_lease/release_lease/expired_leases)
-        # get their OWN connection and lock, never `_conn`/`_conn_lock`. A
-        # single DeltaPersistence instance is shared by a whole process
-        # (ThreadExecutor and every node it runs), so the SAME `_conn_lock`
-        # previously serialised a heartbeat thread's renew_lease behind
-        # whatever the pipeline thread's own node output writes were doing on
-        # the main connection (write_flagged_rows/write_run_metrics loop over
-        # hundreds of batched MERGEs, each a live round trip) -- a long single
-        # node call could starve this run's own lease renewal for its whole
-        # duration. Renewal must never queue behind a node's own writes.
-        self._lease_conn_lock = threading.Lock()
-        self._lease_conn = None
+        # P3/P4 perf gap review (2026-09-25): one shared connection behind one
+        # lock (`_conn`/`_conn_lock`) made every reader and writer on the
+        # process -- the web tier's /run/<id> render and every executor
+        # node's output writes, including a DIFFERENT run's -- queue behind
+        # whichever thread held the lock, one statement at a time, each
+        # 2-8s against a live warehouse. Every thread that calls into this
+        # instance now lazily opens and keeps its OWN connection
+        # (threading.local, never shared): a render never waits behind a
+        # node's writes, and two concurrent runs' executor threads never wait
+        # behind each other. This also subsumes the earlier lease/main
+        # connection split (RUN-5E0D4353A7BB, `_lease_conn`/
+        # `_lease_conn_lock`) -- the heartbeat thread already runs on its own
+        # OS thread (executor.py's `_heartbeat_loop`), so it now gets its own
+        # connection for free; renewal was never blocked by a node's writes
+        # because of *which thread* runs it, not a hand-maintained second
+        # connection.
+        #
+        # Connection bound: there is one DeltaPersistence per process
+        # (orchestrator/service.py's build_app_context), so the number of
+        # connections open at once equals the number of distinct threads that
+        # have called into THIS instance so far. In this deployment
+        # (app.yaml's `python app/app.py`, Werkzeug's dev server with
+        # `threaded=True`) that is: the web tier's per-HTTP-request threads
+        # (unbounded in code, bounded in practice by concurrent requests
+        # against one App) plus ThreadExecutor's fixed threads -- up to
+        # MAX_CONCURRENT_RUNS node-execution threads (default 2), one
+        # admission thread and one heartbeat thread, i.e. 4 fixed threads
+        # plus whatever the web tier has in flight. A connection is opened
+        # lazily on a thread's first call and closed when that thread exits
+        # (`_ThreadConnHolder.__del__`, via CPython's per-thread cleanup of
+        # `threading.local` storage) or when `close()` is called explicitly.
+        self._local = threading.local()
+        self._registry: dict[int, "weakref.ReferenceType[_ThreadConnHolder]"] = {}
+        self._registry_lock = threading.Lock()
 
     def _default_connection_factory(self):
         from databricks import sql
@@ -522,27 +542,22 @@ class DeltaPersistence:
     def _table(self, name: str) -> str:
         return f"{self._prefix}.{name}"
 
-    # One connection is opened lazily and reused for the life of this instance (a
-    # DeltaPersistence is expected to live for the process, not per-call) instead of
-    # opening a fresh one on every method call. On a connection-shaped error the
-    # connection is dropped and reopened exactly once before the statement is retried
-    # (CLAUDE.md §9C non-blocking item).
+    # Each calling thread's connection is opened lazily on its first call and reused
+    # for the life of that thread (see the connection-bound docstring in __init__)
+    # instead of opening a fresh one per call or sharing one across threads. On a
+    # connection-shaped error THIS thread's connection is dropped and reopened
+    # exactly once before the statement is retried (CLAUDE.md §9C non-blocking item)
+    # -- another thread's own connection is untouched.
     def _cursor_ctx(self):
         return _CursorCtx(self)
 
-    # Runs exactly one statement under its own (short) acquire/release of the
-    # shared connection's lock, rather than a caller holding `_cursor_ctx()`
-    # across a whole batched write. A batched write can still be dozens of
-    # round trips for a large population (_MERGE_BATCH_SIZE's own docstring:
-    # a several-hundred-row write already needed this once for row-by-row
-    # MERGEs) -- holding the lock for the WHOLE write serialises every other
-    # thread's persistence call behind it, not just one statement of it,
-    # including a concurrent /run/<id> render's get_run/get_narration_review
-    # (P3/P4 perf gap review 2026-09-25: a single render measured 183.9s
-    # against the real warehouse under concurrent-run load). Delta statements
-    # here are individually atomic (no explicit BEGIN/COMMIT spans one), so
-    # releasing the lock between them changes only how long OTHER threads
-    # wait, never what this write itself commits.
+    # Runs exactly one statement via `_cursor_ctx()` rather than a caller holding
+    # one connection across a whole batched write. With per-thread connections this
+    # no longer changes what any OTHER thread waits for (nothing is shared for it to
+    # wait on -- that was the pre-fix, single-shared-connection shape: P3/P4 perf gap
+    # review 2026-09-25, a single /run/<id> render measured 183.9s against the real
+    # warehouse under concurrent-run load). It still scopes a batch's own
+    # connection-error retry to one statement rather than the whole write.
     def _exec1(self, sql_text: str, params: dict | None = None):
         with self._cursor_ctx() as conn:
             return self._execute(conn, sql_text, params)
@@ -550,34 +565,46 @@ class DeltaPersistence:
     def _exec1_typed(self, sql_text: str, params: dict | None = None):
         with self._cursor_ctx() as conn:
             return self._execute_typed(conn, sql_text, params)
-    # Lease operations' own connection/lock -- see the docstring on
-    # self._lease_conn_lock in __init__. Same lazy-open-once-reuse and
-    # reconnect-on-connection-error shape as the main connection, just kept
-    # structurally separate so it is never blocked by it.
-    def _lease_cursor_ctx(self):
-        return _CursorCtx(self, lease=True)
 
-    def _get_connection_locked(self, *, lease: bool = False):
-        if lease:
-            if self._lease_conn is None:
-                self._lease_conn = self._connection_factory()
-            return self._lease_conn
-        if self._conn is None:
-            self._conn = self._connection_factory()
-        return self._conn
+    def _get_connection(self):
+        holder = getattr(self._local, "holder", None)
+        if holder is None:
+            conn = self._connection_factory()
+            holder = _ThreadConnHolder(conn)
+            self._local.holder = holder
+            with self._registry_lock:
+                self._registry[threading.get_ident()] = weakref.ref(holder)
+                self._prune_dead_registry_entries_locked()
+        return holder.conn
 
-    def _execute(self, conn, sql_text: str, params: dict | None = None, *, lease: bool = False):
+    def _prune_dead_registry_entries_locked(self) -> None:
+        # Called with `_registry_lock` held, on every new connection. Bounds
+        # the registry dict's own footprint to roughly the threads CURRENTLY
+        # holding a connection rather than every thread that ever has --
+        # Werkzeug's threaded dev server (app.yaml's `threaded=True`) spawns
+        # a new thread per HTTP request, so thread idents churn over the
+        # App's lifetime, and each exited thread's connection is already
+        # closed (`_ThreadConnHolder.__del__`) well before this runs; this
+        # only clears the now-dead weakref left behind in `_registry`.
+        dead = [ident for ident, ref in self._registry.items() if ref() is None]
+        for ident in dead:
+            del self._registry[ident]
+
+    def _drop_connection(self) -> None:
+        # Drops THIS thread's connection only. The registry entry is a
+        # weakref (never a strong ref), so it simply goes stale once the
+        # holder is garbage-collected -- nothing to remove from it here.
+        self._local.holder = None
+
+    def _execute(self, conn, sql_text: str, params: dict | None = None):
         try:
             cur = conn.cursor()
             cur.execute(sql_text, params or {})
             return cur
         except Exception as exc:
             if _is_connection_error(exc):
-                if lease:
-                    self._lease_conn = None
-                else:
-                    self._conn = None
-                conn = self._get_connection_locked(lease=lease)
+                self._drop_connection()
+                conn = self._get_connection()
                 cur = conn.cursor()
                 cur.execute(sql_text, params or {})
                 return cur
@@ -604,12 +631,29 @@ class DeltaPersistence:
             return cur
         except Exception as exc:
             if _is_connection_error(exc):
-                self._conn = None
-                conn = self._get_connection_locked()
+                self._drop_connection()
+                conn = self._get_connection()
                 cur = conn.cursor()
                 cur.execute(sql_text, prepared)
                 return cur
             raise
+
+    def close(self) -> None:
+        """Best-effort, immediate close of every connection this instance has
+        opened across every thread that has called into it -- for a clean
+        process shutdown. Not required for correctness: a thread's own
+        connection already closes itself when that thread exits and its
+        threading.local storage is torn down (`_ThreadConnHolder.__del__`).
+        This exists for a caller that wants a deterministic close rather than
+        waiting on that. Idempotent; safe to call from any thread."""
+        self._drop_connection()
+        with self._registry_lock:
+            refs = list(self._registry.values())
+            self._registry.clear()
+        for ref in refs:
+            holder = ref()
+            if holder is not None:
+                holder.close()
 
     # ── migrations ───────────────────────────────────────────────────────────
 
@@ -2398,7 +2442,7 @@ class DeltaPersistence:
         # decided from num_affected_rows (this MERGE's own INSERT+UPDATE
         # count), never a separate SELECT after the write.
         expires_at = _add_seconds(now, ttl_s)
-        with self._lease_cursor_ctx() as conn:
+        with self._cursor_ctx() as conn:
             cur = self._execute(
                 conn,
                 f"MERGE INTO {self._table('run_leases')} t "
@@ -2409,41 +2453,41 @@ class DeltaPersistence:
                 "WHEN NOT MATCHED THEN INSERT (run_id, claimed_by, claimed_at, heartbeat_at, "
                 "lease_expires_at) VALUES (:run_id, :claimed_by, :now, :now, :expires_at)",
                 {"run_id": run_id, "claimed_by": worker_id, "now": now, "expires_at": expires_at},
-                lease=True,
             )
             return _num_affected_rows(cur) > 0
 
     def renew_lease(self, run_id: str, worker_id: str, *, ttl_s: float, now: str) -> bool:
-        # P3 gap-audit review follow-up (RUN-5E0D4353A7BB): its own connection
-        # (see __init__ / _lease_cursor_ctx) -- this must never queue behind a
-        # long node-output write sharing the main connection/lock.
+        # P3 gap-audit review follow-up (RUN-5E0D4353A7BB): this must never
+        # queue behind a long node-output write. It no longer needs a
+        # hand-maintained separate connection to guarantee that -- the
+        # heartbeat thread (executor.py's `_heartbeat_loop`) is its own OS
+        # thread, so `_cursor_ctx()` already hands it a connection distinct
+        # from whatever the pipeline thread is using (see __init__'s
+        # docstring on per-thread connections).
         expires_at = _add_seconds(now, ttl_s)
-        with self._lease_cursor_ctx() as conn:
+        with self._cursor_ctx() as conn:
             cur = self._execute(
                 conn,
                 f"UPDATE {self._table('run_leases')} SET heartbeat_at = :now, "
                 "lease_expires_at = :expires_at WHERE run_id = :run_id AND claimed_by = :claimed_by",
                 {"now": now, "expires_at": expires_at, "run_id": run_id, "claimed_by": worker_id},
-                lease=True,
             )
             return _num_affected_rows(cur) > 0
 
     def release_lease(self, run_id: str, worker_id: str) -> None:
-        with self._lease_cursor_ctx() as conn:
+        with self._cursor_ctx() as conn:
             self._execute(
                 conn,
                 f"DELETE FROM {self._table('run_leases')} WHERE run_id = :run_id AND claimed_by = :claimed_by",
                 {"run_id": run_id, "claimed_by": worker_id},
-                lease=True,
             )
 
     def expired_leases(self, now: str) -> list[str]:
-        with self._lease_cursor_ctx() as conn:
+        with self._cursor_ctx() as conn:
             cur = self._execute(
                 conn,
                 f"SELECT run_id FROM {self._table('run_leases')} WHERE lease_expires_at <= :now",
                 {"now": now},
-                lease=True,
             )
             return [r["run_id"] for r in _fetchall_dicts(cur)]
 
@@ -2461,16 +2505,40 @@ def _trace_event_ui_shape(row: dict) -> dict:
 
 
 class _CursorCtx:
-    def __init__(self, persistence: DeltaPersistence, *, lease: bool = False):
+    def __init__(self, persistence: DeltaPersistence):
         self._p = persistence
-        self._lease = lease
-        self._lock = None
 
     def __enter__(self):
-        self._lock = self._p._lease_conn_lock if self._lease else self._p._conn_lock
-        self._lock.acquire()
-        return self._p._get_connection_locked(lease=self._lease)
+        return self._p._get_connection()
 
     def __exit__(self, exc_type, exc, tb):
-        self._lock.release()
         return False
+
+
+class _ThreadConnHolder:
+    """Owns exactly one connection for exactly one thread. Stored only on that
+    thread's `threading.local` slot (never in a structure another thread holds a
+    strong reference to) so that when the thread exits and CPython tears down its
+    per-thread storage, this holder's refcount drops to zero and `__del__` closes
+    the connection -- no explicit "thread is exiting" hook required. `DeltaPersistence`
+    also keeps a *weak* reference to each holder (in `_registry`) purely so `close()`
+    can reach and close every thread's connection on demand; that weak reference
+    never keeps a holder (or its connection) alive on its own."""
+
+    __slots__ = ("conn", "_closed", "__weakref__")
+
+    def __init__(self, conn):
+        self.conn = conn
+        self._closed = False
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            self.conn.close()
+        except Exception:
+            pass
+
+    def __del__(self):
+        self.close()

@@ -515,16 +515,19 @@ def test_write_issues_for_findings_empty_list_issues_no_statements():
     assert conn.calls == []
 
 
-# ── Batched writers release the connection's lock between statements
-# (P3/P4 perf gap review 2026-09-25): write_flagged_rows/write_run_metrics/
-# put_test_line_values/write_classification_results used to hold one
-# `with self._cursor_ctx()` (and so one acquisition of `_conn_lock`) across
-# their entire existence-check SELECT + every MERGE batch + the prune
-# DELETE. A concurrent caller (a /run/<id> render on another thread) waited
-# for the whole write, not one statement of it. The fix (`_exec1`) trades a
-# single held lock for several short ones; these tests assert nothing about
-# locking directly (FakeConnection is single-threaded) but pin the exact
-# statement sequence the fix depends on, and that results are unchanged. ───
+# ── Batched writers issue one statement at a time via `_exec1`, and (since
+# the P3/P4 perf gap review's per-thread connection fix) run on a connection
+# no other thread shares (P3/P4 perf gap review 2026-09-25): write_flagged_rows/
+# write_run_metrics/put_test_line_values/write_classification_results used to
+# hold one `with self._cursor_ctx()` (and so one acquisition of a single
+# shared `_conn_lock`) across their entire existence-check SELECT + every
+# MERGE batch + the prune DELETE. A concurrent caller (a /run/<id> render on
+# another thread) waited for the whole write, not one statement of it, on
+# that same shared connection. `_exec1` scoped that to one statement at a
+# time; per-thread connections then removed the shared lock/connection
+# entirely, so a concurrent reader on another thread now waits on nothing at
+# all. These tests pin the exact statement sequence _exec1 depends on (results
+# unchanged), plus the actual concurrency property. ─────────────────────────
 
 def test_write_flagged_rows_issues_one_select_then_one_merge_per_batch():
     handlers = {
@@ -560,17 +563,14 @@ def test_write_run_metrics_issues_one_select_then_one_merge_per_batch():
     assert len(merge_calls) == 1
 
 
-def test_batched_write_releases_the_lock_between_batches_for_a_concurrent_reader():
-    """The actual point of _exec1 (see its docstring): a concurrent reader
-    (a /run/<id> render on another thread, going through the same shared
-    connection's `_conn_lock`) must not have to wait for a whole multi-batch
-    write to finish -- only for whichever single statement is in flight when
-    it asks. Simulates warehouse latency with a sleep inside the MERGE
-    handler and measures how long a reader thread waits to acquire
-    `_cursor_ctx()` while a 3-batch write is in progress on another thread."""
-    import threading
-    import time
-
+def test_slow_statement_on_one_thread_does_not_delay_a_statement_on_another():
+    """The actual property per-thread connections buy (see the block comment
+    above): a concurrent reader (a /run/<id> render on another thread) must
+    not wait on a writer's slow statements AT ALL, because the two threads
+    no longer share a connection or a lock to queue behind. Simulates
+    warehouse latency with a sleep inside the MERGE handler and measures how
+    long a reader thread's own trivial statement takes while a 3-batch write
+    is in progress on another thread."""
     batch_sleep_s = 0.05
     n_batches = 3
 
@@ -581,9 +581,9 @@ def test_batched_write_releases_the_lock_between_batches_for_a_concurrent_reader
     handlers = {
         "SELECT source, row_key, flag FROM cat1.sch1.flagged_rows": lambda s, p: (["source", "row_key", "flag"], []),
         "MERGE INTO cat1.sch1.flagged_rows": _merge_handler,
+        "SELECT 1": lambda s, p: (["x"], [(1,)]),
     }
-    conn = FakeConnection(handlers)
-    p = DeltaPersistence(_settings(), connection_factory=lambda: conn)
+    p = DeltaPersistence(_settings(), connection_factory=lambda: FakeConnection(handlers))
     rows = [
         {"source": "expense", "row_key": f"R{i}", "flag": "RF_X", "group_id": None}
         for i in range(n_batches * 250)
@@ -591,7 +591,7 @@ def test_batched_write_releases_the_lock_between_batches_for_a_concurrent_reader
 
     writer_started = threading.Event()
     writer_done = threading.Event()
-    reader_acquired_at: list[float] = []
+    reader_elapsed: list[float] = []
 
     def _writer():
         writer_started.set()
@@ -601,28 +601,27 @@ def test_batched_write_releases_the_lock_between_batches_for_a_concurrent_reader
     def _reader():
         writer_started.wait(timeout=5)
         time.sleep(batch_sleep_s * 0.5)  # land mid-write, after its first MERGE batch
-        with p._cursor_ctx():
-            reader_acquired_at.append(time.monotonic())
+        start = time.monotonic()
+        with p._cursor_ctx() as conn:
+            p._execute(conn, "SELECT 1")
+        reader_elapsed.append(time.monotonic() - start)
 
     t_writer = threading.Thread(target=_writer)
     t_reader = threading.Thread(target=_reader)
-    start = time.monotonic()
     t_writer.start()
     t_reader.start()
     t_writer.join(timeout=5)
     t_reader.join(timeout=5)
 
     assert writer_done.is_set(), "writer thread did not finish"
-    assert reader_acquired_at, "reader thread never acquired the connection"
-    reader_wait = reader_acquired_at[0] - start
-    # A whole write is n_batches MERGE round trips (~batch_sleep_s each) plus
-    # the existence-check SELECT -- if the lock were held for the entire
-    # method (the pre-fix shape), the reader could not acquire it until
-    # close to n_batches * batch_sleep_s had elapsed. Releasing the lock
-    # between batches lets the reader in well before that.
-    assert reader_wait < (n_batches - 0.75) * batch_sleep_s, (
-        f"reader waited {reader_wait:.3f}s -- looks like the lock was held for the whole write, "
-        f"not released between batches"
+    assert reader_elapsed, "reader thread never completed its statement"
+    # The reader's own statement is instant on FakeConnection -- if it shared
+    # a connection or lock with the writer it would take up to the writer's
+    # remaining batches' sleep time. On separate per-thread connections it
+    # must complete almost immediately regardless of the writer's progress.
+    assert reader_elapsed[0] < batch_sleep_s, (
+        f"reader's statement took {reader_elapsed[0]:.3f}s while a writer's slow statement "
+        f"was in flight on another thread -- looks like they still share a connection/lock"
     )
 
 
@@ -740,14 +739,13 @@ def _lease_handlers():
     }
 
 
-def test_lease_operations_use_a_connection_and_lock_separate_from_the_main_one():
-    """A single DeltaPersistence instance is shared, per process, by
-    ThreadExecutor and every node it runs (orchestrator/service.py's
-    build_app_context). Before this fix, every method -- including
-    renew_lease -- shared one `_conn`/`_conn_lock`, so the heartbeat
-    thread's own renewal calls could queue behind whatever the pipeline
-    thread's node-output writes were doing on that same connection. Lease
-    methods must open (and lock) a connection distinct from the main one."""
+def test_same_thread_reuses_one_connection_for_lease_and_main_calls():
+    """Per-thread connections (P3/P4 perf gap review 2026-09-25) replaced the
+    earlier hand-maintained lease/main connection split (RUN-5E0D4353A7BB):
+    there is no more separate "lease connection" concept -- a lease call and
+    a main-table call from the SAME thread now share that one thread's
+    single lazily-opened connection, exactly like any other pair of calls
+    from that thread."""
     conns_created = []
 
     def factory():
@@ -758,42 +756,67 @@ def test_lease_operations_use_a_connection_and_lock_separate_from_the_main_one()
 
     assert p.acquire_lease("RUN-1", "worker-1", ttl_s=90, now=canonical_ts(1)) is True
     assert len(conns_created) == 1
-    lease_conn = conns_created[0]
 
-    # A main-connection call (e.g. list_node_attempts) must open a SECOND,
-    # separate connection -- never reuse the lease connection.
     with p._cursor_ctx() as conn:
-        pass
-    assert len(conns_created) == 2
-    main_conn = conns_created[1]
+        assert conn is conns_created[0]  # reused, not a second connection
+    assert len(conns_created) == 1
 
-    assert main_conn is not lease_conn
-    assert p._conn is main_conn
-    assert p._lease_conn is lease_conn
-    assert p._conn_lock is not p._lease_conn_lock
-
-    # A further lease call reuses the SAME lease connection (lazy-open-once),
-    # never the main one.
     assert p.renew_lease("RUN-1", "worker-1", ttl_s=90, now=canonical_ts(2)) is True
+    assert len(conns_created) == 1
+
+
+def test_different_threads_get_different_connections():
+    """The property that actually matters and replaces the old lease/main
+    split: two different threads calling into the SAME DeltaPersistence
+    instance never share a connection -- whether one is doing a lease op and
+    the other a main-table op, or both are doing the same kind of call."""
+    conns_created = []
+    creation_lock = threading.Lock()
+
+    def factory():
+        with creation_lock:
+            conns_created.append(FakeConnection(_lease_handlers()))
+            return conns_created[-1]
+
+    p = DeltaPersistence(_settings(), connection_factory=factory)
+    seen: dict[str, object] = {}
+
+    def _lease_thread():
+        with p._cursor_ctx() as conn:
+            seen["lease"] = conn
+
+    def _main_thread():
+        with p._cursor_ctx() as conn:
+            seen["main"] = conn
+
+    t1 = threading.Thread(target=_lease_thread)
+    t2 = threading.Thread(target=_main_thread)
+    t1.start()
+    t1.join(timeout=5)
+    t2.start()
+    t2.join(timeout=5)
+
     assert len(conns_created) == 2
+    assert seen["lease"] is not seen["main"]
 
 
 def test_renew_lease_is_never_blocked_by_the_main_connections_lock():
-    """Structural proof of the fix: holding `_conn_lock` for a long time
-    (simulating a node's own multi-minute write_flagged_rows/
-    write_run_metrics batch loop on the main connection) must never delay
-    renew_lease, because it never touches `_conn_lock` at all."""
+    """Structural proof of the fix: a long write on one thread (simulating a
+    node's own multi-minute write_flagged_rows/write_run_metrics batch loop)
+    must never delay renew_lease running on another thread, because they now
+    hold entirely separate connections -- there is no shared lock left to
+    queue behind."""
     p = DeltaPersistence(_settings(), connection_factory=lambda: FakeConnection(_lease_handlers()))
 
     main_lock_held = threading.Event()
     release_main_lock = threading.Event()
 
-    def hold_main_lock():
+    def hold_main_connection():
         with p._cursor_ctx():
             main_lock_held.set()
             release_main_lock.wait(timeout=10)
 
-    holder = threading.Thread(target=hold_main_lock, daemon=True)
+    holder = threading.Thread(target=hold_main_connection, daemon=True)
     holder.start()
     try:
         assert main_lock_held.wait(timeout=10)
@@ -804,9 +827,173 @@ def test_renew_lease_is_never_blocked_by_the_main_connections_lock():
 
         assert renewed is True
         assert elapsed < 1.0, (
-            f"renew_lease took {elapsed:.2f}s while the main connection's lock was held -- "
+            f"renew_lease took {elapsed:.2f}s while another thread's connection was in use -- "
             "it must never queue behind it"
         )
     finally:
         release_main_lock.set()
         holder.join(timeout=10)
+
+
+def test_no_connection_opened_until_first_use():
+    """Lazy-open, still true under the per-thread model: constructing a
+    DeltaPersistence (or leaving it idle between runs) must never touch the
+    connection factory -- CLAUDE.md §11's cost incident was exactly this
+    kind of unwanted idle activity."""
+    factory_calls = {"n": 0}
+
+    def factory():
+        factory_calls["n"] += 1
+        return FakeConnection({})
+
+    p = DeltaPersistence(_settings(), connection_factory=factory)
+    assert factory_calls["n"] == 0
+
+    with p._cursor_ctx():
+        pass
+    assert factory_calls["n"] == 1
+
+
+def test_reconnect_once_is_scoped_to_the_failing_threads_own_connection():
+    """A connection error on one thread must reconnect only that thread's
+    own connection. A different thread's already-open, healthy connection
+    must be completely untouched -- never dropped, never reopened -- by
+    another thread's reconnect."""
+    main_ident = threading.get_ident()
+    calls_by_thread: dict[int, int] = {}
+    calls_lock = threading.Lock()
+
+    class Cur:
+        def __init__(self, should_fail):
+            self.should_fail = should_fail
+            self.description = [("fingerprint_id",)]
+            self._rows: list = []
+
+        def execute(self, sql_text, params=None):
+            if self.should_fail:
+                raise Exception("Connection reset by peer")
+            return self
+
+        def fetchone(self):
+            return self._rows[0] if self._rows else None
+
+        def fetchall(self):
+            return self._rows
+
+        def close(self):
+            pass
+
+    class Conn:
+        def __init__(self, should_fail):
+            self.should_fail = should_fail
+
+        def cursor(self):
+            return Cur(self.should_fail)
+
+        def close(self):
+            pass
+
+    def factory():
+        ident = threading.get_ident()
+        with calls_lock:
+            calls_by_thread[ident] = calls_by_thread.get(ident, 0) + 1
+            call_n = calls_by_thread[ident]
+        # Only the driving (main) thread's FIRST connection is broken --
+        # its reconnect, and every connection any other thread opens, is
+        # healthy.
+        return Conn(should_fail=(ident == main_ident and call_n == 1))
+
+    p = DeltaPersistence(_settings(), connection_factory=factory)
+
+    healthy_started = threading.Event()
+    release_healthy = threading.Event()
+    healthy_ident: list[int] = []
+
+    def _healthy_thread():
+        healthy_ident.append(threading.get_ident())
+        with p._cursor_ctx():
+            healthy_started.set()
+            release_healthy.wait(timeout=5)
+
+    t_healthy = threading.Thread(target=_healthy_thread)
+    t_healthy.start()
+    assert healthy_started.wait(timeout=5)
+
+    # Main thread's first connection is the broken one; get_fingerprint
+    # reconnects once (on the main thread only) and succeeds.
+    with pytest.raises(RunNotFound):
+        p.get_fingerprint("FP-MISSING")
+
+    release_healthy.set()
+    t_healthy.join(timeout=5)
+
+    assert calls_by_thread[main_ident] == 2  # broken conn + its one reconnect
+    assert calls_by_thread[healthy_ident[0]] == 1  # never touched by the other thread's reconnect
+
+
+def test_connection_closed_when_its_owning_thread_exits():
+    """No leak: a thread's connection must be closed once that thread ends,
+    without anyone calling close() explicitly -- CPython tears down a
+    finished thread's `threading.local` storage, dropping the holder's last
+    reference and running `_ThreadConnHolder.__del__`."""
+    import gc
+
+    closed = []
+
+    class ClosingConn(FakeConnection):
+        def close(self):
+            closed.append(self)
+
+    def factory():
+        return ClosingConn({})
+
+    p = DeltaPersistence(_settings(), connection_factory=factory)
+
+    def _worker():
+        with p._cursor_ctx():
+            pass
+
+    t = threading.Thread(target=_worker)
+    t.start()
+    t.join(timeout=5)
+    gc.collect()  # robust to any interpreter GC-timing detail beyond refcounting
+
+    assert len(closed) == 1
+
+
+def test_close_closes_every_threads_connection_and_is_idempotent():
+    """close() (for an explicit, deterministic shutdown) reaches every
+    thread's connection, not just the calling thread's -- and calling it
+    again, or after a worker thread has already exited and self-closed its
+    own connection, must never double-close or raise."""
+    import gc
+
+    closed = []
+
+    class ClosingConn(FakeConnection):
+        def close(self):
+            closed.append(self)
+
+    def factory():
+        return ClosingConn({})
+
+    p = DeltaPersistence(_settings(), connection_factory=factory)
+
+    with p._cursor_ctx():
+        pass  # this (main) thread's connection
+
+    def _worker():
+        with p._cursor_ctx():
+            pass
+
+    t = threading.Thread(target=_worker)
+    t.start()
+    t.join(timeout=5)
+    gc.collect()
+    assert len(closed) == 1  # the worker thread's own connection, already self-closed
+
+    p.close()
+    assert len(closed) == 2  # + this thread's, closed by close()
+
+    p.close()  # idempotent: nothing left to close, no error
+    assert len(closed) == 2
