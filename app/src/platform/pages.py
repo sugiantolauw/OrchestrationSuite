@@ -147,6 +147,14 @@ def audit_runs_page() -> html.Div:
                          placeholder="Status", style={"flex": 1, "fontSize": 13}),
         ], className="filter-row"),
 
+        # CLAUDE.md §11 "Run cards on /runs (user decision, 2026-09-25)"
+        # "Message line": one line of text under the filters, empty by
+        # default, styled like /workspace/tne's existing tne-export-error
+        # div (src/workspace_tne.py) -- copied verbatim here rather than
+        # imported, since that style dict is a private literal inline in
+        # workspace_tne.py, not a shared constant.
+        html.Div(id="runs-export-error", style={"fontSize": 11.5, "color": "#b85042"}),
+
         html.Div(
             [run_card(r) for r in runs],
             className="stack",

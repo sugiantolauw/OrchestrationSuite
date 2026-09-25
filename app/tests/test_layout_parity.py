@@ -169,6 +169,22 @@ def _run_card_export_trace_hidden_ids(reference_fixtures) -> list[tuple[str, str
     return pairs
 
 
+# Allow-list: CLAUDE.md §11 "Run cards on /runs (user decision, 2026-09-25)"
+# "Message line" -- ONE wholly new element the prototype has no equivalent
+# of at all: an empty-by-default Div (styled like /workspace/tne's own
+# "tne-export-error", tree.py's shape() ignores style so this is invisible
+# to the comparison) inserted directly under the filter row and above
+# runs-list, exactly where src/platform/pages.py's audit_runs_page() places
+# it. Anchored on the immediately-following runs-list Div's own line so a
+# future reshuffle of the prototype's /runs layout makes this assertion
+# fail loudly rather than silently stop inserting -- same pattern as
+# _D5A_SOURCE_CHECKLIST_BLOCK above.
+_RUNS_EXPORT_ERROR_ANCHOR = "\n  Div id='runs-list' class='stack'"
+_RUNS_EXPORT_ERROR_BLOCK = (
+    "\n  Div id='runs-export-error' class=None" + _RUNS_EXPORT_ERROR_ANCHOR
+)
+
+
 def test_audit_runs_page_matches_prototype(monkeypatch, reference_fixtures):
     from src.platform import adapters
     from src.platform.pages import audit_runs_page
@@ -177,6 +193,11 @@ def test_audit_runs_page_matches_prototype(monkeypatch, reference_fixtures):
     monkeypatch.setattr(adapters, "is_demo_mode", lambda: True)
 
     reference = _apply_allow_list(_reference_tree("runs"), _run_card_export_trace_hidden_ids(reference_fixtures))
+    assert reference.count(_RUNS_EXPORT_ERROR_ANCHOR) == 1, (
+        f"expected exactly one {_RUNS_EXPORT_ERROR_ANCHOR!r} in the reference tree -- "
+        f"update _RUNS_EXPORT_ERROR_BLOCK rather than silently mismatching"
+    )
+    reference = reference.replace(_RUNS_EXPORT_ERROR_ANCHOR, _RUNS_EXPORT_ERROR_BLOCK, 1)
     assert _app_tree(audit_runs_page()) == reference
 
 

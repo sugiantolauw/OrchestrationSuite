@@ -45,11 +45,13 @@ authorises for Export/Trace (View already had one, unused).
   through one hidden dcc.Download (app.py's "runs-export-download", placed
   the same way app.py already places the Explorer Stores/Interval — outside
   any single page's own tree, so it adds nothing to audit_runs_page()'s own
-  layout-parity comparison). Before sign-off no xlsx export is recorded yet
-  (orchestrator/service.py get_export raises FileNotFoundError) — /runs has
-  no existing element to show that message on and this decision does not
-  authorise inventing one, so the click no-ops; see the phase report for
-  the proposed smallest fix.
+  layout-parity comparison). CLAUDE.md §11 "Message line" (2026-09-25):
+  before sign-off no xlsx export is recorded yet (orchestrator/service.py
+  get_export raises FileNotFoundError) — that case, and any other export
+  error (NN14 — never silent), now sets the "runs-export-error" Div
+  (src/platform/pages.py, styled like /workspace/tne's own
+  "tne-export-error") to a message instead of no-opping; a successful
+  download clears it.
 - Trace navigates to /trace?run_id=<id> — src/platform/pages.py's
   platform_trace_page() reads it (via app.py) to preselect its own existing
   "Filter by run" dropdown, so the table is filtered on arrival."""
@@ -171,6 +173,7 @@ def register_callbacks(app) -> None:
 
     @app.callback(
         Output("runs-export-download", "data"),
+        Output("runs-export-error", "children"),
         Input({"type": "run-export-btn", "index": ALL}, "n_clicks"),
         prevent_initial_call=True,
     )
@@ -181,11 +184,11 @@ def register_callbacks(app) -> None:
         try:
             filename, blob = adapters.get_export(run_id, "xlsx")
         except FileNotFoundError:
-            # No xlsx export recorded yet (before sign-off — CLAUDE.md §11
-            # "Before sign-off no export exists yet, so it states that the
-            # run must be signed off first."). /runs has no existing
-            # element to show that message on, and this decision only
-            # authorised wiring the three existing buttons, not inventing
-            # one — see the phase report for the proposed smallest fix.
-            raise PreventUpdate
-        return dcc.send_bytes(blob, filename)
+            # No xlsx export recorded yet (before sign-off). CLAUDE.md §11
+            # "Message line": states plainly that sign-off is what is
+            # missing, mirroring src/workspace_tne.py's own export-error
+            # pattern (_export_pptx/_export_excel) rather than no-opping.
+            return None, "This run must be signed off before its export is available."
+        except Exception as exc:  # NN14 — never silent
+            return None, f"Export is not available for this run ({exc})"
+        return dcc.send_bytes(blob, filename), ""
