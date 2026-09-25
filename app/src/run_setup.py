@@ -555,7 +555,10 @@ def _explorer_workflow_children(review: dict) -> list:
         ))
     if review.get("proposal_errors"):
         children.append(html.Div(
-            "; ".join(review["proposal_errors"]),
+            "; ".join(
+                e.get("message", "") if isinstance(e, dict) else str(e)
+                for e in review["proposal_errors"]
+            ),
             style={"fontSize": 11.5, "color": "#b85042", "marginTop": 8},
         ))
     return children

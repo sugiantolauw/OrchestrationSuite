@@ -128,3 +128,93 @@ def test_theme_citing_a_test_id_not_in_this_run_is_rejected_at_generation(local_
     # and the run-level fallback bookkeeping row is what gets written instead.
     assert all(bad_root_cause not in (row.get("template_text") or "") for row in theme_rows)
     assert any(row["target_id"] == "run" and row["origin"] not in ("model", "model_repaired") for row in theme_rows)
+
+
+# BUG-SYNTH-BARE-TESTID-STILL-LIVE (independent review round 4, 2026-09-25):
+# a real run (RUN-6A95B7FDD22F) reported 10/12 G11 failures, all bare
+# dotted test-id citations in theme root_cause/summary prose -- reported as
+# a DIFFERENT, unfixed bug from BUG-SYNTH-T1T2 above. Pulled the real
+# persisted rows from Delta to check: every one of the 5 distinct themes
+# involved (verbatim below) cites ONLY its own theme's member finding(s)'
+# real test_id -- exactly the shape the test above already proves is
+# accepted at generation AND re-validation through
+# identifiers_for_findings()/_narrative_allowed_identifiers(). None of
+# these is a genuine N-D1 violation. The diagnosis: the round's own G11
+# check almost certainly hit the same context-mismatch class of bug as
+# BUG-2.4-LIVETEST-CTX (a bare NodeContext with no .skills_dir handed to
+# service._narrative_table/_narrative_allowed_identifiers, or an
+# equivalent gap in that script's own re-implementation), silently landing
+# on an EMPTY allowed-identifiers set and failing every legitimate bare
+# test-id citation. This test proves each real string validates cleanly
+# through the actual product code (identifiers_for_findings + N-D1) given
+# its real member finding set -- and, for contrast, that the SAME text
+# fails N-D1 with an empty allowed set, which is exactly what a
+# NodeContext-for-AppContext mixup silently produces.
+_REAL_G1_THEME_CITATIONS = [
+    # (member test_ids, root_cause/summary text, verbatim from Delta)
+    (
+        ["T4.2"],
+        "The concentration of missing attendee records in test T4.2 may indicate insufficient "
+        "capture of attendee information during expense entry.",
+    ),
+    (
+        ["T4.2"],
+        "Test T4.2 identified that {pct:att_missing_pct} of examined entertainment expense lines "
+        "have no matching attendee record.",
+    ),
+    (
+        ["T5.2"],
+        "The pattern of duplicate groups detected by test T5.2 may reflect weaknesses in claim "
+        "submission controls that allow multiple entries for the same expense.",
+    ),
+    (
+        ["T6.1a"],
+        "The high proportion of approvals without receipt review in test T6.1a may indicate gaps "
+        "in the approver verification process.",
+    ),
+    (
+        ["T3.1a", "T3.1b"],
+        "The occurrence of unlinked pre‑approved travel requests in test T3.1a together with "
+        "claims lacking pre‑approval in test T3.1b may indicate that the system’s "
+        "validation of pre‑approval linkage is not consistently enforced.",
+    ),
+    (
+        ["T4.4", "T3.3b", "T6.1d_dom"],
+        "The detection of thresholds being exceeded in test T4.4, test T3.3b and test T6.1d_dom "
+        "may reflect inconsistent application of spend‑limit checks during claim processing.",
+    ),
+]
+
+
+def test_real_round4_theme_citations_are_legitimate_member_test_id_references():
+    from orchestrator.narration.payloads import identifiers_for_findings
+    from orchestrator.narration.placeholders import PlaceholderEntry
+
+    # The run's full finding set (only test_id matters for
+    # identifiers_for_findings; the theme's own allowed set at generation
+    # AND re-validation is built from ALL of this run's findings, not just
+    # the theme's own members -- CLAUDE.md §4.6, orchestrator/narration/
+    # payloads.py's own identifiers_for_findings docstring).
+    run_findings = [
+        {"test_id": tid}
+        for member_ids, _ in _REAL_G1_THEME_CITATIONS
+        for tid in member_ids
+    ] + [{"test_id": "T4.1"}]  # a real sibling finding this run also had
+    allowed = identifiers_for_findings(run_findings)
+    # The one real string that also cites a placeholder (unrelated to the
+    # test-id question this test is about) needs it in the table, or N-G3
+    # ("placeholder not in this item's table") fires first.
+    table = {"att_missing_pct": PlaceholderEntry(name="att_missing_pct", unit="%", value=84.6)}
+
+    for member_ids, text in _REAL_G1_THEME_CITATIONS:
+        result = validate_prose(text, table, field="root_cause", origin="model", allowed_identifiers=allowed)
+        assert result.valid, (member_ids, [(v.rule_id, v.message) for v in result.violations])
+
+        # Contrast: the SAME text, with an EMPTY allowed-identifiers set --
+        # what a NodeContext-for-AppContext mixup (BUG-2.4-LIVETEST-CTX's
+        # class of bug) silently produces -- genuinely fails N-D1 on
+        # exactly these tokens. This is not a hypothetical: it is the
+        # precise shape of the round-4 false positives.
+        broken = validate_prose(text, table, field="root_cause", origin="model", allowed_identifiers=frozenset())
+        assert not broken.valid, "expected an empty allow-list to (wrongly) reject a legitimate test-id citation"
+        assert any(v.rule_id == "N-D1" for v in broken.violations), broken.violations

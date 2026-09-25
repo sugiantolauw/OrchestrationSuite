@@ -173,6 +173,31 @@ def test_interrupted_to_queued_with_explicit_phase_change_rejected():
         transition(state, "queued", now="t1", phase="export")
 
 
+def test_running_to_queued_is_rejected_a_still_running_run_cannot_be_resumed():
+    """Round-4A live test 4.18 ('restart mid-run') observed a fresh
+    instance apparently continuing an orphaned run's execution with no
+    run ever passing through an explicit `interrupted` state. Traced: the
+    documented path (orchestrator.reaper/executor.reap_orphaned_runs_with_leases,
+    called at App start and on every admission-loop tick, CLAUDE.md §2.3
+    rule 2 / §9C) only reaps a run whose LEASE has actually expired past
+    its grace period -- a run restarted quickly, before that window
+    elapses, correctly stays `running`, neither reaped nor re-admitted (it
+    is not `queued`). orchestrator.runs.resume() (the only documented path
+    to continue an orphaned run) calls exactly this transition
+    (`"running" -> "queued"`, never called directly on an un-reaped run in
+    the real service/executor code path) -- this asserts the state
+    machine itself refuses it, which is what makes a genuine 'resume a
+    still-running run without ever marking it interrupted' impossible
+    through the documented API. If this test starts failing, that is the
+    regression 4.18 was worried about; today it holds, so 4.18's
+    observation is most likely its own test harness calling the executor
+    directly rather than the real restart/reap/resume path (see the round's
+    own 'Known limits' notes on other one-shot-script artifacts)."""
+    state = _state("running", phase="execute")
+    with pytest.raises(InvalidTransition):
+        transition(state, "queued", now="t1")
+
+
 def test_awaiting_confirmation_to_queued_requires_plan_confirmed_and_execute_phase():
     state = _state("awaiting_confirmation", phase="plan", plan_confirmed=True)
     result = transition(state, "queued", now="t1", phase="execute")

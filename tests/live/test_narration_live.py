@@ -75,13 +75,22 @@ def test_one_real_narration_pass_per_task_passes_g11_or_is_a_labelled_fallback(t
     # as a real violation.
     from orchestrator import service
     from orchestrator.narration.validate import validate_prose
+    from tests.n9_test_support import app_context_for
+
+    # BUG-2.4-LIVETEST-CTX: service._narrative_table/_narrative_allowed_identifiers
+    # both resolve the run's Skill via resolve_run_skill -> load_skill_by_id ->
+    # _skill_dir_for(ctx.skills_dir) -- a field AppContext carries and the
+    # bare NodeContext `h.ctx` (built for calling `narrate` itself) does not.
+    # Reuse the same AppContext helper tests/n9_test_support.py already
+    # built for this exact purpose, sharing this harness's persistence/skill.
+    app_ctx = app_context_for(h, clock=h.ctx.clock)
 
     narratives = persistence.get_narratives(state.run_id)
     assert narratives
     for n in narratives:
         if n["origin"] in ("model", "model_repaired"):
-            table = service._narrative_table(h.ctx, result, n)
-            allowed_identifiers = service._narrative_allowed_identifiers(h.ctx, result, n)
+            table = service._narrative_table(app_ctx, result, n)
+            allowed_identifiers = service._narrative_allowed_identifiers(app_ctx, result, n)
             validator_field = service._VALIDATOR_FIELD_FOR[(n["target_kind"], n["field"])]
             text = n["template_text"]
             items = text if isinstance(text, list) else [text]

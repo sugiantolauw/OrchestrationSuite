@@ -293,3 +293,50 @@ def test_start_audit_analysis_navigates_to_run_page_quickly(running_app, watched
 
     assert elapsed < 5.0, f"navigation to /run/<id> took {elapsed:.2f}s, expected roughly ~1s"
     watcher.assert_clean()
+
+
+# ── 4.1 (final round 4A): the auto-confirm checkbox ─────────────────────────
+
+def test_unchecking_show_proposed_approach_auto_confirms_the_plan(running_app, watched_page):
+    """Round-4A live test 4.1 found the Playwright uncheck() on 'Show
+    proposed approach before execution' reporting 'did not change its
+    state', and could not tell whether that was a product defect in the
+    checkbox/auto_confirm_plan wiring or a Playwright artifact. The wiring
+    itself (src/run_setup.py start_run: review_plan_first="preview_plan"
+    in options -> service.py's auto_confirm_plan=not review_plan_first) is
+    plain, uncontrolled client-side dcc.Checklist state with no Dash Output
+    ever writing back to it -- nothing should fight a real click. This
+    drives the actual checkbox in a real browser and asserts the run
+    reaches awaiting_signoff directly, WITHOUT ever needing a manual
+    'Confirm plan' click -- the actual product behaviour the checkbox is
+    supposed to control, not just its raw checked/unchecked DOM state."""
+    page, watcher = watched_page
+    base_url = running_app["base_url"]
+    goto(page, base_url, "/")
+
+    page.locator('[id*="skill-select-card"][id*="SKILL-MINI-WS"]').first.click()
+    page.wait_for_timeout(300)
+
+    # "Advanced parameters" is a collapsed <details>; the checkbox is not
+    # interactable until it is expanded.
+    page.locator("summary", has_text="Advanced parameters").click()
+    checkbox = page.locator("#audit-options input[type=checkbox]").first
+    checkbox.wait_for(state="visible")
+    assert checkbox.is_checked(), "expected 'Show proposed approach' checked by default"
+    checkbox.uncheck()
+    assert not checkbox.is_checked(), "unchecking the checkbox did not change its DOM state"
+
+    page.locator("#start-run-btn").click()
+    page.wait_for_url("**/run/RUN-*", timeout=10_000)
+
+    # The run must reach awaiting_signoff directly -- if auto_confirm_plan
+    # did not take effect, it would stop at awaiting_confirmation and show
+    # "Confirm plan" instead (CLAUDE.md §2.4: playbook auto-confirm skips
+    # the confirmation gate entirely, never pausing there even briefly).
+    gate = page.locator("#run-signoff-open-btn, #run-confirm-plan-btn").first
+    gate.wait_for(state="visible", timeout=20_000)
+    assert page.locator("#run-confirm-plan-btn").count() == 0, (
+        "run stopped at awaiting_confirmation -- auto_confirm_plan did not take effect"
+    )
+    assert page.locator("#run-signoff-open-btn").count() == 1
+    watcher.assert_clean()
