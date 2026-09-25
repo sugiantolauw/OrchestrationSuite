@@ -1233,6 +1233,9 @@ validate the schema client-side with one retry — never strip markdown fences t
   `tools`/`tool_choice`, `reasoning_effort` (low/medium/high, effective), and `response_format`
   json_schema `strict: true` (enforced; `anyOf`/`oneOf`/`$defs`/`$ref`, enums, bounds, `const` all
   accepted). Rejects `pattern` in schemas, `seed`, `stop`, `max_completion_tokens` and `thinking`.
+  Strict `json_schema` also rejects a schema with more than 128 properties in total (found live
+  2026-09-25: the Explorer PlanProposal schema has 207). Such a schema goes in the prompt instead and
+  is validated client-side; the limit is recorded in `orchestrator/llm/capabilities.yaml`.
   `json_object` needs the word "json" in the prompt. A strict-mode bare `{"type":"object"}` property
   comes back empty. Truncation returns `finish_reason: "length"` with no text part. `content` is a
   list of a reasoning part (strip it before storing, NN11) and a text part. The response `model`
