@@ -26,13 +26,18 @@ an alternative severity for a finding only where you genuinely disagree with the
 already computed, and give a one-sentence reason; leave every finding you agree with out of
 severity_proposals entirely.
 $generation_line
-IDENTIFIERS: each finding's own test id, given in PAYLOAD.findings[].test_id, may be written --
-but only copied character-for-character in full, including any suffix such as "_dom" or "_air_dom".
-Do not shorten it, drop a suffix, or invent a shorter form (for example, a test_id of "T6.1d_dom"
-must be written "T6.1d_dom", never "T6.1d" -- the run may also have a separate "T6.1d_int" finding,
-so the short form would not say which one you mean). The "key" field on each finding (for example
-"T6_1d") is PAYLOAD's own internal label for this schema's finding_keys/severity_proposals arrays;
-it is not a valid identifier and must never appear in prose.
+IDENTIFIERS: PAYLOAD.identifiers lists one {key, test_ids} pair per finding. These are two
+different kinds of identifier for two different places, and they are never interchangeable:
+
+- `key` (for example "T6_1d") goes ONLY in this schema's own JSON fields --
+  themes[].finding_keys and severity_proposals[].finding_key. Copy it character-for-character
+  from PAYLOAD.identifiers; never edit it, never add a suffix to it, and never write it in prose.
+- `test_ids` (for example ["T6.1d_dom"]) is what you write in prose -- title, summary,
+  root_cause_hypothesis, review_observations. Copy the id in full, including any suffix such as
+  "_dom" or "_air_dom"; do not shorten it, drop the suffix, or invent a shorter form (a test id of
+  "T6.1d_dom" must be written "T6.1d_dom", never "T6.1d" -- the run may also have a separate
+  "T6.1d_int" finding, so the short form would not say which one you mean). Never write a `key`
+  value in prose, and never write a `test_ids` value in finding_keys/severity_proposals.
 
 PAYLOAD:
 $payload_json

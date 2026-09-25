@@ -1,0 +1,80 @@
+{
+  "synthetic_recording": true,
+  "note": "The 'recorded_schema_errors' strings below are byte-for-byte the real jsonschema validation-error text recorded to llm_calls for RUN-2B50AE494DE7's find_synthesis generate attempt (2026-09-25) -- see scratchpad/narration_review/after_round3_dump.json's llm_calls_summary, and before_after.md's 'Themes -- fell back this run' section. 'valid_keys' is that same run's real, recorded finding-key enum. The measurement script that captured this run never persisted the model's full raw response body, only this validation-error text, so 'failing_response' below is reconstructed to reproduce both recorded errors at their exact recorded JSON paths (themes/1/finding_keys/2 and themes/3/finding_keys/3) against the run's own real key enum -- it is not a copy of the model's literal output. Everything else in 'failing_response' (titles, summaries, other finding_keys) is invented filler needed to make an otherwise schema-valid document, not a claim about what the model actually wrote there. 'corrected_response' is 'failing_response' with only those same two positions swapped to the bare, valid form.",
+  "run_id": "RUN-2B50AE494DE7",
+  "valid_keys": [
+    "T4_2", "T5_2", "T6_1a", "T3_1a", "T4_4", "T6_1c", "T6_1d", "T3_1b", "T3_2a", "T3_3b", "T4_1"
+  ],
+  "recorded_schema_errors": [
+    "themes/1/finding_keys/2: 'T6_1d_dom' is not one of ['T4_2', 'T5_2', 'T6_1a', 'T3_1a', 'T4_4', 'T6_1c', 'T6_1d', 'T3_1b', 'T3_2a', 'T3_3b', 'T4_1']",
+    "themes/3/finding_keys/3: 'T3_2a_air_dom' is not one of ['T4_2', 'T5_2', 'T6_1a', 'T3_1a', 'T4_4', 'T6_1c', 'T6_1d', 'T3_1b', 'T3_2a', 'T3_3b', 'T4_1']"
+  ],
+  "failing_response": {
+    "schema_version": "finding-synthesis/1",
+    "themes": [
+      {
+        "title": "Documentation gaps",
+        "summary": "Two tests both show missing supporting information for claims.",
+        "root_cause_hypothesis": "This may reflect a gap in the receipt-attachment step for these claim types.",
+        "finding_keys": ["T4_1", "T4_2"],
+        "review_observations": []
+      },
+      {
+        "title": "Approval and daily-spend weaknesses",
+        "summary": "Approval and daily-spend controls both show exceptions in the same population.",
+        "root_cause_hypothesis": "This may reflect insufficient review before reimbursement.",
+        "finding_keys": ["T5_2", "T6_1a", "T6_1d_dom"],
+        "review_observations": []
+      },
+      {
+        "title": "Unlinked travel",
+        "summary": "Pre-approved travel and its expense claims do not always reconcile.",
+        "root_cause_hypothesis": "This may reflect incomplete integration between travel and expense systems.",
+        "finding_keys": ["T3_1a", "T4_4"],
+        "review_observations": []
+      },
+      {
+        "title": "Supplier and per-head spend exceptions",
+        "summary": "Preferred-supplier and per-head spend limits both show exceptions.",
+        "root_cause_hypothesis": "This may reflect inconsistent enforcement of spend policy at booking time.",
+        "finding_keys": ["T6_1c", "T3_1b", "T3_3b", "T3_2a_air_dom"],
+        "review_observations": []
+      }
+    ],
+    "severity_proposals": []
+  },
+  "corrected_response": {
+    "schema_version": "finding-synthesis/1",
+    "themes": [
+      {
+        "title": "Documentation gaps",
+        "summary": "Two tests both show missing supporting information for claims.",
+        "root_cause_hypothesis": "This may reflect a gap in the receipt-attachment step for these claim types.",
+        "finding_keys": ["T4_1", "T4_2"],
+        "review_observations": []
+      },
+      {
+        "title": "Approval and daily-spend weaknesses",
+        "summary": "Approval and daily-spend controls both show exceptions in the same population.",
+        "root_cause_hypothesis": "This may reflect insufficient review before reimbursement.",
+        "finding_keys": ["T5_2", "T6_1a", "T6_1d"],
+        "review_observations": []
+      },
+      {
+        "title": "Unlinked travel",
+        "summary": "Pre-approved travel and its expense claims do not always reconcile.",
+        "root_cause_hypothesis": "This may reflect incomplete integration between travel and expense systems.",
+        "finding_keys": ["T3_1a", "T4_4"],
+        "review_observations": []
+      },
+      {
+        "title": "Supplier and per-head spend exceptions",
+        "summary": "Preferred-supplier and per-head spend limits both show exceptions.",
+        "root_cause_hypothesis": "This may reflect inconsistent enforcement of spend policy at booking time.",
+        "finding_keys": ["T6_1c", "T3_1b", "T3_3b", "T3_2a"],
+        "review_observations": []
+      }
+    ],
+    "severity_proposals": []
+  }
+}

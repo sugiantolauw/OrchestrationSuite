@@ -63,8 +63,8 @@ def _build_narration_gateway(ctx: NodeContext):
         retry_backoff_s=getattr(ctx.settings, "llm_retry_backoff_s", 5.0),
         timeout_s=getattr(ctx.settings, "llm_timeout_s", 180.0), clock=ctx.clock,
         fallback_role=FALLBACK_ROLE,
-        max_transport_attempts=getattr(ctx.settings, "llm_max_transport_attempts", 3),
-        retry_backoff_max_s=getattr(ctx.settings, "llm_retry_backoff_max_s", 30.0),
+        max_transport_attempts=getattr(ctx.settings, "llm_max_transport_attempts", 5),
+        retry_backoff_max_s=getattr(ctx.settings, "llm_retry_backoff_max_s", 75.0),
     )
 
 

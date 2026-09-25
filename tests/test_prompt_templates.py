@@ -378,6 +378,10 @@ _GOLDEN_PAYLOADS: dict[str, dict] = {
         "template_management_questions": ["What is the current policy for handling claims without receipts?"],
     },
     "find_synthesis": {
+        "identifiers": [
+            {"key": "T4_1", "test_ids": ["T4.1"]},
+            {"key": "T5_1", "test_ids": ["T5.1"]},
+        ],
         "findings": [
             {"key": "T4_1", "title": "Missing Receipt Documentation", "test_id": "T4.1", "severity": "High",
              "severity_rule": "missing_receipt_pct > 10", "monetary_basis": "spend",
@@ -456,7 +460,14 @@ _GOLDEN_PROMPT_SHA256: dict[str, str] = {
     # describe any theme ("gaps in oversight procedures") and requires naming which of the
     # theme's own test_ids and what pattern across them the hypothesis draws on, grounded
     # only in facts PAYLOAD.findings already gives for that theme's members.
-    "find_synthesis": "4900f36b954825f3b6dac9b197bff224363141ae47cd7ca20b5a0cf880812994",
+    # Updated 2026-09-25 (round 4, task item 1): a live run's find_synthesis call returned
+    # finding_keys entries ('T6_1d_dom', 'T3_2a_air_dom') that were never in the schema's own
+    # key enum -- the model had applied the round-3 "copy the test_id suffix verbatim"
+    # instruction to the key field instead. IDENTIFIERS now points at the payload's own new
+    # PAYLOAD.identifiers list ({key, test_ids} pairs) and states plainly which field goes in
+    # the schema's JSON and which goes in prose, never the other way; the golden payload above
+    # carries that new field too.
+    "find_synthesis": "65a35596ac00ccd518012e14908bec7ce72bb5803fefbd86de835ecf2fef2baa",
     "find_candidates": "8f3a5d7fd6677e52e08f01dccc9612ecbdb380caa5f6ff477de0a609ae666ab7",
     "prioritise": "7285b8504f492a7e9761ba12577ac5d9662b130fd78d8c6d1229cce437ca3218",
     "act": "d107386ecaefbcdc670530019bfde4b7a6872497a1d79d35a11bdff4e0029157",
