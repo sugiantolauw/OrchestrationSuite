@@ -472,6 +472,17 @@ def _refresh(run_id: str) -> html.Div:
     return _render_body(run, run_id, narration)
 
 
+def _refresh_from_state(run_id: str, state) -> html.Div:
+    """BUG-PERF-2 (P3/P4 perf gap review 2026-09-25): confirm_plan/sign_off/
+    resume_run/regenerate_narration each already return the RunState their
+    own write just produced -- use it directly (adapters.
+    get_run_and_narration_from_state) instead of `_refresh`'s fresh
+    `persistence.load_state`, which reloads the exact same row this click's
+    own write already has in hand."""
+    run, narration = adapters.get_run_and_narration_from_state(run_id, state)
+    return _render_body(run, run_id, narration)
+
+
 def _stale_run_panel(exc: RunCodeRevisionStale) -> html.Div:
     return html.Div([
         _error_panel(exc),
@@ -505,7 +516,7 @@ def register_callbacks(app) -> None:
         if not n_clicks:
             raise PreventUpdate
         try:
-            adapters.confirm_plan(run_id, _request_actor())
+            state = adapters.confirm_plan(run_id, _request_actor())
         except adapters.MissingIdentityHeader as exc:
             return _error_panel(exc)
         except RunCodeRevisionStale as exc:
@@ -515,7 +526,7 @@ def register_callbacks(app) -> None:
             # starts a fresh run with the same parameters (_restart_stale
             # below), never a silent run under a different setup.
             return _stale_run_panel(exc)
-        return _refresh(run_id)
+        return _refresh_from_state(run_id, state)
 
     # "Sign off findings" only opens the native confirm dialog (a single-
     # Input callback writing a single, ALWAYS-mounted component's own prop --
@@ -542,14 +553,14 @@ def register_callbacks(app) -> None:
         if not submit_n_clicks:
             raise PreventUpdate
         try:
-            adapters.sign_off(run_id, _request_actor())
+            state = adapters.sign_off(run_id, _request_actor())
         except (adapters.MissingIdentityHeader, CandidatesUndecided) as exc:
             # UI-3: CandidatesUndecided's own message is exactly "decide
             # every AI-proposed finding before sign-off" (orchestrator/
             # errors.py) -- _error_panel renders it verbatim, never
             # re-worded here.
             return _error_panel(exc)
-        return _refresh(run_id)
+        return _refresh_from_state(run_id, state)
 
     @app.callback(
         Output("run-page-body", "children", allow_duplicate=True),
@@ -561,10 +572,10 @@ def register_callbacks(app) -> None:
         if not n_clicks:
             raise PreventUpdate
         try:
-            adapters.resume_run(run_id, _request_actor())
+            state = adapters.resume_run(run_id, _request_actor())
         except adapters.MissingIdentityHeader as exc:
             return _error_panel(exc)
-        return _refresh(run_id)
+        return _refresh_from_state(run_id, state)
 
     @app.callback(
         Output("run-download-xlsx", "data"),
@@ -675,11 +686,11 @@ def register_callbacks(app) -> None:
         if not submit_n_clicks:
             raise PreventUpdate
         try:
-            adapters.regenerate_narration(run_id, _request_actor())
+            state = adapters.regenerate_narration(run_id, _request_actor())
         except (adapters.MissingIdentityHeader, NarrationDisabled, NarrationNodeUnavailable,
                 RunNotAwaitingSignoff) as exc:
             return _error_panel(exc)
-        return _refresh(run_id)
+        return _refresh_from_state(run_id, state)
 
     # ── Stale-confirm restart ─────────────────────────────────────────────
 

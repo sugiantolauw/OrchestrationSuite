@@ -225,16 +225,42 @@ def get_run_and_narration(run_id: str) -> tuple[dict | None, dict | None]:
     return run, narration
 
 
-def confirm_plan(run_id: str, actor: str) -> None:
-    service.confirm_plan(get_context(), run_id, actor)
+def get_run_and_narration_from_state(run_id: str, state) -> tuple[dict | None, dict | None]:
+    """P3/P4 perf gap review 2026-09-25 (BUG-PERF-2): every action button on
+    `/run/<id>` (confirm plan / sign off / resume / regenerate) calls a
+    `orchestrator.service` write function that ALREADY returns the resulting,
+    just-saved `RunState` -- and then re-rendered by calling
+    `get_run_and_narration(run_id)`, which reloads that same state from Delta
+    all over again (measured live: several seconds of visible lag between
+    the write succeeding and the page updating, e.g. sign-off's `runs.status`
+    already showing 'queued' server-side while the rendered page still showed
+    the old panel). This is `get_run_and_narration`'s own body, minus its own
+    `persistence.load_state` call -- `state` is that already-fresh RunState,
+    never re-fetched. Falls back to the two separate, run_id-only calls
+    exactly like `get_run_and_narration` does when there is no real
+    `.persistence` to pass `state=` into (app/tests/fake_service.py), so a
+    caller can use this unconditionally after any write."""
+    ctx = get_context()
+    persistence = getattr(ctx, "persistence", None)
+    if persistence is None or state is None:
+        run = get_run(run_id)
+        narration = get_narration_review(run_id) if run and run.get("status") == "awaiting_signoff" else None
+        return run, narration
+    run = service.get_run(ctx, run_id, state=state)
+    narration = get_narration_review(run_id, state=state) if run.get("status") == "awaiting_signoff" else None
+    return run, narration
 
 
-def sign_off(run_id: str, actor: str) -> None:
-    service.sign_off(get_context(), run_id, actor)
+def confirm_plan(run_id: str, actor: str):
+    return service.confirm_plan(get_context(), run_id, actor)
 
 
-def resume_run(run_id: str, actor: str) -> None:
-    service.resume_run(get_context(), run_id, actor)
+def sign_off(run_id: str, actor: str):
+    return service.sign_off(get_context(), run_id, actor)
+
+
+def resume_run(run_id: str, actor: str):
+    return service.resume_run(get_context(), run_id, actor)
 
 
 def get_run_payload(run_id: str) -> dict:
@@ -498,8 +524,8 @@ def edit_narrative(run_id: str, narrative_id: str, new_text, actor: str) -> dict
     return service.edit_narrative(get_context(), run_id, narrative_id, new_text, actor=actor)
 
 
-def regenerate_narration(run_id: str, actor: str) -> None:
-    service.regenerate_narration(get_context(), run_id, actor)
+def regenerate_narration(run_id: str, actor: str):
+    return service.regenerate_narration(get_context(), run_id, actor)
 
 
 def restart_stale_run(run_id: str, actor: str) -> str:
