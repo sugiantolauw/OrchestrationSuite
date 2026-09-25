@@ -179,10 +179,22 @@ unavailable (gateway status "unavailable") → template fallback (origin: fallba
 ```
 
 - The gateway's own single client-side JSON retry (`transport_attempt` 2) stays as it is.
-- The budget per item is at most 2 logical calls (`seq`) × 2 transport attempts.
+- **Amended 2026-09-25 (perf review, root-cause fix for a live incident):** the budget per item is
+  at most 2 logical calls (`seq`) × `Settings.llm_max_transport_attempts` transport attempts
+  (default 3 -- was hardcoded 2). A `RateLimited`/`TransientModelError` retries with bounded,
+  `Retry-After`-honouring backoff (capped at `llm_retry_backoff_max_s`, plus jitter to
+  de-synchronise concurrent retries) before it counts as unavailable.
 - A **circuit breaker**: after the first `unavailable` on a role within one `narrate` execution,
-  every later item on that role is marked `fallback_unavailable` without calling. That is noted
-  once in the trace, and there is no `llm_calls` row, because no call was made.
+  every later item on that role is marked `fallback_unavailable` without calling. **Amended
+  2026-09-25:** this now fires only when that `unavailable` is *permanent*
+  (`ModelUnavailable.permanent` -- a real 403/404/"rate limit of 0"/unconfigured endpoint). A
+  `RateLimited`/`TransientModelError` that exhausted its bounded retries is `permanent=False`:
+  that one item still falls back, but a sibling item on the same role is not pre-emptively
+  skipped. Found live: under `narrate`'s bounded thread pool, a single transient 429 burst
+  against the workspace's QPS limit used to trip the breaker for every other in-flight/queued item
+  sharing the role, turning one rate-limit blip into a run's worth of fallback narratives. That is
+  noted once in the trace, and there is no `llm_calls` row for a SKIPPED item, because no call was
+  made -- an item whose own call genuinely ran (even if it then failed) always leaves a row.
 - **Fallback text per task:**
 
   | Task | Fallback |

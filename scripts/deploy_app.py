@@ -138,6 +138,8 @@ _ALWAYS_FORWARDED_SETTINGS: list[tuple[str, str]] = [
     ("readiness_cache_ttl_s", "READINESS_CACHE_TTL_S"),
     ("llm_timeout_s", "LLM_TIMEOUT_S"),
     ("llm_retry_backoff_s", "LLM_RETRY_BACKOFF_S"),
+    ("llm_max_transport_attempts", "LLM_MAX_TRANSPORT_ATTEMPTS"),
+    ("llm_retry_backoff_max_s", "LLM_RETRY_BACKOFF_MAX_S"),
     ("enable_row_level_llm", "ENABLE_ROW_LEVEL_LLM"),
     ("llm_cache_mode", "LLM_CACHE_MODE"),
     # BUG-1: Explorer refuses to start with this unset (NN14) -- Explorer is

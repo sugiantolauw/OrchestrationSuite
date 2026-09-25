@@ -246,7 +246,15 @@ def _generate_item(
         schema=schema, ctx=rc.call_ctx(), prompt_template_id=f"narration/{task}", prompt_template_version=ptver,
     )
     if result.status == "unavailable":
-        rc.mark_role_pair_dead(pair)
+        # Perf review 2026-09-25: only a PERMANENT unavailability (a real
+        # 403/404/rate-limit-0/unconfigured-endpoint, `LLMResult.permanent`)
+        # trips the breaker for every other item sharing this role -- a
+        # RateLimited/TransientModelError that exhausted its bounded
+        # retries (`permanent=False`) means only THIS item could not get an
+        # answer; a sibling item, not yet dispatched, still gets its own
+        # attempt.
+        if result.permanent:
+            rc.mark_role_pair_dead(pair)
         return NarrationOutcome("fallback_unavailable", None, [result.call_id], None, None)
 
     call_ids = [result.call_id]
@@ -267,7 +275,8 @@ def _generate_item(
     )
     call_ids.append(repair_result.call_id)
     if repair_result.status == "unavailable":
-        rc.mark_role_pair_dead(pair)
+        if repair_result.permanent:
+            rc.mark_role_pair_dead(pair)
         return NarrationOutcome("fallback_unavailable", None, call_ids, None, None)
     if repair_result.status == "ok":
         is_valid2, violations2 = validate_fn(repair_result.parsed)

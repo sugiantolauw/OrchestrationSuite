@@ -32,7 +32,7 @@ import time
 import pytest
 
 from orchestrator.adapters.model_fake import RaisingModelClient
-from orchestrator.llm.errors import ModelUnavailable
+from orchestrator.llm.errors import ModelUnavailable, RateLimited
 from orchestrator.llm.gateway import CallContext, LLMResult
 from orchestrator.narration import runner
 from orchestrator.nodes.narration import narrate
@@ -321,12 +321,14 @@ def test_a_call_already_dead_is_never_dispatched():
     assert gateway.call_count == 0
 
 
-def test_a_call_that_trips_the_breaker_still_logs_its_own_row():
+def test_a_permanently_unavailable_call_still_logs_its_own_row_and_trips_the_breaker():
     """The breaker's "in-flight ones finish/log" half: a call made while
     the pair is NOT yet dead still goes through the gateway and gets a
     call_id back, even though its own outcome is what marks the pair dead
-    for whoever asks next."""
-    gateway = _OneShotGateway(LLMResult("unavailable", None, None, "cid-1", None, None, "endpoint down"))
+    for whoever asks next -- for a call whose `LLMResult.permanent` is
+    True (a real 403/404/rate-limit-0/unconfigured-endpoint, never a
+    RateLimited/TransientModelError that merely exhausted its retries)."""
+    gateway = _OneShotGateway(LLMResult("unavailable", None, None, "cid-1", None, None, "endpoint down", permanent=True))
     rc = _rc(gateway)
     assert not rc.is_role_pair_dead(("model_sonnet", None))
 
@@ -338,6 +340,32 @@ def test_a_call_that_trips_the_breaker_still_logs_its_own_row():
     assert outcome.origin == "fallback_unavailable"
     assert outcome.call_ids == ["cid-1"], "the call that tripped the breaker must still be logged, not dropped"
     assert rc.is_role_pair_dead(("model_sonnet", None))
+
+
+def test_a_transient_unavailable_call_never_trips_the_breaker():
+    """Root-cause fix, perf review 2026-09-25: found live, a single
+    RateLimited(429) burst under concurrency exhausted the (then-only-one)
+    retry and tripped the breaker for every OTHER item sharing the role,
+    turning one transient rate limit into a run's worth of fallback
+    narratives. `LLMGateway` now marks that outcome `permanent=False`
+    (bounded retries exhausted for THIS item, not proof the endpoint is
+    down), and `_generate_item` must not mark the pair dead for it."""
+    gateway = _OneShotGateway(
+        LLMResult("unavailable", None, None, "cid-1", None, None, "rate limited, retries exhausted", permanent=False)
+    )
+    rc = _rc(gateway)
+    assert not rc.is_role_pair_dead(("model_sonnet", None))
+
+    outcome = runner._generate_item(
+        rc, task="find", payload={}, schema={"type": "object"}, extra_params={},
+        validate_fn=lambda parsed: (True, []),
+    )
+
+    assert outcome.origin == "fallback_unavailable"  # this ITEM still falls back -- it genuinely got no answer
+    assert outcome.call_ids == ["cid-1"]
+    assert not rc.is_role_pair_dead(("model_sonnet", None)), (
+        "a transient (non-permanent) failure must never trip the breaker for a sibling item"
+    )
 
 
 # ── circuit breaker: real thread pool, proving the mechanism above is what
@@ -395,3 +423,67 @@ def test_breaker_trip_under_real_concurrency_completes_without_raising(local_per
         key = (c["task"], c["seq"], c["transport_attempt"], c["endpoint_role"])
         assert key not in seen
         seen.add(key)
+
+
+# ── root-cause regression: a transient rate-limit burst under concurrency
+# must recover through bounded retry, never cascade into fallbacks (perf
+# review 2026-09-25, found live) ────────────────────────────────────────────
+
+
+def _canonical_json(value) -> str:
+    import json
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+class _FlakyOnceThenSucceeds:
+    """Every DISTINCT request (by its own canonical message content) is
+    rate-limited on its first attempt, then answers normally on retry --
+    the shape of the live incident this fix targets: a burst of concurrent
+    calls each transiently rate-limited once, all of which should recover
+    through `LLMGateway`'s own bounded retry rather than fall back."""
+
+    def __init__(self, inner):
+        self._inner = inner
+        self._seen: set[str] = set()
+        self._lock = threading.Lock()
+
+    def chat(self, *, endpoint, messages, params, timeout_s):
+        key = _canonical_json(messages)
+        with self._lock:
+            first_attempt = key not in self._seen
+            self._seen.add(key)
+        if first_attempt:
+            raise RateLimited(endpoint, "slow down", retry_after_s=0.01)
+        return self._inner.chat(endpoint=endpoint, messages=messages, params=params, timeout_s=timeout_s)
+
+    def describe_endpoint(self, endpoint: str) -> dict:
+        return self._inner.describe_endpoint(endpoint)
+
+
+def test_a_transient_rate_limit_burst_under_concurrency_recovers_with_zero_fallbacks(local_persistence, tmp_path):
+    """The concrete regression the coordinator asked for: re-running the
+    live scenario's SHAPE (every item transiently rate-limited once under
+    concurrent dispatch) must retry through to a real model answer for
+    every one of them -- zero narratives fall back to template text because
+    of concurrency-induced rate limiting."""
+    inner = ConcurrencyTrackingModelClient(happy_responses(), delay_range=(0.0, 0.02), seed=13)
+    client = _FlakyOnceThenSucceeds(inner)
+    h = make_narration_harness(
+        local_persistence, tmp_path, model_client=client, narration_max_parallel=4,
+        llm_retry_backoff_s=0.0, llm_max_transport_attempts=3,
+    )
+    state = run_to_narrate_input(h)
+    result_state = narrate(h.ctx, state)
+
+    calls = local_persistence.list_llm_calls(state.run_id)
+    rate_limited_rows = [c for c in calls if c["error_type"] == "RateLimited"]
+    assert rate_limited_rows, "the scenario never actually hit a transient rate limit -- test proves nothing"
+    assert all(c["outcome"] == "failed_transport" for c in rate_limited_rows), (
+        "every RateLimited row here must have been RETRIED (failed_transport), never given up on"
+    )
+
+    narratives = local_persistence.get_narratives(state.run_id)
+    assert narratives
+    origins = {n["origin"] for n in narratives}
+    assert origins == {"model"}, f"a transient rate-limit burst caused a non-model narrative origin: {origins}"
+    assert result_state.exec_summary is not None, "exec_summary fell back although its call should have recovered"

@@ -51,10 +51,19 @@ def _chat_data(content, *, finish_reason="stop", model="gpt-oss-120b-080525", us
     }
 
 
+class _FakeAPIResponse:
+    def __init__(self, headers: dict):
+        self.headers = _FakeHeaders(headers)
+
+
 class _FakeAPIError(Exception):
-    def __init__(self, message, status_code=None):
+    def __init__(self, message, status_code=None, response_headers=None):
         super().__init__(message)
         self.status_code = status_code
+        # Mirrors openai's APIStatusError shape (a raw httpx.Response on
+        # `.response`) -- only set when a test actually wants a header
+        # extracted, so every existing construction is unaffected.
+        self.response = _FakeAPIResponse(response_headers) if response_headers is not None else None
 
 
 class _FakeCreate:
@@ -191,6 +200,31 @@ def test_429_raises_rate_limited():
     client, _ = _client_with(_FakeAPIError("slow down", status_code=429))
     with pytest.raises(RateLimited):
         client.chat(endpoint="ep1", messages=[], params={}, timeout_s=30)
+
+
+def test_429_with_retry_after_header_is_captured_on_the_exception():
+    client, _ = _client_with(
+        _FakeAPIError("slow down", status_code=429, response_headers={"retry-after": "7"})
+    )
+    with pytest.raises(RateLimited) as exc_info:
+        client.chat(endpoint="ep1", messages=[], params={}, timeout_s=30)
+    assert exc_info.value.retry_after_s == 7.0
+
+
+def test_429_without_retry_after_header_leaves_it_none():
+    client, _ = _client_with(_FakeAPIError("slow down", status_code=429))
+    with pytest.raises(RateLimited) as exc_info:
+        client.chat(endpoint="ep1", messages=[], params={}, timeout_s=30)
+    assert exc_info.value.retry_after_s is None
+
+
+def test_500_with_retry_after_header_is_captured_on_the_exception():
+    client, _ = _client_with(
+        _FakeAPIError("server blew up", status_code=500, response_headers={"Retry-After": "3.5"})
+    )
+    with pytest.raises(TransientModelError) as exc_info:
+        client.chat(endpoint="ep1", messages=[], params={}, timeout_s=30)
+    assert exc_info.value.retry_after_s == 3.5
 
 
 def test_500_raises_transient_model_error():

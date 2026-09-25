@@ -15,12 +15,19 @@ class LLMConfigError(Exception):
 
 class ModelUnavailable(Exception):
     """CLAUDE.md §6 NN13 degraded mode: "LLM unavailable — deterministic
-    output only". Raised for a 403 (including "rate limit of 0"), a 404 (no
-    such endpoint), or when transient failures/rate limiting exhaust their
-    one retry. `permanent` distinguishes "this endpoint will not come back
-    without operator action" (403/404) from "exhausted after one retry,
-    might work next time" -- both are ModelUnavailable to a caller, since
-    neither justifies a second automatic attempt right now."""
+    output only". Raised directly for a 403 (including "rate limit of 0") or
+    a 404 (no such endpoint) -- these are always `permanent=True`, since no
+    amount of retrying reaches an endpoint that is disabled or does not
+    exist. `LLMGateway` itself also RETURNS (never raises) an "unavailable"
+    `LLMResult` when a RateLimited/TransientModelError exhausts its bounded
+    retries -- that outcome carries `permanent=False` (found live
+    2026-09-25, perf review: a concurrent run's transient 429 burst must not
+    be treated the same as a genuinely dead endpoint). `permanent`
+    distinguishes "this endpoint will not come back without operator
+    action" from "could not get an answer for THIS item within the retry
+    budget, might work next time" -- only the former may trip
+    `orchestrator.narration.runner`'s circuit breaker for every other item
+    sharing the same role."""
 
     def __init__(self, endpoint: str, reason: str, *, permanent: bool = True):
         self.endpoint = endpoint
@@ -30,20 +37,28 @@ class ModelUnavailable(Exception):
 
 
 class RateLimited(Exception):
-    """429. Retried once by LLMGateway; a second 429 becomes ModelUnavailable."""
+    """429. Retried by `LLMGateway` with bounded, honoured-Retry-After
+    backoff (`Settings.llm_max_transport_attempts`/
+    `llm_retry_backoff_max_s`) before the call counts as (non-permanent)
+    unavailable -- CLAUDE.md §6 fallback rule, perf review 2026-09-25.
+    `retry_after_s`, when the endpoint's own response states one, is the
+    exact wait `LLMGateway` uses instead of its own computed backoff."""
 
-    def __init__(self, endpoint: str, reason: str):
+    def __init__(self, endpoint: str, reason: str, *, retry_after_s: float | None = None):
         self.endpoint = endpoint
         self.reason = reason
+        self.retry_after_s = retry_after_s
         super().__init__(f"model endpoint {endpoint!r} rate limited: {reason}")
 
 
 class TransientModelError(Exception):
-    """5xx, timeout, or connection error. Retried once by LLMGateway; a
-    second failure becomes ModelUnavailable."""
+    """5xx, timeout, or connection error. Retried by `LLMGateway` the same
+    bounded way `RateLimited` is (`retry_after_s` is rare for this class,
+    but the field exists for a 5xx response that states one)."""
 
-    def __init__(self, endpoint: str, reason: str):
+    def __init__(self, endpoint: str, reason: str, *, retry_after_s: float | None = None):
         self.endpoint = endpoint
+        self.retry_after_s = retry_after_s
         self.reason = reason
         super().__init__(f"model endpoint {endpoint!r} transient failure: {reason}")
 

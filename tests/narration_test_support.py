@@ -87,7 +87,8 @@ def make_narration_harness(
     model_sonnet: str | None = MODEL_SONNET_ENDPOINT, model_gpt_oss: str | None = MODEL_GPT_OSS_ENDPOINT,
     llm_cache_mode: str = "live", run_owner: str = "alice", engagement_id: str = "ENG-DEFAULT",
     skill_dir: Path = MINI_SKILL_DIR, ai_proposed_findings_enabled: bool = False,
-    narration_max_candidates: int = 3, data_writer=_write_mini_data, narration_max_parallel: int = 4,
+    narration_max_candidates: int = 3, data_writer=_write_mini_data, narration_max_parallel: int = 2,
+    llm_retry_backoff_s: float = 0.0, llm_max_transport_attempts: int = 3,
 ) -> NarrationHarness:
     # `skill_dir`/`ai_proposed_findings_enabled`/`narration_max_candidates`/
     # `data_writer` (P6 WP N8): every existing caller omits them, so every
@@ -121,6 +122,11 @@ def make_narration_harness(
         model_sonnet=model_sonnet, model_gpt_oss=model_gpt_oss, narration_enabled=narration_enabled,
         llm_cache_mode=llm_cache_mode, ai_proposed_findings_enabled=ai_proposed_findings_enabled,
         narration_max_candidates=narration_max_candidates, narration_max_parallel=narration_max_parallel,
+        # Test-suite default 0.0 (production default is 5.0, orchestrator.config):
+        # no existing narration test exercises a RateLimited/TransientModelError
+        # retry, so a fast default keeps the harness quick without needing every
+        # caller to pass it; a test that DOES exercise retries overrides this.
+        llm_retry_backoff_s=llm_retry_backoff_s, llm_max_transport_attempts=llm_max_transport_attempts,
     )
     export_dir = tmp_path / "exports"
     ctx = NodeContext(
