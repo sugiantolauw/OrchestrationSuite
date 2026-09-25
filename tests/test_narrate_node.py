@@ -128,20 +128,83 @@ def test_unavailable_gives_fallback_with_no_repair_and_breaks_the_role(local_per
     # the primary role alone: `profile`/`prioritise`/`act` share ONE pair
     # (model_sonnet, model_gpt_oss); `find`/`find_synthesis`/`export_summary`
     # share a DIFFERENT pair (model_sonnet, None) since they have no
-    # fallback role; `export_caption` is its own pair (model_gpt_oss, None).
-    # Once every RaisingModelClient endpoint fails, each of those three
-    # DISTINCT pairs is attempted exactly once and then skipped for every
-    # later item sharing it -- `profile` first (2 rows: primary then
-    # fallback), `find`'s first item next (1 row, no fallback configured for
-    # it), `export_caption` last (1 row) -- 4 rows total, not one per item.
+    # fallback role; `export_caption` is its own pair (model_gpt_oss, None)
+    # with no sibling at all in this test.
+    #
+    # `narrate`'s independent items run through a bounded thread pool
+    # (orchestrator.nodes.narration._run_bounded, perf review 2026-09-25).
+    # This used to assert an EXACT total of 4 calls -- one attempt per pair,
+    # on the theory that whichever item is scheduled earliest always wins
+    # the race and trips the breaker before any sibling sharing its pair is
+    # even dispatched. That is the common case, not a guarantee: this
+    # harness's default `narration_max_parallel=2` still lets a second item
+    # sharing the (model_sonnet, None) pair (two `find` findings + one
+    # `find_synthesis`, all with no fallback and so no repair round to slow
+    # them down) be claimed by the pool's other worker and start its own
+    # attempt before the first item's `RunnerContext.mark_role_pair_dead`
+    # has run -- a real, if narrow, unprotected race between "is this pair
+    # already dead?" and "mark it dead", not a bug in the breaker itself.
+    # tests/test_narration_concurrency.py's own
+    # test_breaker_trip_under_real_concurrency_completes_without_raising
+    # documents the identical mechanism for the same reason: "the breaker
+    # guarantees at least one call was made ... and never more than one per
+    # item -- it cannot guarantee exactly how many were already in flight
+    # before the first failure was recorded (that is a genuine race), only
+    # that it is bounded." This test asserts the same kind of bound instead
+    # of an exact count that a real (if rare, observed live roughly 1 run in
+    # 6) scheduling order can violate -- forcing every pair's attempts to be
+    # strictly serialized would trade away the concurrency this perf review
+    # was for, to guarantee an exact call count nothing downstream actually
+    # depends on: every property that DOES matter -- no more than one
+    # attempt per item, every attempt logged, every outcome "unavailable",
+    # no duplicate row -- already holds regardless of how many items raced.
     calls = local_persistence.list_llm_calls(state.run_id)
-    assert len(calls) == 4
     assert all(c["outcome"] == "unavailable" for c in calls)
-    pairs_seen = {(c["task"], c["endpoint_role"]) for c in calls}
-    assert pairs_seen == {
-        ("profile", "model_sonnet"), ("profile", "model_gpt_oss"),
-        ("find", "model_sonnet"), ("export_caption", "model_gpt_oss"),
-    }
+    assert len({c["call_id"] for c in calls}) == len(calls), "a call_id must never repeat across two rows"
+
+    by_task: dict[str, list[dict]] = {}
+    for c in calls:
+        by_task.setdefault(c["task"], []).append(c)
+
+    # (model_sonnet, model_gpt_oss): `profile` is job index 0 -- nothing
+    # sharing its pair (`prioritise`/`act`) can possibly be dispatched
+    # before it, so it always attempts. `prioritise`/`act` may or may not,
+    # depending on whether the pool reaches them before `profile`'s own
+    # attempt (2 rows: primary then fallback) trips the breaker.
+    assert "profile" in by_task
+    for task in ("profile", "prioritise", "act"):
+        if task in by_task:
+            assert {c["endpoint_role"] for c in by_task[task]} == {"model_sonnet", "model_gpt_oss"}, task
+    ab_calls = sum(len(by_task.get(t, [])) for t in ("profile", "prioritise", "act"))
+    assert 2 <= ab_calls <= 6, f"expected 2-6 calls across profile/prioritise/act, got {ab_calls}"
+
+    # (model_sonnet, None): `find`'s first finding is job index 1 -- same
+    # reasoning, it always attempts (never a fallback row: no fallback role
+    # is configured for it). `find_synthesis` (job index 3) and the run's
+    # second `find` item (job index 2) may or may not race in before it
+    # trips the breaker. `export_summary` shares this exact pair too but
+    # runs strictly AFTER this thread pool (it needs synthesis's themes,
+    # narrate()'s own sequential step below) -- by then the pair is always
+    # already dead (find guarantees at least one attempt), so it is never
+    # in `calls` at all: "there is no llm_calls row, because no call was
+    # made".
+    assert "find" in by_task
+    assert all(c["endpoint_role"] == "model_sonnet" for c in by_task["find"])
+    if "find_synthesis" in by_task:
+        assert {c["endpoint_role"] for c in by_task["find_synthesis"]} == {"model_sonnet"}
+    assert "export_summary" not in by_task
+    a_calls = len(by_task["find"]) + len(by_task.get("find_synthesis", []))
+    assert 1 <= a_calls <= 3, f"expected 1-3 calls across find/find_synthesis, got {a_calls}"
+
+    # (model_gpt_oss, None): `export_caption` has no sibling sharing this
+    # pair (find_candidates is disabled by default here) -- always exactly
+    # one attempt, no race possible.
+    assert by_task.get("export_caption") and {c["endpoint_role"] for c in by_task["export_caption"]} == {"model_gpt_oss"}
+    assert len(by_task["export_caption"]) == 1
+
+    assert set(by_task) <= {"profile", "prioritise", "act", "find", "find_synthesis", "export_caption"}
+    assert len(calls) == ab_calls + a_calls + 1
+
     assert result.exec_summary is not None  # a narratives row still exists, fallback-origin
 
 
