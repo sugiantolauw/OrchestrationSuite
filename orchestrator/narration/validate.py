@@ -514,7 +514,16 @@ def validate_prose(
     # hedge anywhere in that sentence does not). Runs on `stripped` (already
     # placeholder-free, like N-S1/N-S2 above) -- no rendering is needed
     # since every word involved is literal, never a placeholder's value.
+    # An interrogative sentence (ends "?") is exempt: "What causes a claim
+    # to be missing its register match?" and "...a process that doesn't
+    # result in an expense report?" (both real, pre-existing management
+    # questions -- tests/narration_test_support.py, skills/tne_exco/
+    # findings.yaml T3.1a) ASK about a cause, they do not ASSERT one; only
+    # a declarative sentence can assert a definite cause-and-effect, which
+    # is the thing this rule exists to catch.
     for sentence in SENTENCE_SPLIT_RE.split(stripped):
+        if sentence.rstrip().endswith("?"):
+            continue
         connective_hits = find_causal_connectives(sentence)
         if not connective_hits:
             continue
