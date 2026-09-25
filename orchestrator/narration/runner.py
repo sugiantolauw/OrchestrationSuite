@@ -64,6 +64,7 @@ from orchestrator.narration.payloads import (
     build_remediation_payload,
     build_synthesis_payload,
     finding_key,
+    identifiers_for_findings,
 )
 from orchestrator.narration.placeholders import PlaceholderEntry, render, scan_placeholders
 from orchestrator.narration.schemas import (
@@ -404,12 +405,7 @@ def narrate_profile(rc: RunnerContext, state, skill) -> str | None:
 
 
 def _allowed_identifiers(finding: dict) -> set[str]:
-    ids = set()
-    for key in ("test_id", "control_id", "risk_id"):
-        value = finding.get(key)
-        if value:
-            ids.add(value)
-    return ids
+    return set(identifiers_for_findings([finding]))
 
 
 def narrate_finding(
@@ -468,7 +464,7 @@ def narrate_synthesis(rc: RunnerContext, findings: list[dict], *, skill) -> tupl
     keys = [finding_key(f) for f in findings]
     schema = finding_synthesis_schema(keys)
     findings_by_key = {finding_key(f): f for f in findings}
-    allowed = {f.get("test_id") for f in findings if f.get("test_id")}
+    allowed = identifiers_for_findings(findings)
 
     def validate_fn(parsed: dict) -> tuple[bool, list[dict]]:
         violations: list[dict] = []

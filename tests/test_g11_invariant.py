@@ -170,6 +170,7 @@ def test_every_stored_narrative_re_validates_and_renders_with_digits_confined_to
                 continue
 
             table = service._narrative_table(ctx, state, row)
+            allowed_identifiers = service._narrative_allowed_identifiers(ctx, state, row)
             validator_field = service._VALIDATOR_FIELD_FOR[(row["target_kind"], row["field"])]
             is_list = row["field"] in service._LIST_NARRATIVE_FIELDS
             raw = row["template_text"]
@@ -181,7 +182,10 @@ def test_every_stored_narrative_re_validates_and_renders_with_digits_confined_to
             covered: set[str] = set()
             for item in items:
                 checked += 1
-                result = validate_prose(item, table, field=validator_field, origin=origin_arg)
+                result = validate_prose(
+                    item, table, field=validator_field, origin=origin_arg,
+                    allowed_identifiers=allowed_identifiers,
+                )
                 assert result.valid, (
                     f"{run_id} {row['narrative_id']} ({row['target_kind']}.{row['field']}, "
                     f"origin={row['origin']}): stored prose no longer re-validates: "

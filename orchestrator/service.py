@@ -2658,6 +2658,60 @@ def _narrative_table(ctx: AppContext, state: RunState, row: dict) -> dict:
     raise NarrativeTargetNotFound(row["narrative_id"], target_kind, target_id)
 
 
+def _narrative_allowed_identifiers(ctx: AppContext, state: RunState, row: dict) -> frozenset[str]:
+    """The SAME N-D1 allow-list `orchestrator.narration.runner`/`candidates`
+    built for this row's target AT GENERATION TIME (CLAUDE.md §3.3),
+    reconstructed from this run's CURRENT persisted findings -- never a
+    second, independently-maintained set. BUG-SYNTH-T1T2 (independent
+    review round 3, 2026-09-25): `validate_prose` re-validated with NO
+    allowed identifiers at all (the empty default), so a theme's stored
+    root_cause/summary legitimately citing a member finding's own test_id
+    (e.g. "T3.1a") -- valid at generation, where `narrate_synthesis`
+    validated it against this run's full finding set -- failed on every
+    later re-validation (the G11 invariant, an auditor's edit review, a
+    live re-check). Only `theme`/`finding`/`candidate` targets carry any
+    identifier allowance at generation; every other target (`run`, `chart`,
+    `profile`) passes none there either, so this returns an empty set for
+    them too -- narrower than `_narrative_table`'s catch-all, deliberately."""
+    from orchestrator.narration.candidates import allowed_identifiers_for_cited_metrics
+    from orchestrator.narration.payloads import identifiers_for_findings
+
+    target_kind = row["target_kind"]
+    if target_kind == "theme":
+        # `narrate_synthesis` validates a theme's fields with `allowed`
+        # built from EVERY finding passed to that one `find_synthesis` call
+        # (orchestrator.nodes.narration's single `narrate_synthesis(rc,
+        # findings, skill=skill)`, this run's full finding set) -- not only
+        # the theme's own members, so the run-wide set is what a theme's
+        # stored prose was actually validated against and must be
+        # re-validated against too.
+        return identifiers_for_findings(ctx.persistence.list_findings(state.run_id))
+    if target_kind == "finding":
+        finding = next(
+            (f for f in ctx.persistence.list_findings(state.run_id) if f["finding_id"] == row["target_id"]), None
+        )
+        return identifiers_for_findings([finding]) if finding is not None else frozenset()
+    if target_kind == "candidate":
+        candidate = next(
+            (c for c in ctx.persistence.list_candidates(state.run_id) if c["candidate_id"] == row["target_id"]), None
+        )
+        if candidate is None:
+            return frozenset()
+        skill = resolve_run_skill(ctx, state)
+        test_ident: dict[str, dict] = {}
+        if skill is not None:
+            for test in skill.plan.get("tests", []):
+                tid = test.get("test_id")
+                if tid:
+                    test_ident[tid] = {"control_id": test.get("control_id"), "risk_id": test.get("risk_id")}
+        metrics = ctx.persistence.get_run_metrics(state.run_id)
+        cited = candidate.get("metrics_cited") or []
+        if isinstance(cited, dict):
+            cited = list(cited)
+        return frozenset(allowed_identifiers_for_cited_metrics(cited, metrics, test_ident))
+    return frozenset()
+
+
 def _canonical_json_compact(value) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
