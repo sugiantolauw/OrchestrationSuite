@@ -520,3 +520,234 @@ def test_landing_page_default_render_unchanged_by_explorer_wiring():
     assert ids["explorer-section"].style == {"display": "none"}
     assert "playbook-skills-section" in ids
     assert ids["playbook-skills-section"].style == {}
+
+
+# ── D5a: the source checklist itself ────────────────────────────────────────
+
+def test_start_new_objective_rejects_zero_selected_sources(monkeypatch):
+    """D5a: "no selection gives a visible error" -- 0 ticked sources returns
+    the stated error panel and never reaches adapters.start_explorer_run."""
+    from dash import no_update
+
+    def _must_not_be_called(**kwargs):
+        raise AssertionError("start_explorer_run must not be called with zero selected sources")
+
+    monkeypatch.setattr(adapters, "start_explorer_run", _must_not_be_called)
+    app = _make_app(None)
+    start_new_objective = _find_callback(app, inputs=[("explorer-start-btn", "n_clicks")])
+
+    store_data, summary = start_new_objective(
+        1, "Assess high value claims", AUDIT_PERIOD[0], AUDIT_PERIOD[1], None, None, None, [],
+    )
+    assert store_data is no_update
+    assert "Select at least one data source for Explorer Mode." in str(summary)
+
+
+def test_start_new_objective_rejects_more_than_five_selected_sources(monkeypatch):
+    """D5a's cap matches start_explorer_run's own 1-5 bound
+    (_MAX_EXPLORER_SOURCES) -- 6 ticked sources returns the stated error and
+    never reaches adapters.start_explorer_run."""
+    from dash import no_update
+
+    def _must_not_be_called(**kwargs):
+        raise AssertionError("start_explorer_run must not be called with more than 5 selected sources")
+
+    monkeypatch.setattr(adapters, "start_explorer_run", _must_not_be_called)
+    app = _make_app(None)
+    start_new_objective = _find_callback(app, inputs=[("explorer-start-btn", "n_clicks")])
+
+    six_sources = [json.dumps({"kind": "local_file", "ref": f"t{i}.csv"}) for i in range(6)]
+    store_data, summary = start_new_objective(
+        1, "Assess high value claims", AUDIT_PERIOD[0], AUDIT_PERIOD[1], None, None, None, six_sources,
+    )
+    assert store_data is no_update
+    assert "Select at most 5 data sources." in str(summary)
+
+
+def test_refresh_explorer_source_checklist_lists_available_and_own_ready_uploads(monkeypatch):
+    """Options come from Available governed tables plus this identity's own
+    Ready uploads only -- a Restricted table and another user's (or a
+    not-yet-Ready) upload are never offered."""
+    app = _make_app(None)
+    monkeypatch.setattr(adapters, "is_local_backend", lambda: True)
+    monkeypatch.setattr(adapters, "search_governed_data", lambda q, limit=None: [
+        {"name": "cat.schema.available", "access": "Available"},
+        {"name": "cat.schema.restricted", "access": "Restricted"},
+    ])
+    monkeypatch.setattr(adapters, "list_uploaded_files", lambda engagement_id=None: [
+        {"filename": "mine.csv", "status": "Ready", "uploaded_by": "explorer-auditor@example.com", "upload_id": "UP-1"},
+        {"filename": "theirs.csv", "status": "Ready", "uploaded_by": "someone-else@example.com", "upload_id": "UP-2"},
+        {"filename": "still-profiling.csv", "status": "Profiling", "uploaded_by": "explorer-auditor@example.com", "upload_id": "UP-3"},
+    ])
+
+    refresh = _find_callback(app, inputs=[
+        ("selected-mode-store", "data"), ("data-search-input", "value"), ("uploaded-files-list", "children"),
+    ])
+    flask_ctx = _fake_request(monkeypatch)
+    try:
+        options, value = refresh("explorer", "", None, None)
+    finally:
+        flask_ctx.pop()
+
+    labels = {o["label"] for o in options}
+    assert labels == {"cat.schema.available", "Upload: mine.csv"}
+    assert value == []  # nothing auto-picked
+
+
+def test_refresh_explorer_source_checklist_search_narrows_governed_options(monkeypatch):
+    app = _make_app(None)
+    captured = {}
+
+    def fake_search(q, limit=None):
+        captured["query"], captured["limit"] = q, limit
+        assets = [
+            {"name": "cat.schema.expense_report", "access": "Available"},
+            {"name": "cat.schema.attendee_validity", "access": "Available"},
+        ]
+        return [a for a in assets if not q or q.lower() in a["name"].lower()]
+
+    monkeypatch.setattr(adapters, "is_local_backend", lambda: True)
+    monkeypatch.setattr(adapters, "search_governed_data", fake_search)
+    monkeypatch.setattr(adapters, "list_uploaded_files", lambda engagement_id=None: [])
+
+    refresh = _find_callback(app, inputs=[
+        ("selected-mode-store", "data"), ("data-search-input", "value"), ("uploaded-files-list", "children"),
+    ])
+    flask_ctx = _fake_request(monkeypatch)
+    try:
+        options, _value = refresh("explorer", "expense", None, None)
+    finally:
+        flask_ctx.pop()
+
+    assert captured["query"] == "expense"
+    from src.run_setup import _EXPLORER_SOURCE_SEARCH_LIMIT
+
+    assert captured["limit"] == _EXPLORER_SOURCE_SEARCH_LIMIT
+    assert [o["label"] for o in options] == ["cat.schema.expense_report"]
+
+
+def test_refresh_explorer_source_checklist_keeps_ticks_still_offered(monkeypatch):
+    """Ticks survive an options refresh (D5a "keep the user's current
+    ticks") -- but only for values still offered: a narrower search that
+    drops an option drops its tick too, and widening back restores it."""
+    app = _make_app(None)
+    monkeypatch.setattr(adapters, "is_local_backend", lambda: True)
+    monkeypatch.setattr(adapters, "list_uploaded_files", lambda engagement_id=None: [])
+
+    def fake_search(q, limit=None):
+        assets = [
+            {"name": "cat.schema.expense_report", "access": "Available"},
+            {"name": "cat.schema.attendee_validity", "access": "Available"},
+        ]
+        return [a for a in assets if not q or q.lower() in a["name"].lower()]
+
+    monkeypatch.setattr(adapters, "search_governed_data", fake_search)
+
+    refresh = _find_callback(app, inputs=[
+        ("selected-mode-store", "data"), ("data-search-input", "value"), ("uploaded-files-list", "children"),
+    ])
+    flask_ctx = _fake_request(monkeypatch)
+    try:
+        options1, _value1 = refresh("explorer", "", None, None)
+        expense_value = next(o["value"] for o in options1 if o["label"] == "cat.schema.expense_report")
+
+        # Narrow the search to only "attendee" -- the ticked expense option
+        # disappears from what is offered, so its tick is dropped too.
+        options2, value2 = refresh("explorer", "attendee", None, [expense_value])
+        assert [o["label"] for o in options2] == ["cat.schema.attendee_validity"]
+        assert value2 == []
+
+        # Widen back -- the tick is kept because the option is offered again.
+        options3, value3 = refresh("explorer", "", None, [expense_value])
+        assert expense_value in {o["value"] for o in options3}
+        assert value3 == [expense_value]
+    finally:
+        flask_ctx.pop()
+
+
+def _write_second_source_skill(skills_dir, *, name: str, data_dir, rows: list[dict]) -> None:
+    """A second, independent local governed source (own skill directory --
+    _all_skill_source_configs combines sources across every skill directory
+    under skills_dir), so the ordering test below has two real, distinct
+    sources to select from without relying on the "upload" source kind's
+    unrelated local-backend resolution path."""
+    d = skills_dir / f"mini_explorer_source_{name}"
+    d.mkdir()
+    contract = {
+        "timezone": "Australia/Sydney",
+        "sources": {
+            name: {
+                "format": "csv", "file": f"{name}.csv", "header_trim": True,
+                "columns": {k: {"type": "string", "nullable": True} for k in rows[0]},
+            },
+        },
+    }
+    (d / "contract.yaml").write_text(yaml.safe_dump(contract, sort_keys=False))
+    pd.DataFrame(rows).to_csv(data_dir / f"{name}.csv", index=False)
+
+
+def test_selected_sources_are_profiled_in_the_order_selected(monkeypatch, tmp_path):
+    """D5a: "profiles only those [selected sources]"  -- start_new_objective
+    passes exactly the ticked sources, in the order shown, through to
+    adapters.start_explorer_run -- verified against the REAL local
+    adapter/LocalPersistence path (real_ctx's own pattern), by reading the
+    created run's own recorded sources back out, not by mocking the call."""
+    skills_dir = tmp_path / "two-source-skills"
+    skills_dir.mkdir()
+    _write_skill(skills_dir)  # "expense_report" (module-level helper)
+    data_dir = tmp_path / "two-source-data"
+    data_dir.mkdir()
+    _write_expense_data(data_dir)
+    _write_second_source_skill(
+        skills_dir, name="attendee_validity", data_dir=data_dir,
+        rows=[{"Employee ID": 1, "Valid": "Yes"}],
+    )
+
+    env = {
+        "ORCH_BACKEND": "local",
+        "ORCH_LOCAL_DB": str(tmp_path / "orch.db"),
+        "ORCH_LOCAL_DATA_ROOT": str(data_dir),
+        "ORCH_LOCAL_EXPORT_ROOT": str(tmp_path / "exports"),
+        "ORCH_WORKER_ID": "explorer-ui-order-test",
+        "SKILLS_DIR": str(skills_dir),
+        "CODE_REVISION": "test-fixed-revision",
+        "AUDIT_TIMEZONE": "Australia/Sydney",
+        "MODEL_SONNET": SONNET_ENDPOINT,
+        "MODEL_GPT_OSS": GPT_OSS_ENDPOINT,
+    }
+    real_ctx = _real_ctx_for(monkeypatch, env)
+    real_ctx.executor.start()
+    app = _make_app(real_ctx)
+    flask_ctx = _fake_request(monkeypatch)
+    try:
+        real_ctx.model_client = FakeModelClient(
+            responses={SONNET_ENDPOINT: _model_response(_wire_proposal())}
+        )
+
+        from src.run_setup import _explorer_source_options
+
+        options = _explorer_source_options("")
+        by_label = {o["label"]: o["value"] for o in options}
+        assert set(by_label) == {"expense_report.csv", "attendee_validity.csv"}
+
+        # Tick them in the REVERSE of the options' own listing order, to
+        # prove the run records the SELECTION order, not the listing order.
+        selected = [by_label["attendee_validity.csv"], by_label["expense_report.csv"]]
+
+        start_new_objective = _find_callback(app, inputs=[("explorer-start-btn", "n_clicks")])
+        store_data, summary = start_new_objective(
+            1, "Assess selected sources", AUDIT_PERIOD[0], AUDIT_PERIOD[1], None, None, None, selected,
+        )
+        assert store_data and store_data.get("run_id"), summary
+        run_id = store_data["run_id"]
+
+        status = _wait_for(real_ctx, run_id, {"awaiting_confirmation", "failed"})
+        assert status == "awaiting_confirmation", adapters.get_run(run_id)
+
+        run = adapters.get_run(run_id)
+        profiled_refs = [s["ref"] for s in run["options"]["explorer"]["sources"]]
+        assert profiled_refs == ["attendee_validity.csv", "expense_report.csv"]
+    finally:
+        flask_ctx.pop()
+        real_ctx.executor.stop()
+        adapters._ctx = None
