@@ -90,6 +90,15 @@ _SEVERITY_COLOR = {"High": "#b85042", "Medium": "#e0952a", "Low": "#2c7a4b"}
 _ACTION_STATUS_COLOR = {"draft": "#b85042", "open": "#b85042", "under_review": "#e0952a",
                          "agreed": "#1c7293", "remediated": "#2c7a4b", "closed": "#6b7283"}
 
+# This workspace is SKILL-001's own (CLAUDE.md §6 D5: "/workspace/tne stays
+# SKILL-001's"; §11 "Column names ... T3.1b join ... Country for T6.1d" and
+# every chart below assume tne_exco's own contract columns) -- an Explorer
+# or GST run reaching this page would render nonsense (a different Skill's
+# frames coerced through SKILL-001's own contract-column lookups) rather
+# than fail loudly, so the "latest completed run" this page shows is scoped
+# to this Skill's own runs only.
+_SKILL_ID = "SKILL-001"
+
 _AMOUNT_COL = "Expense Amount (reimbursement currency)"
 _DATE_COL = "Transaction Date"
 
@@ -187,7 +196,10 @@ def _load_error_panel(run_id: str, exc: Exception) -> html.Div:
 
 def latest_completed_run_id() -> str | None:
     runs = adapters.list_audit_runs()
-    completed = [r for r in runs if str(r.get("status", "")).lower() == "completed"]
+    completed = [
+        r for r in runs
+        if str(r.get("status", "")).lower() == "completed" and r.get("skill_id") == _SKILL_ID
+    ]
     if not completed:
         return None
     completed.sort(key=lambda r: r.get("last_updated") or r.get("run_timestamp") or "", reverse=True)

@@ -5,9 +5,9 @@ from src import workspace_tne
 from src.platform import adapters
 
 
-def _completed_run():
+def _completed_run(skill_id="SKILL-001"):
     run_id = adapters.start_audit_run(
-        skill_id="SKILL-001",
+        skill_id=skill_id,
         bindings={"expense_report": "test_catalog.tne_source.expense_report"},
         audit_period=("2025-01-01", "2026-04-30"),
         objective="Assess spend.",
@@ -58,6 +58,21 @@ def test_exposure_summary_prefers_label_over_basis():
 def test_latest_completed_run_id_finds_the_run():
     run_id = _completed_run()
     assert workspace_tne.latest_completed_run_id() == run_id
+
+
+def test_latest_completed_run_id_ignores_a_completed_explorer_run():
+    # CLAUDE.md §6 D5: "/workspace/tne stays SKILL-001's" -- this page's
+    # every chart assumes tne_exco's own contract columns (this module's
+    # own docstring), so a completed Explorer (or any non-SKILL-001) run
+    # must never become the "latest completed run" this page renders. The
+    # Explorer run is created FIRST and the SKILL-001 run second: fake_
+    # service stamps every run with the same last_updated, so an unfiltered
+    # pick (the bug) would return whichever run sorts first for ties --
+    # here that's the Explorer run inserted first -- while the fix must
+    # still return the SKILL-001 run regardless of insertion order.
+    _completed_run(skill_id="SKILL-EXPLORER-1")
+    tne_run_id = _completed_run(skill_id="SKILL-001")
+    assert workspace_tne.latest_completed_run_id() == tne_run_id
 
 
 def test_workspace_layout_with_no_run_id_shows_empty_state():
