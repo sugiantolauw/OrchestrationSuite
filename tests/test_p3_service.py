@@ -9,6 +9,7 @@ real-synthetic_data/ full run lives in tests/test_p3_synthetic_full_run.py."""
 
 from __future__ import annotations
 
+import contextlib
 import time
 from pathlib import Path
 
@@ -18,6 +19,36 @@ import pytest
 from orchestrator import service
 from orchestrator.executor import reap_orphaned_runs_with_leases
 from tests.test_p3_nodes import MINI_SKILL_DIR, _write_mini_data
+
+
+@contextlib.contextmanager
+def _count_sql_statements():
+    """P3/P4 perf gap review 2026-09-25: counts every SQL statement sqlite3
+    actually executes, across every connection LocalPersistence opens during
+    this block, via `sqlite3.Connection.set_trace_callback` -- one entry per
+    top-level statement, the same granularity as one warehouse round trip in
+    DeltaPersistence. LocalPersistence's file-mode `_connect()` opens a NEW
+    connection per call (CLAUDE.md build brief P1A/P3: no in-memory sharing
+    outside tests), so this patches `sqlite3.connect` at the
+    orchestrator.adapters.persistence_local module level -- the one place
+    every such connection is actually created -- to attach the callback to
+    each one, rather than trying to reach into a connection this test never
+    holds a reference to."""
+    import orchestrator.adapters.persistence_local as pl
+
+    count = [0]
+    real_connect = pl.sqlite3.connect
+
+    def _traced_connect(*a, **k):
+        conn = real_connect(*a, **k)
+        conn.set_trace_callback(lambda _stmt: count.__setitem__(0, count[0] + 1))
+        return conn
+
+    pl.sqlite3.connect = _traced_connect
+    try:
+        yield count
+    finally:
+        pl.sqlite3.connect = real_connect
 
 
 def _build_ctx(tmp_path: Path, *, worker_id: str = "worker-a", env_overrides: dict | None = None) -> service.AppContext:
@@ -622,6 +653,47 @@ def test_queue_note_is_none_once_the_run_is_no_longer_queued(tmp_path):
     assert run["queue_note"] is None
 
 
+def test_get_run_and_list_runs_report_run_state_status_not_a_lagging_runs_projection(tmp_path):
+    """P3/P4 perf gap review 2026-09-25 (BUG-STATUS-1): a run page was seen
+    live showing 'Queued -- waiting for an available run slot' while
+    node_attempts showed a node actively executing for the same run_id.
+    service.get_run and service.list_runs both already source `status` from
+    `run_state` (CLAUDE.md §9C/B4: 'the runs projection is a convenience for
+    cheap listing/filtering ... repair_projections() catches up') --
+    LocalPersistence.list_runs and DeltaPersistence.list_runs both JOIN
+    run_state and report ITS status column, never the runs table's own. This
+    locks that in: directly corrupts ONLY the `runs` projection's status
+    column (bypassing save_state, simulating exactly the lag repair_
+    projections exists to catch up on) and asserts both functions still
+    report the true, authoritative run_state.status -- never the stale
+    projection value."""
+    ctx = _build_ctx(tmp_path)
+    ctx.executor = None
+    bindings = service.suggest_bindings(ctx, "SKILL-MINI")
+    run_id = service.start_audit_run(
+        ctx, skill_id="SKILL-MINI", bindings=bindings,
+        audit_period=("2026-01-01", "2026-02-28"), objective="status projection regression",
+        run_owner="tester",
+    )
+    from orchestrator.status import transition
+
+    state = ctx.persistence.load_state(run_id)
+    ctx.persistence.save_state(transition(state, "running", now=ctx.clock()))
+
+    conn = ctx.persistence._connect()
+    try:
+        conn.execute("UPDATE runs SET status = ? WHERE run_id = ?", ("queued", run_id))
+        conn.commit()
+    finally:
+        ctx.persistence._release(conn)
+
+    run = service.get_run(ctx, run_id)
+    assert run["status"] == "running", "get_run must read run_state.status, never the runs projection"
+
+    listed = next(r for r in service.list_runs(ctx) if r["run_id"] == run_id)
+    assert listed["status"] == "Running", "list_runs must read run_state.status, never the runs projection"
+
+
 # ── cross_run_totals (independent review 2026-09-24 gap #6) ─────────────────
 #
 # Pure function over the shape service.list_runs() already returns, so these
@@ -778,3 +850,123 @@ def test_update_management_action_rejects_an_unrecognised_status(tmp_path):
             ctx, "MA-DOES-NOT-EXIST", owner=None, status="not_a_real_status", target_date=None,
             response=None, actor="reviewer@example.com",
         )
+
+
+# ── SQL statement-count regression guards (P3/P4 perf gap review 2026-09-25)
+#
+# LocalPersistence for counts (bounded on statement COUNT, not wall time --
+# portable across machines); the live-warehouse timings these bounds were
+# calibrated against are reported separately, never asserted here. Bounds
+# are generous headroom over what this file's own fixtures measure today,
+# not the exact count -- the point is catching a reintroduced per-row/
+# per-source/per-skill query LOOP (an O(n) shape), not pinning an exact
+# statement total that would make this brittle to an unrelated, harmless
+# one-query change elsewhere.
+
+def test_start_run_statement_count_has_no_per_source_or_per_skill_n_plus_one(tmp_path):
+    """BUG-PERF-1: start_audit_run's own synchronous work (before it hands
+    off to the executor and returns) used to scale with the number of
+    contract sources it resolves versions for AND, via list_skills inside
+    register_skill's risk/control seeding path, with the number of skill
+    directories on disk -- 8 sources x cold DESCRIBE HISTORY + an
+    unconditional register_skill (record_skill_version + upsert_risks +
+    upsert_controls, one SELECT+UPDATE/INSERT round trip PER risk/control,
+    every single run) measured live at ~87-89s end to end, ~80s of it inside
+    register_skill alone for a Skill whose content had not changed since the
+    last run. `ctx.executor = None` isolates exactly this synchronous
+    portion -- no node ever runs here."""
+    ctx = _build_ctx(tmp_path)
+    ctx.executor = None
+    bindings = service.suggest_bindings(ctx, "SKILL-MINI")
+
+    with _count_sql_statements() as first_count:
+        service.start_audit_run(
+            ctx, skill_id="SKILL-MINI", bindings=bindings,
+            audit_period=("2026-01-01", "2026-02-28"), objective="stmt count 1", run_owner="tester",
+        )
+    assert first_count[0] <= 60, (
+        f"start_audit_run issued {first_count[0]} SQL statements on a Skill's first "
+        "registration this process -- check for a reintroduced N+1"
+    )
+
+    # A second run of the SAME Skill (same skill_id/version/content_hash)
+    # must be cheaper: register_skill's risk/control seeding is guaranteed
+    # unchanged content and must not be repeated (_ensure_skill_registered's
+    # in-process cache) -- this is the concrete regression guard for that fix.
+    with _count_sql_statements() as second_count:
+        service.start_audit_run(
+            ctx, skill_id="SKILL-MINI", bindings=bindings,
+            audit_period=("2026-01-01", "2026-02-28"), objective="stmt count 2", run_owner="tester",
+        )
+    assert second_count[0] < first_count[0], (
+        f"a second start_audit_run for an already-registered Skill issued "
+        f"{second_count[0]} statements, not fewer than the first run's {first_count[0]} -- "
+        "register_skill's risk/control seeding is being repeated for unchanged content"
+    )
+    assert second_count[0] <= 30, (
+        f"start_audit_run issued {second_count[0]} SQL statements on an already-registered "
+        "Skill -- check for a reintroduced N+1"
+    )
+
+
+def test_landing_page_skill_listing_statement_count_bounded(tmp_path):
+    """BUG-PERF-1 (landing page): list_skills used to call
+    ctx.persistence.list_runs(filters={"skill_id": skill_id}) once PER SKILL
+    DIRECTORY (measured live at 17.06s for a single skill), each as
+    expensive as the single unfiltered call this now makes ONCE regardless
+    of skill count. tests/fixtures/skills has 2 skill directories (mini,
+    mini_candidates) -- this must cost one list_runs() call, not two."""
+    ctx = _build_ctx(tmp_path)
+    ctx.executor = None
+    with _count_sql_statements() as count:
+        skills = service.list_skills(ctx)
+    assert len(skills) >= 2, "fixture must offer at least 2 skill directories for this to be a real N+1 guard"
+    assert count[0] <= 16, f"list_skills issued {count[0]} SQL statements for {len(skills)} skills"
+
+
+def test_runs_page_statement_count_bounded_regardless_of_run_count(tmp_path):
+    """BUG-PERF-1 (/runs page, ~9-35s live): service.list_runs already
+    batches per-run findings/actions/metrics/fingerprint lookups (independent
+    review 2026-09-24 item 6) -- this guards the one remaining path that used
+    to scale with run count via list_skills' own former per-skill N+1 (fixed
+    above): 5 runs must cost the same handful of statements as 1."""
+    ctx = _build_ctx(tmp_path)
+    ctx.executor = None
+    bindings = service.suggest_bindings(ctx, "SKILL-MINI")
+    for i in range(5):
+        service.start_audit_run(
+            ctx, skill_id="SKILL-MINI", bindings=bindings,
+            audit_period=("2026-01-01", "2026-02-28"), objective=f"runs page count {i}", run_owner="tester",
+        )
+
+    with _count_sql_statements() as count:
+        rows = service.list_runs(ctx)
+    assert len(rows) >= 5
+    assert count[0] <= 30, f"list_runs issued {count[0]} SQL statements for {len(rows)} runs"
+
+
+def test_sign_off_statement_count_bounded(tmp_path):
+    """BUG-PERF-2: sign-off's own write must not cost more than a small,
+    fixed number of statements regardless of narration/candidate volume --
+    the visible several-second lag reported live was the run PAGE re-loading
+    RunState a second time after the write already had it in hand
+    (app/src/run_status.py's now-fixed `_refresh_from_state`), not sign_off
+    itself, but this still guards sign_off's own write path against a
+    reintroduced per-row loop."""
+    ctx = _build_ctx(tmp_path)
+    ctx.executor.start()
+    try:
+        bindings = service.suggest_bindings(ctx, "SKILL-MINI")
+        run_id = service.start_audit_run(
+            ctx, skill_id="SKILL-MINI", bindings=bindings,
+            audit_period=("2026-01-01", "2026-02-28"), objective="sign off stmt count", run_owner="tester",
+        )
+        _wait_for_status(ctx, run_id, {"awaiting_signoff", "failed"})
+        status = service.get_run(ctx, run_id)["status"]
+        assert status == "awaiting_signoff", service.get_run(ctx, run_id).get("status_reason")
+
+        with _count_sql_statements() as count:
+            service.sign_off(ctx, run_id, "approver")
+        assert count[0] <= 100, f"sign_off issued {count[0]} SQL statements"
+    finally:
+        ctx.executor.stop()

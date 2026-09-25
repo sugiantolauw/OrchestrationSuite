@@ -564,6 +564,38 @@ def build_node_context(ctx: AppContext, state: RunState) -> NodeContext:
     )
 
 
+# P3/P4 perf gap review 2026-09-25: register_skill's own work (skill_registry.
+# register_skill) is a guaranteed no-op once this EXACT (skill_id, version,
+# content_hash) has already been recorded -- record_skill_version no-ops on a
+# repeat with the same hash, and upsert_risks/upsert_controls re-write the
+# SAME rows from the SAME risk_control.yaml every single call (measured live
+# against the real warehouse: ~80s total for SKILL-001's register_skill on a
+# call that changed nothing, dominated by upsert_risks/upsert_controls doing
+# one SELECT + one UPDATE/INSERT per risk/control, every run). Cached
+# in-process only (never persisted, same pattern as datasource_uc.py's
+# _ROW_COUNT_CACHE/_TABLE_LISTING_CACHE) -- a fresh worker, or a genuine Skill
+# content change (a different content_hash, which this checks exactly, never
+# fuzzily), always re-registers for real; this can never mask a real edit or
+# skip seeding a risk/control that has never actually been written. Keyed on
+# id(ctx.persistence) as well as the Skill identity -- a real deployment has
+# exactly one persistence instance for the process's lifetime, so this never
+# matters there, but the test suite builds a fresh persistence per test
+# (often over the SAME on-disk Skill, so the same content_hash) within one
+# pytest process; without this, a second test's freshly-created, empty
+# persistence would wrongly inherit "already registered" from a PRIOR test's
+# persistence instance and never get its own skill_versions/risks/controls
+# rows written at all.
+_REGISTERED_SKILL_VERSIONS: set[tuple[int, str, str, str]] = set()
+
+
+def _ensure_skill_registered(ctx: AppContext, skill, actor: str, now: str) -> None:
+    key = (id(ctx.persistence), skill.skill_id, skill.version, skill.content_hash)
+    if key in _REGISTERED_SKILL_VERSIONS:
+        return
+    register_skill(skill, ctx.persistence, actor=actor, now=now)
+    _REGISTERED_SKILL_VERSIONS.add(key)
+
+
 def _flat_file_hashes(ctx: AppContext, skill_id: str | None, path_versions: dict[str, str]) -> dict[str, str]:
     """Restricts `{bound value: version}` (e.g. `data_assets`' table_fqn ->
     version, or `bindings[name] -> resolved version`) to the entries whose
@@ -796,7 +828,26 @@ def _get_ledger_skill(ctx: AppContext, skill_id: str) -> dict | None:
     return None
 
 
-def list_skills(ctx: AppContext) -> list[dict]:
+def list_skills(ctx: AppContext, *, runs: list[dict] | None = None) -> list[dict]:
+    # P3/P4 perf gap review 2026-09-25: this used to call
+    # ctx.persistence.list_runs(filters={"skill_id": skill_id}) ONCE PER
+    # SKILL DIRECTORY -- an N+1 that re-scans the whole runs/run_state join
+    # from scratch for every skill, measured live against the real
+    # warehouse at 17.06s for a single skill directory (dominated by that
+    # one filtered list_runs call, whose cost is the same round trip as the
+    # unfiltered one -- filtering narrows the WHERE clause, not the number
+    # of round trips). `service.list_runs()` (below) then compounded this
+    # further: it already fetches every run once for its own page, and used
+    # to call this function -- paying the N+1 all over again -- to build its
+    # skill-name lookup. `runs`, when given, is that already-fetched list
+    # (never re-queried); every other caller (skill_library_page,
+    # home_layout) still gets exactly ONE unfiltered list_runs() call here,
+    # grouped by skill_id in Python, instead of one call per skill.
+    all_runs = ctx.persistence.list_runs() if runs is None else runs
+    runs_by_skill: dict[str, list[dict]] = {}
+    for r in all_runs:
+        runs_by_skill.setdefault(r.get("skill_id"), []).append(r)
+
     out: list[dict] = []
     for d in sorted(ctx.skills_dir.iterdir()):
         if not d.is_dir():
@@ -812,7 +863,7 @@ def list_skills(ctx: AppContext) -> list[dict]:
         else:
             n_tests = len(_read_yaml(d / "plan.yaml").get("tests", []))
 
-        runs_rows = ctx.persistence.list_runs(filters={"skill_id": skill_id})
+        runs_rows = runs_by_skill.get(skill_id, [])
         completed = [r for r in runs_rows if r.get("status") == "completed"]
         last_run = runs_rows[0]["created_at"] if runs_rows else None
 
@@ -1174,7 +1225,7 @@ def start_audit_run(
     now = ctx.clock()
     fingerprint = _compute_run_fingerprint(ctx, skill_dir, source_versions, uploaded_file_hashes)
 
-    register_skill(skill, ctx.persistence, actor=run_owner, now=now)
+    _ensure_skill_registered(ctx, skill, run_owner, now)
 
     # data_assets is NODE_OWNED (the `discover` node's field), but bindings
     # must already be present for `discover` to validate against -- exactly
@@ -1765,7 +1816,14 @@ def list_runs(ctx: AppContext, filters: dict | None = None) -> list[dict]:
     same output, same per-run logic, one round trip per data source instead
     of one per run."""
     rows = ctx.persistence.list_runs(filters=filters)
-    skills_by_id = {e["skill_id"]: e for e in list_skills(ctx)}
+    # list_skills' own runs-by-skill grouping needs the COMPLETE run set to
+    # produce a correct "previous_runs"/"last_run" per skill -- `rows` only
+    # qualifies as that when this call itself was unfiltered; a filtered
+    # call (e.g. by skill_id or status) leaves `runs=None` so list_skills
+    # does its own single unfiltered fetch instead of grouping a narrowed set.
+    skills_by_id = {
+        e["skill_id"]: e for e in list_skills(ctx, runs=rows if not filters else None)
+    }
     data_mode = "Local test data" if ctx.backend == "local" else "Unity Catalog"
 
     run_ids = [r["run_id"] for r in rows]
