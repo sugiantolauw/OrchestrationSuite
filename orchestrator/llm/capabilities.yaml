@@ -24,8 +24,21 @@ roles:
       max_completion_tokens: rejected
       thinking: rejected
     schema_keywords_rejected: [pattern]
+    # Live 2026-09-25 (tests/live/test_explorer_live.py): a strict-mode
+    # response_format whose schema has more than 128 total properties
+    # (orchestrator.llm.capabilities.schema_property_count -- every
+    # `properties` object anywhere in the document, $defs and anyOf
+    # branches included) is rejected with `400 BAD_REQUEST: Invalid JSON
+    # schema - schema has too many properties maximum allowed is 128`.
+    # PLAN_PROPOSAL_SCHEMA counts 207 by this rule. LLMGateway falls back
+    # to the schema-in-prompt + client-side-validation path (CLAUDE.md §6)
+    # for any call whose schema exceeds this.
+    max_schema_properties: 128
     schema_notes:
       - "bare {type: object} is emptied under strict; never use it"
+      - "strict response_format schema over 128 total properties (summed
+         across every nested `properties` object, $defs and anyOf branches
+         included) is rejected -- see max_schema_properties above"
   model_sonnet:
     verified_on: null                      # 403 "Databricks-set rate limit of 0" on 2026-09-23
     served_model_prefix: null

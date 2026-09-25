@@ -41,7 +41,12 @@ from typing import Any, Literal
 
 import jsonschema
 
-from orchestrator.llm.capabilities import filter_params, load_capabilities, role_config
+from orchestrator.llm.capabilities import (
+    filter_params,
+    load_capabilities,
+    role_config,
+    schema_strict_block_reason,
+)
 from orchestrator.llm.errors import (
     LLMConfigError,
     LLMLoggingError,
@@ -185,6 +190,19 @@ class LLMGateway:
         sent, dropped = filter_params(self.capabilities, role, desired_params)
         final_messages = list(messages)
         supports_strict = role_config(self.capabilities, role).get("params", {}).get("json_schema_strict") == "supported"
+        strict_block_reason = None
+        if schema is not None and supports_strict:
+            # A role whose matrix marks json_schema_strict "supported" can
+            # still reject a PARTICULAR call's schema -- this endpoint's own
+            # 128-total-properties ceiling (orchestrator.llm.capabilities.
+            # schema_strict_block_reason; recorded 2026-09-25 after a live
+            # 400 on `plan_repair`'s PLAN_PROPOSAL_SCHEMA, capabilities.yaml
+            # max_schema_properties). When it does, this call falls back to
+            # the same schema-in-prompt + client-side-validation path as a
+            # role with no strict support at all, never a malformed request.
+            strict_block_reason = schema_strict_block_reason(self.capabilities, role, schema)
+            if strict_block_reason:
+                supports_strict = False
         if schema is not None:
             if supports_strict:
                 sent = dict(sent)
@@ -194,7 +212,9 @@ class LLMGateway:
                 }
             else:
                 dropped = dict(dropped)
-                dropped["response_format"] = "untested (json_schema_strict not supported for this role)"
+                dropped["response_format"] = (
+                    strict_block_reason or "untested (json_schema_strict not supported for this role)"
+                )
                 final_messages = final_messages + [{
                     "role": "system",
                     "content": (

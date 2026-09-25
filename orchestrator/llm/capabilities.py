@@ -61,6 +61,85 @@ def schema_keyword_allowed(capabilities: dict, role: str, keyword: str) -> bool:
     return keyword not in (cfg.get("schema_keywords_rejected") or [])
 
 
+def schema_property_count(schema: dict) -> int:
+    """The GPT-OSS strict-JSON-schema endpoint's own property count
+    (2026-09-25 live: `plan_repair` on `PLAN_PROPOSAL_SCHEMA` -- 207
+    properties by this count -- got `400 BAD_REQUEST: Invalid JSON schema -
+    schema has too many properties maximum allowed is 128`, while
+    `plan_explorer`'s identical schema succeeded because that role's
+    capability matrix carries no `json_schema_strict: supported` and so
+    never reaches strict mode at all). Sums every `properties` object's key
+    count found anywhere in the schema document -- the top level, `$defs`,
+    and each `anyOf`/`oneOf`/array-`items` branch -- once per occurrence,
+    never deduplicated by `$ref`: a schema reused by several branches (or
+    inside `$defs`) costs the endpoint's grammar compiler once per place it
+    is compiled in, which is what this mirrors."""
+    total = 0
+
+    def _walk(node: Any) -> None:
+        nonlocal total
+        if isinstance(node, dict):
+            properties = node.get("properties")
+            if isinstance(properties, dict):
+                total += len(properties)
+            for value in node.values():
+                _walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                _walk(item)
+
+    _walk(schema)
+    return total
+
+
+def find_rejected_schema_keywords(capabilities: dict, role: str, schema: dict) -> list[str]:
+    """Every keyword this role's matrix records as rejected (e.g.
+    `pattern`) that actually appears as a KEY somewhere in `schema` --
+    never a false positive from a keyword name that merely occurs as a
+    property *value* (a prose string, an enum member) rather than a schema
+    keyword itself."""
+    rejected = set(role_config(capabilities, role).get("schema_keywords_rejected") or [])
+    if not rejected:
+        return []
+    found: set[str] = set()
+
+    def _walk(node: Any) -> None:
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key in rejected:
+                    found.add(key)
+                _walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                _walk(item)
+
+    _walk(schema)
+    return sorted(found)
+
+
+def schema_strict_block_reason(capabilities: dict, role: str, schema: dict) -> str | None:
+    """None when `schema` may be sent to this role as a strict
+    `response_format` json_schema; otherwise the reason it may not --
+    `orchestrator.llm.gateway.LLMGateway` checks this before it commits to
+    the strict-mode path for a role whose `json_schema_strict` capability
+    is otherwise "supported" (CLAUDE.md §6: "If structured output does not
+    pass through, validate the schema client-side with one retry"). A role
+    with no recorded `max_schema_properties` is never blocked on property
+    count -- CLAUDE.md §6's "never assumed": this endpoint's own 128-
+    property ceiling is GPT-OSS-specific, recorded evidence, not a general
+    assumption applied to every future role."""
+    cfg = role_config(capabilities, role)
+    limit = cfg.get("max_schema_properties")
+    if isinstance(limit, int):
+        count = schema_property_count(schema)
+        if count > limit:
+            return f"schema has {count} properties, over this role's recorded limit of {limit}"
+    rejected = find_rejected_schema_keywords(capabilities, role, schema)
+    if rejected:
+        return f"schema uses rejected keyword(s): {', '.join(rejected)}"
+    return None
+
+
 def served_model_matches(capabilities: dict, role: str, served_model_version: str | None) -> bool:
     """True when `served_model_version` starts with the role's recorded
     `served_model_prefix`, OR the role has never been verified against a
