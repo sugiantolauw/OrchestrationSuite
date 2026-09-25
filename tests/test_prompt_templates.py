@@ -306,7 +306,9 @@ def test_narration_user_template_renders_with_every_placeholder_supplied(user_fi
 
 
 def test_repair_user_template_renders_with_every_placeholder_supplied():
-    text = _render_narration_user("repair_user.md", violations_json="[]", previous_output="{}")
+    text = _render_narration_user(
+        "repair_user.md", violations_json="[]", previous_output="{}", task_rules="TASK RULES TEXT",
+    )
     assert "$" not in text
 
 

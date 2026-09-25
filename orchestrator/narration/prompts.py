@@ -32,6 +32,14 @@ DEFAULT_NARRATION_PROMPTS_ROOT = _REPO_ROOT / "orchestrator" / "prompts" / "narr
 SYSTEM_FILE = "system_common.md"
 REPAIR_FILE = "repair_user.md"
 
+# round-5 narration-content review, item 1: the marker every `<task>_user.md`
+# ends with (§4.3, and `test_narration_user_templates_end_with_the_payload_
+# section` pins it) -- `task_rules_text` cuts there so `$task_rules` in
+# repair_user.md carries the task's own instructions (its IDENTIFIERS
+# section included) without a second copy of `$payload_json` itself, which
+# `render_repair` fills separately via `previous_output`/`violations_json`.
+_PAYLOAD_MARKER = "PAYLOAD:\n$payload_json"
+
 # task -> its own user template file (§4.3's table). `find_candidates`
 # (P6 WP N8, §5.1) is included: `orchestrator.narration.candidates` is the
 # only caller (through `orchestrator.narration.runner._generate_item`, the
@@ -91,6 +99,32 @@ class NarrationPromptRepository:
     def repair_text(self) -> str:
         return self._read(REPAIR_FILE)
 
+    def task_rules_text(self, task: str) -> str:
+        """Round-5 narration-content review, item 1: this task's own
+        `<task>_user.md` instructions -- everything up to its trailing
+        `PAYLOAD:\\n$payload_json` section -- taken verbatim, including its
+        IDENTIFIERS section where it has one. `$generation_line` (a per-call
+        regeneration hint, never a rule) is stripped out; it is never
+        substituted here, since `task_rules_text` returns raw, un-rendered
+        template text.
+
+        This is what a repair call was missing (RUN-05B9661A8D1A,
+        2026-09-25): `find_synthesis`'s repair round rewrote correct prose
+        test ids ("T4.2") to the schema's bare finding-key form ("T4_2"),
+        because `repair_user.md` carried none of `synthesis_user.md`'s own
+        IDENTIFIERS rule distinguishing the two -- `render_repair` below
+        fills `$task_rules` in `repair_user.md` with exactly this text, so
+        the SAME rules that governed the call being repaired still apply to
+        the repair itself. Mirrors `orchestrator.llm.prompts.
+        FilePromptRepository.planner_rules_text`."""
+        text = self.user_text(task)
+        idx = text.rfind(_PAYLOAD_MARKER)
+        if idx == -1:
+            raise NarrationPromptError(
+                f"{self._user_file(task)} has no {_PAYLOAD_MARKER!r} section to extract task rules from"
+            )
+        return text[:idx].replace("$generation_line", "").strip()
+
     # ── versioning (§1 #8, §6.3): one hash over the whole set, feeding the
     # run fingerprint's prompt_template_version the same way a Skill's own
     # content hash and FilePromptRepository.template_set_version do ──────
@@ -116,16 +150,30 @@ class NarrationPromptRepository:
             {"role": "user", "content": user_text},
         ]
 
-    def render_repair(self, task: str, *, violations_json: str, previous_output: str) -> list[dict]:
+    def render_repair(
+        self, task: str, *, violations_json: str, previous_output: str, **task_params,
+    ) -> list[dict]:
         """§3.5's repair call: the SAME system prompt (so every rule in it
         still applies), the SAME task/schema, but `repair_user.md` in place
-        of the task's own user template -- listing what broke and the
-        prior output, asking for a corrected JSON object rather than a
-        fresh generation."""
+        of the task's own user template -- listing the task's own rules
+        (`task_rules_text`, round-5 item 1), what broke and the prior
+        output, asking for a corrected JSON object rather than a fresh
+        generation.
+
+        `**task_params` is whatever extra placeholder(s) this task's own
+        user template needs beyond `payload_json`/`generation_line` (e.g.
+        `find_candidates`'s `$max_candidates`, still present verbatim inside
+        the extracted task-rules text) -- the same `extra_params` the
+        caller already passes to `render_task` for the generate round, so
+        the repair round's copy of those rules renders identically rather
+        than being left with a stray, un-substituted `$name`."""
         system_text = self.system_text()
+        task_rules = self._substitute(
+            f"narration/{task}/task_rules", "task_rules", self.task_rules_text(task), task_params,
+        )
         user_text = self._substitute(
             f"narration/{task}/repair", "user", self.repair_text(),
-            {"violations_json": violations_json, "previous_output": previous_output},
+            {"violations_json": violations_json, "previous_output": previous_output, "task_rules": task_rules},
         )
         return [
             {"role": "system", "content": system_text},
