@@ -247,6 +247,44 @@ def list_trace_events(run_id: str | None = None) -> list[dict]:
     return service.list_trace_events(get_context(), run_id=run_id)
 
 
+# ── Explorer Mode (docs/specs/P6_P8_explorer_llm_design.md §4, D2-D5) ───────
+
+def start_explorer_run(
+    *,
+    objective: str,
+    sources: list[dict],
+    audit_period: tuple[str, str],
+    run_owner: str,
+    supersedes_run_id: str | None = None,
+    engagement_id: str = "ENG-DEFAULT",
+    business_unit: str | None = None,
+    materiality: float | None = None,
+) -> str:
+    return service.start_explorer_run(
+        get_context(),
+        objective=objective,
+        sources=sources,
+        audit_period=audit_period,
+        run_owner=run_owner,
+        supersedes_run_id=supersedes_run_id,
+        engagement_id=engagement_id,
+        business_unit=business_unit,
+        materiality=materiality,
+    )
+
+
+def get_explorer_review(run_id: str) -> dict:
+    return service.get_explorer_review(get_context(), run_id)
+
+
+def edit_explorer_plan(run_id: str, edits: list[dict], actor: str) -> None:
+    service.edit_explorer_plan(get_context(), run_id, edits, actor)
+
+
+def save_explorer_draft_skill(run_id: str, actor: str) -> dict:
+    return service.save_explorer_draft_skill(get_context(), run_id, actor)
+
+
 # ── Jira integration ────────────────────────────────────────────────────────
 
 def create_jira_preview(run_id: str) -> dict:

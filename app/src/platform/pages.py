@@ -103,7 +103,8 @@ def skill_library_page() -> html.Div:
         ),
 
         html.Div([
-            html.Button("Start Explorer Mode", className="ghost", style={"width": "auto", "marginTop": 16}),
+            html.Button("Start Explorer Mode", id="start-explorer-from-library-btn", className="ghost",
+                        style={"width": "auto", "marginTop": 16}),
         ], style={"textAlign": "center"}),
     ], className="shell dashboard-shell")
 

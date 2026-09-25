@@ -67,6 +67,19 @@ def serve_layout():
         # tests/test_layout_parity.py -- see that module's docstring.
         dcc.Store(id="selected-mode-store", data="playbook"),
         dcc.Store(id="selected-skill-store", data=None),
+        # Explorer Mode (docs/specs/P6_P8_explorer_llm_design.md §12 D2): the
+        # one hidden dcc.Store (this session's active Explorer run_id, if
+        # any) and one hidden dcc.Interval the landing page needs. Both live
+        # here, outside home_layout()'s own returned tree, for the same
+        # reason the two Stores above do -- tests/test_layout_parity.py's
+        # zero-diff comparison covers only what home_layout() itself
+        # returns. The Interval starts disabled: CLAUDE.md §11's cost
+        # incident means idle polling is never acceptable, so it is enabled
+        # only while an Explorer run is actually in its plan phase
+        # (src/run_setup.py's render_workflow_preview is the sole writer of
+        # its `disabled` prop).
+        dcc.Store(id="explorer-run-store", data=None),
+        dcc.Interval(id="explorer-poll-interval", interval=3000, disabled=True),
         html.Div(id="page-content"),
     ], className="app-shell")
 
@@ -97,15 +110,25 @@ def route_page(pathname, search):
     if pathname == "/workspace/tne":
         run_id = _parse_run_id(search)
         return workspace_tne.tne_workspace_layout(run_id)
-    return run_setup.home_layout()
+    # Explorer Mode D5.1: the Skill Library's "Start Explorer Mode" button
+    # navigates to "/?mode=explorer" -- home_layout()'s own default (no
+    # argument, every other route to "/") stays exactly the prototype's
+    # playbook-selected landing page, so tests/test_layout_parity.py's
+    # zero-diff comparison is unaffected.
+    default_mode = "explorer" if _parse_query_param(search, "mode") == "explorer" else "playbook"
+    return run_setup.home_layout(default_mode=default_mode)
 
 
 def _parse_run_id(search: str | None) -> str | None:
+    return _parse_query_param(search, "run_id")
+
+
+def _parse_query_param(search: str | None, name: str) -> str | None:
     if not search:
         return None
     from urllib.parse import parse_qs
     params = parse_qs(search.lstrip("?"))
-    values = params.get("run_id")
+    values = params.get(name)
     return values[0] if values else None
 
 

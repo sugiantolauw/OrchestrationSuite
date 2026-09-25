@@ -730,6 +730,60 @@ def _read_yaml(path: Path) -> dict:
     return yaml.safe_load(path.read_text()) or {}
 
 
+def _yaml_from_files(files: dict[str, str], name: str) -> dict:
+    text = files.get(name)
+    if not text:
+        return {}
+    return yaml.safe_load(text) or {}
+
+
+def _ledger_skill_card(ctx: AppContext, row: dict) -> dict:
+    """docs/specs/P6_P8_explorer_llm_design.md §4.13 point 4: the list_skills/
+    get_skill item shape for a saved Explorer draft (origin='explorer_saved'
+    skill_versions row, no repo directory under ctx.skills_dir) -- built from
+    the ledger's own in-memory files (record_skill_version's `content`),
+    never the filesystem. `catalogue_tests`/`contract_sources` are extra,
+    additive fields (not on a repo skill's card) that
+    src/platform/methodology.py's stub methodology page reads for its
+    "Planned test catalogue"/"Planned data sources" sections."""
+    files = row["content"]["files"]
+    manifest = _yaml_from_files(files, "manifest.yaml")
+    skill_id = manifest.get("id") or row["skill_id"]
+    catalogue = _yaml_from_files(files, "catalogue.yaml")
+    tests = catalogue.get("tests") or _yaml_from_files(files, "plan.yaml").get("tests", [])
+
+    runs_rows = ctx.persistence.list_runs(filters={"skill_id": skill_id})
+    completed = [r for r in runs_rows if r.get("status") == "completed"]
+    last_run = runs_rows[0]["created_at"] if runs_rows else None
+
+    return {
+        "skill_id": skill_id,
+        "name": manifest.get("name"),
+        "domain": manifest.get("domain"),
+        "category": manifest.get("category", manifest.get("domain")),
+        "version": manifest.get("version"),
+        "owner": manifest.get("owner"),
+        "status": str(manifest.get("status", "draft")).replace("_", " ").title(),
+        "last_updated": row.get("created_at"),
+        "last_run": last_run,
+        "description": manifest.get("description"),
+        "tests": len(tests),
+        "previous_runs": len(completed),
+        "has_workspace": False,
+        "origin": "explorer_saved",
+        "catalogue_tests": tests,
+        "contract_sources": sorted(_yaml_from_files(files, "contract.yaml").get("sources", {}).keys()),
+    }
+
+
+def _get_ledger_skill(ctx: AppContext, skill_id: str) -> dict | None:
+    for row in ctx.persistence.list_skill_versions_by_origin("explorer_saved"):
+        card = _ledger_skill_card(ctx, row)
+        if card["skill_id"] == skill_id:
+            return card
+    return None
+
+
 def list_skills(ctx: AppContext) -> list[dict]:
     out: list[dict] = []
     for d in sorted(ctx.skills_dir.iterdir()):
@@ -770,6 +824,12 @@ def list_skills(ctx: AppContext) -> list[dict]:
                 "has_workspace": (d / "workspace.py").is_file(),
             }
         )
+
+    repo_ids = {e["skill_id"] for e in out}
+    for row in ctx.persistence.list_skill_versions_by_origin("explorer_saved"):
+        card = _ledger_skill_card(ctx, row)
+        if card["skill_id"] not in repo_ids:
+            out.append(card)
     return out
 
 
@@ -797,7 +857,7 @@ def get_skill(ctx: AppContext, skill_id: str) -> dict | None:
     try:
         d = _skill_dir_for(ctx, skill_id)
     except ValueError:
-        return None
+        return _get_ledger_skill(ctx, skill_id)
     base = next((e for e in list_skills(ctx) if e["skill_id"] == skill_id), None)
     if base is None:
         return None
@@ -1687,7 +1747,17 @@ def list_runs(ctx: AppContext, filters: dict | None = None) -> list[dict]:
                 "run_id": run_id,
                 "skill_id": r.get("skill_id"),
                 "engagement_id": r.get("engagement_id"),
-                "skill_name": skill_entry["name"] if skill_entry else r.get("skill_id"),
+                "skill_name": (
+                    skill_entry["name"] if skill_entry
+                    # docs/specs/P6_P8_explorer_llm_design.md §5.2: an
+                    # Explorer run's skill_id is None until, at the
+                    # earliest, plan confirmation (§4.1's RunState mapping
+                    # -- state.skill_id never carries the EXPLORER-<run_id>
+                    # ledger id, only resolve_run_skill does, at execute
+                    # time), so it has no skill card to fall back to.
+                    else f"Explorer: {r['objective'][:60]}" if r.get("mode") == "explorer"
+                    else r.get("skill_id")
+                ),
                 "audit_period": f"{r['audit_period_start']} – {r['audit_period_end']}",
                 # Independent review 2026-09-24 gap #6: cross_run_totals reads
                 # this back (CLAUDE.md §11 "Paused runs across a code
