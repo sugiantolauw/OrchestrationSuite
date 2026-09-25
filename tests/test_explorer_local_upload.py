@@ -69,6 +69,37 @@ def test_local_backend_upload_source_profiles_alongside_a_governed_file(tmp_path
         ctx.executor.stop()
 
 
+def test_local_backend_upload_source_with_no_explicit_format_resolves_from_filename(tmp_path):
+    """BUG-3 (final test round, TEST_REPORT_stage345.md): an `upload` source
+    given with NO "format" key at all -- exactly the shape
+    src/run_setup.py's real _explorer_source_options builds
+    (`{"kind": "upload", "ref": upload_id}`) -- must resolve its format from
+    the uploaded file's own recorded filename, never from the upload_id
+    `ref` (which has no extension to infer from)."""
+    ctx = _build_ctx(tmp_path, model_sonnet=None)
+    ctx.executor.start()
+    try:
+        upload_row = _upload_ready_csv(ctx, filename="claims.csv")
+        run_id = service.start_explorer_run(
+            ctx, objective="Assess an ad-hoc upload with no format override",
+            sources=[{"kind": "upload", "ref": upload_row["upload_id"]}],
+            audit_period=AUDIT_PERIOD, run_owner="alice",
+        )
+        status = _wait_for(ctx, run_id, {"awaiting_confirmation", "failed"})
+        assert status == "awaiting_confirmation", service.get_run(ctx, run_id).get("status_reason")
+
+        run = service.get_run(ctx, run_id)
+        sources = run["options"]["explorer"]["sources"]
+        assert len(sources) == 1
+        assert sources[0]["format"] == "csv"
+
+        state = ctx.persistence.load_state(run_id)
+        upload_asset = next(b for b in state.data_assets if b["kind"] == "upload")
+        assert state.profile_result["sources"][upload_asset["source"]]["row_count"] == 3
+    finally:
+        ctx.executor.stop()
+
+
 def test_local_backend_non_ready_upload_source_raises(tmp_path):
     """An upload that has not reached Ready (still Profiling, or Failed)
     fails loudly at start_explorer_run -- never silently read as if it were
