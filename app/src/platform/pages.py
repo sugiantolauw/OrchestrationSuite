@@ -167,7 +167,15 @@ def audit_runs_page() -> html.Div:
 
 def platform_trace_page(run_id: str | None = None) -> html.Div:
     runs = adapters.list_audit_runs()
-    events = adapters.list_trace_events()
+    # P3/P4 perf gap review 2026-09-25 (/trace cold-load latency pass):
+    # filtered by run_id here (the same WHERE run_id = :run_id query
+    # src/trace_page.py's own callback already pushes down) so the initial,
+    # server-rendered table is ALREADY correct for the CLAUDE.md §11 "Run
+    # cards on /runs" Trace-button preselection (?run_id=<id>) case, instead
+    # of rendering every event unfiltered and relying on trace_page.py's
+    # filter callback firing once more on mount to narrow it -- see that
+    # module's own BUG-TRACE-2 fix, which removes that now-redundant fire.
+    events = adapters.list_trace_events(run_id)
 
     run_options = [{"label": f"{r['run_id']} — {r.get('skill_name', '')}", "value": r["run_id"]} for r in runs]
 

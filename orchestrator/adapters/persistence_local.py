@@ -747,6 +747,15 @@ class LocalPersistence:
         return [_skill_version_dict_from_row(dict(r)) for r in rows]
 
     def list_skill_versions_by_origin(self, origin: str) -> list[dict]:
+        rows = self.list_all_skill_versions()
+        latest_by_skill: dict[str, dict] = {}
+        for d in rows:
+            if d["content"].get("origin") != origin:
+                continue
+            latest_by_skill[d["skill_id"]] = d  # ordered by created_at asc -- last write wins
+        return list(latest_by_skill.values())
+
+    def list_all_skill_versions(self) -> list[dict]:
         conn = self._connect()
         try:
             rows = conn.execute(
@@ -754,13 +763,7 @@ class LocalPersistence:
             ).fetchall()
         finally:
             self._release(conn)
-        latest_by_skill: dict[str, dict] = {}
-        for r in rows:
-            d = _skill_version_dict_from_row(dict(r))
-            if d["content"].get("origin") != origin:
-                continue
-            latest_by_skill[d["skill_id"]] = d  # ordered by created_at asc -- last write wins
-        return list(latest_by_skill.values())
+        return [_skill_version_dict_from_row(dict(r)) for r in rows]
 
     # ── risk / control register (P2) ─────────────────────────────────────────
 

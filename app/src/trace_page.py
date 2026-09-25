@@ -38,9 +38,23 @@ def _rows_for_filter(run_id: str | None) -> list:
 
 def register_callbacks(app) -> None:
 
+    # BUG-TRACE-2 (P3/P4 perf gap review 2026-09-25, the /trace cold-load
+    # latency pass): without prevent_initial_call, Dash fires this once on
+    # every /trace mount, even on a plain /trace with the dropdown at its
+    # default (no filter) value -- re-issuing the exact same unfiltered
+    # adapters.list_trace_events(None) call platform_trace_page() itself
+    # already made to render trace-events-body, replacing that subtree with
+    # a second, functionally identical render moments after paint. The
+    # ?run_id=<id> preselection case (CLAUDE.md §11 "Run cards on /runs"
+    # Trace button) is unaffected: platform_trace_page() now renders that
+    # filtered view itself (src/platform/pages.py), so this callback firing
+    # was never the only source of the filtered table, only a redundant
+    # second fetch of it. Exactly BUG-RUNVIEW-1's fix (src/runs_page.py),
+    # applied here.
     @app.callback(
         Output("trace-events-body", "children"),
         Input("trace-run-filter", "value"),
+        prevent_initial_call=True,
     )
     def _filter_events(run_id):
         return _rows_for_filter(run_id)

@@ -64,11 +64,21 @@ def _rows_for_filter(search: str | None, domain: str | None, status: str | None)
 
 def register_callbacks(app) -> None:
 
+    # BUG-SKILLS-2 (P3/P4 perf gap review 2026-09-25, the /skills cold-load
+    # latency pass): without prevent_initial_call, Dash fires this once on
+    # every /skills mount even though all three filters start at their
+    # default (no filter) value -- replacing the whole server-rendered
+    # skill-library-grid.children subtree with a second, functionally
+    # identical render moments after paint. skill_library_page()
+    # (src/platform/pages.py) already renders the correct unfiltered grid
+    # itself, so that extra adapters.list_skills() round trip served no
+    # purpose. Exactly BUG-RUNVIEW-1's fix (src/runs_page.py), applied here.
     @app.callback(
         Output("skill-library-grid", "children"),
         Input("skill-search", "value"),
         Input("skill-domain-filter", "value"),
         Input("skill-status-filter", "value"),
+        prevent_initial_call=True,
     )
     def _filter_skills(search, domain, status):
         return _rows_for_filter(search, domain, status)

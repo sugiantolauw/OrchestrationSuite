@@ -51,11 +51,22 @@ def _rows_for_filter(skill: str | None, risk: str | None, status: str | None) ->
 
 def register_callbacks(app) -> None:
 
+    # BUG-ACTIONS-2 (P3/P4 perf gap review 2026-09-25, the /actions cold-load
+    # latency pass): without prevent_initial_call, Dash fires this once on
+    # every /actions mount even though all three filters start at their
+    # default (no filter) value -- replacing the whole server-rendered
+    # actions-table-body.children subtree with a second, functionally
+    # identical render moments after paint. management_actions_page()
+    # (src/platform/pages.py) already renders the correct unfiltered table
+    # itself, so that extra adapters.list_management_actions() round trip
+    # served no purpose. Exactly BUG-RUNVIEW-1's fix (src/runs_page.py),
+    # applied here.
     @app.callback(
         Output("actions-table-body", "children"),
         Input("actions-skill-filter", "value"),
         Input("actions-risk-filter", "value"),
         Input("actions-status-filter", "value"),
+        prevent_initial_call=True,
     )
     def _filter_actions(skill, risk, status):
         return _rows_for_filter(skill, risk, status)

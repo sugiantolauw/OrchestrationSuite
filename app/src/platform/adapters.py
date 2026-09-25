@@ -282,6 +282,35 @@ def get_run_frames(run_id: str) -> dict:
     return service.get_run_frames(get_context(), run_id)
 
 
+def get_run_payload_and_frames(run_id: str) -> tuple[dict, dict]:
+    """`/workspace/tne`'s `_load_bundle` (src/workspace_tne.py) used to call
+    get_run_payload and get_run_frames separately on a cache miss, each
+    loading this run's RunState from Delta independently -- on top of the
+    get_run(run_id) call `_load_bundle` already makes first (to read
+    state_version for its own per-run cache check, which must stay a
+    separate, cheap call so a cache HIT never pays for a payload/frames
+    fetch it does not need) -- three round trips against the exact same row
+    for one render of the platform's heaviest page (P3/P4 perf gap review
+    2026-09-25, the /workspace/tne cold-load latency pass). One shared
+    persistence.load_state for payload+frames, reused instead of two -- same
+    pattern as get_run_and_narration above, just not folding in the
+    cache-check get_run() call too.
+
+    Falls back to the two separate calls, unchanged, when there is no real
+    `.persistence` to share a load across (app/tests/fake_service.py's
+    FakeAppContext has no `.persistence` attribute) -- every existing
+    monkeypatch on fake_service.get_run_payload/get_run_frames keeps working
+    exactly as it did before this function existed."""
+    ctx = get_context()
+    persistence = getattr(ctx, "persistence", None)
+    if persistence is None:
+        return get_run_payload(run_id), get_run_frames(run_id)
+    state = persistence.load_state(run_id)
+    payload = service.get_run_payload(ctx, run_id, state=state)
+    frames = service.get_run_frames(ctx, run_id, state=state)
+    return payload, frames
+
+
 def get_export(run_id: str, kind: str):
     return service.get_export(get_context(), run_id, kind)
 

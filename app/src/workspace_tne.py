@@ -152,16 +152,26 @@ def _load_bundle(run_id: str) -> dict | None:
     # tne_workspace_layout as an explicit error panel naming the exception
     # class, instead of a silent empty page.
     load_error: Exception | None = None
+    # P3/P4 perf gap review 2026-09-25 (/workspace/tne cold-load latency
+    # pass): one call sharing a single persistence.load_state between the
+    # payload and frames reads, instead of the two separate adapters calls
+    # each loading this run's RunState independently -- see
+    # adapters.get_run_payload_and_frames' own docstring. A failure in
+    # EITHER read still surfaces as the same explicit error panel a failure
+    # in either one already produced before this change (tne_workspace_layout
+    # discards the whole bundle the instant load_error is set, regardless of
+    # which of the two failed or whether the other would have succeeded --
+    # CLAUDE.md NN14/P2/P3 gate review item 7's "never swallow a load
+    # failure into an empty dict" is unaffected: a real failure is never
+    # hidden, it is just no longer chased by a second, doomed read).
     try:
-        payload = adapters.get_run_payload(run_id) or {}
+        payload, frames = adapters.get_run_payload_and_frames(run_id)
+        payload = payload or {}
+        frames = frames or {}
     except Exception as exc:
         payload = {}
-        load_error = exc
-    try:
-        frames = adapters.get_run_frames(run_id) or {}
-    except Exception as exc:
         frames = {}
-        load_error = load_error or exc
+        load_error = exc
     skill = adapters.get_skill(run.get("skill_id")) if run.get("skill_id") else None
     try:
         actions = adapters.list_management_actions(filters={"run_id": run_id}) or []
