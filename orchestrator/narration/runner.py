@@ -494,41 +494,61 @@ def narrate_synthesis(rc: RunnerContext, findings: list[dict], *, skill) -> tupl
         rc, task="find_synthesis", payload=payload, schema=schema, extra_params={}, validate_fn=validate_fn,
     )
 
+    def _persist_theme(
+        ordinal: int, theme: dict, *, origin: str, served_model_version: str | None,
+    ) -> dict:
+        theme_id = f"{rc.run_id}:G{rc.generation}:TH{ordinal}"
+        member_keys = theme.get("finding_keys", [])
+        finding_ids = [findings_by_key[k]["finding_id"] for k in member_keys if k in findings_by_key]
+        theme_table: dict[str, PlaceholderEntry] = {}
+        for k in member_keys:
+            theme_table.update(tables.get(k, {}))
+        _persist(
+            rc, target_kind="theme", target_id=theme_id, field="title", origin=origin, table=theme_table,
+            text=theme.get("title", ""), call_ids=outcome.call_ids, served_model_version=served_model_version,
+            violations_payload=None,
+        )
+        _persist(
+            rc, target_kind="theme", target_id=theme_id, field="summary", origin=origin, table=theme_table,
+            text=theme.get("summary", ""), call_ids=outcome.call_ids, served_model_version=served_model_version,
+            violations_payload=None,
+        )
+        _persist(
+            rc, target_kind="theme", target_id=theme_id, field="root_cause", origin=origin, table=theme_table,
+            text=theme.get("root_cause_hypothesis", ""), call_ids=outcome.call_ids,
+            served_model_version=served_model_version, violations_payload=None,
+        )
+        review_observations = theme.get("review_observations", [])
+        if review_observations:
+            _persist(
+                rc, target_kind="theme", target_id=theme_id, field="review_observations", origin=origin,
+                table=theme_table, list_text=review_observations, call_ids=outcome.call_ids,
+                served_model_version=served_model_version, violations_payload=None,
+            )
+        return {"theme_id": theme_id, "generation": rc.generation, "ordinal": ordinal, "finding_ids": finding_ids}
+
+    def _theme_field_violations(theme: dict) -> list[dict]:
+        member_keys = theme.get("finding_keys", [])
+        theme_table: dict[str, PlaceholderEntry] = {}
+        for k in member_keys:
+            theme_table.update(tables.get(k, {}))
+        violations = []
+        violations += _validate_field(theme.get("title", ""), theme_table, field="theme_title", allowed_identifiers=allowed)
+        violations += _validate_field(theme.get("summary", ""), theme_table, field="theme_summary", allowed_identifiers=allowed)
+        violations += _validate_field(
+            theme.get("root_cause_hypothesis", ""), theme_table, field="root_cause", allowed_identifiers=allowed,
+        )
+        for robs in theme.get("review_observations", []):
+            violations += _validate_field(robs, theme_table, field="review_observation", allowed_identifiers=allowed)
+        return violations
+
     themes_out: list[dict] = []
     severity_proposals: dict[str, dict] = {}
     if outcome.origin in ("model", "model_repaired"):
         parsed = outcome.parsed
         for ordinal, theme in enumerate(parsed.get("themes", []), start=1):
-            theme_id = f"{rc.run_id}:G{rc.generation}:TH{ordinal}"
-            member_keys = theme.get("finding_keys", [])
-            finding_ids = [findings_by_key[k]["finding_id"] for k in member_keys if k in findings_by_key]
-            theme_table: dict[str, PlaceholderEntry] = {}
-            for k in member_keys:
-                theme_table.update(tables.get(k, {}))
-            _persist(
-                rc, target_kind="theme", target_id=theme_id, field="title", origin=outcome.origin, table=theme_table,
-                text=theme.get("title", ""), call_ids=outcome.call_ids, served_model_version=outcome.served_model_version,
-                violations_payload=None,
-            )
-            _persist(
-                rc, target_kind="theme", target_id=theme_id, field="summary", origin=outcome.origin, table=theme_table,
-                text=theme.get("summary", ""), call_ids=outcome.call_ids, served_model_version=outcome.served_model_version,
-                violations_payload=None,
-            )
-            _persist(
-                rc, target_kind="theme", target_id=theme_id, field="root_cause", origin=outcome.origin, table=theme_table,
-                text=theme.get("root_cause_hypothesis", ""), call_ids=outcome.call_ids,
-                served_model_version=outcome.served_model_version, violations_payload=None,
-            )
-            review_observations = theme.get("review_observations", [])
-            if review_observations:
-                _persist(
-                    rc, target_kind="theme", target_id=theme_id, field="review_observations", origin=outcome.origin,
-                    table=theme_table, list_text=review_observations, call_ids=outcome.call_ids,
-                    served_model_version=outcome.served_model_version, violations_payload=None,
-                )
             themes_out.append(
-                {"theme_id": theme_id, "generation": rc.generation, "ordinal": ordinal, "finding_ids": finding_ids}
+                _persist_theme(ordinal, theme, origin=outcome.origin, served_model_version=outcome.served_model_version)
             )
         for prop in parsed.get("severity_proposals", []):
             fk = prop.get("finding_key")
@@ -538,9 +558,60 @@ def narrate_synthesis(rc: RunnerContext, findings: list[dict], *, skill) -> tupl
                     "proposed_severity": prop.get("proposed_severity"),
                     "proposed_severity_reason": prop.get("reason"),
                 }
-    else:
+    elif outcome.origin == "fallback_invalid" and outcome.attempted_parsed:
+        # Independent narration-content review 2026-09-25: the live run's
+        # synthesis fell back to the deterministic "no themes" text even
+        # though the repair round DID produce a structurally-valid response
+        # -- one theme's own prose tripped a rule (N-Q1/N-S2/N-S4/...) and
+        # that single violation discarded every OTHER theme too, the exact
+        # shape `_persist_batch_items` above already fixed for
+        # `narrate_priority`/`narrate_remediation` batches. Mirror that fix
+        # here: when the STRUCTURAL checks (`validate_themes` -- theme
+        # count, cross-theme finding-key membership, review-observation
+        # caps) pass on the attempted output, re-validate each theme's own
+        # fields against its own table and keep only the individually-clean
+        # ones; a theme that is still wrong on its own is dropped, not
+        # substituted with fallback text (a theme has no "template" prose to
+        # fall back to, unlike a finding's recommendation). This never
+        # loosens what counts as a violation -- `_validate_field` is the
+        # same check `validate_fn` already ran on the whole batch; it only
+        # stops one bad theme from discarding every good one. Structural
+        # violations are whole-batch by nature (which theme "owns" a
+        # duplicate finding-key membership is not decidable per-theme) and
+        # still fall back to the existing all-or-nothing path below.
+        attempted = outcome.attempted_parsed
+        candidate_themes = attempted.get("themes", [])
+        struct_violations = validate_themes(candidate_themes, valid_finding_keys=keys)
+        if not struct_violations:
+            for ordinal, theme in enumerate(candidate_themes, start=1):
+                if _theme_field_violations(theme):
+                    continue  # drop only this theme; siblings that validate on their own are kept
+                themes_out.append(
+                    _persist_theme(
+                        ordinal, theme, origin=outcome.attempted_origin,
+                        served_model_version=outcome.attempted_served_model_version,
+                    )
+                )
+            for prop in attempted.get("severity_proposals", []):
+                fk = prop.get("finding_key")
+                finding = findings_by_key.get(fk)
+                if finding is None:
+                    continue
+                table = tables.get(fk, {})
+                if _validate_field(prop.get("reason", ""), table, field="rationale", allowed_identifiers=allowed):
+                    continue
+                if prop.get("proposed_severity") != finding.get("severity"):
+                    severity_proposals[fk] = {
+                        "proposed_severity": prop.get("proposed_severity"),
+                        "proposed_severity_reason": prop.get("reason"),
+                    }
+
+    if not themes_out and not severity_proposals:
         # §3.5: "synthesis -> no themes" on fallback -- one narrative row
         # records why, at run scope (no theme_id yet exists to attach it to).
+        # Reached both by a genuinely unavailable/unparseable call AND by a
+        # salvage attempt above that still found nothing individually clean
+        # to keep.
         _persist(
             rc, target_kind="theme", target_id="run", field="summary", origin=outcome.origin, table={},
             call_ids=outcome.call_ids, served_model_version=None, violations_payload=outcome.violations_payload,
@@ -671,9 +742,11 @@ def narrate_remediation(rc: RunnerContext, items: list[dict], *, skill, period: 
 
 def narrate_exec_summary(
     rc: RunnerContext, state, findings: list[dict], metrics: dict[str, dict], *,
-    catalogue_tests: list[dict], themes: list[dict] = (),
+    catalogue_tests: list[dict], themes: list[dict] = (), skill=None,
 ) -> str | None:
-    built = build_exec_summary_payload(state, findings, metrics, catalogue_tests=catalogue_tests, themes=themes)
+    built = build_exec_summary_payload(
+        state, findings, metrics, catalogue_tests=catalogue_tests, themes=themes, skill=skill,
+    )
     if built is None:  # G10: zero rule findings -- no call, the deterministic clean-run text is used at export
         return None
     payload, table = built

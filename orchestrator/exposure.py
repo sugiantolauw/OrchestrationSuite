@@ -541,6 +541,43 @@ def headline(line_maps: list[dict[str, float]]) -> float:
     return round(sum(merged.values()), 2)
 
 
+def dominant_exposure_finding(findings: list[dict]) -> dict | None:
+    """The single finding contributing the most to the run's amount-at-risk
+    headline, by its own already-computed `exposure_amount` -- a simple,
+    deterministic proxy for "what drives the headline" (independent
+    narration-content review 2026-09-25: the exec summary and the
+    'risk_and_exposure' chart caption previously had no way to say which
+    finding dominates, only the total). Restricted to findings whose
+    `monetary_basis` is headline-eligible ('spend' or 'excess'); an
+    'approved_not_spent'/'none' finding never contributes to the headline
+    (CLAUDE.md §0.3's own decisions) and is never picked as dominant even if
+    its own `exposure_amount` happens to be large. This is deliberately NOT
+    "which finding owns the most headline dollars after de-duplication" --
+    that would need the full line-level merge `headline()` performs, which
+    needs `test_line_values` this module already has elsewhere but which the
+    narration payload builders (finding/run scope, never a source read) do
+    not carry. Using each finding's own `exposure_amount` as the ranking
+    proxy is consistent with how that figure is described everywhere else in
+    this codebase (`payloads.build_finding_table`'s own docstring: "legitimately
+    overlaps ... with the headline") -- a reasonable "which test's story is
+    biggest", not a claim that this finding accounts for that exact dollar
+    amount of the de-duplicated headline.
+
+    Ties are broken by `finding_id` (descending) for determinism (G9).
+    Returns `None` when no finding qualifies -- a clean run, or every
+    finding's basis is 'approved_not_spent'/'none'."""
+    candidates = [
+        f for f in findings
+        if f.get("monetary_basis") in ("spend", "excess") and f.get("exposure_amount") is not None
+    ]
+    if not candidates:
+        return None
+    return max(
+        candidates,
+        key=lambda f: (f["exposure_amount"], f.get("finding_id") or f.get("rule_id") or ""),
+    )
+
+
 def compute_run_exposure(ctx, state, skill, persisted_findings: list[dict], existing_metrics: dict, rows_by_flag: dict) -> dict:
     """The whole of `prioritise`'s exposure computation (P6 WP N4): reads
     bound source amounts once, resolves every persisted finding's

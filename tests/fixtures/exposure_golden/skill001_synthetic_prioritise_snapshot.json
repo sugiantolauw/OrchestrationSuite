@@ -7,12 +7,12 @@
       "assertion": "operating",
       "candidate_id": null,
       "control_id": "CTL-TNE-06",
-      "created_at": "2026-09-24T12:10:17.043201Z",
+      "created_at": "2026-09-25T14:39:53.140677Z",
       "engagement_id": "ENG-DEFAULT",
       "evidence_refs": [],
       "exposure_amount": null,
       "exposure_basis": "non-monetary finding",
-      "finding_id": "RUN-E332116D538A:T4_2",
+      "finding_id": "RUN-16C7703576EF:T4_2",
       "management_questions": [
         "Is there a process to retrospectively obtain attendee details for flagged claims?",
         "Are staff aware of the requirement to document attendees for entertainment expenses?"
@@ -93,7 +93,7 @@
       "review_state": "draft",
       "risk_id": "RSK-TNE-06",
       "rule_id": "SKILL-001.T4_2",
-      "run_id": "RUN-E332116D538A",
+      "run_id": "RUN-16C7703576EF",
       "severity": "High",
       "severity_basis": "threshold",
       "severity_rule": "att_missing_pct > thresholds.att_missing_high_pct",
@@ -111,7 +111,7 @@
         }
       ],
       "title": "Entertainment Claims Missing Attendee Details",
-      "updated_at": "2026-09-24T12:10:17.069699Z"
+      "updated_at": "2026-09-25T14:39:53.178831Z"
     },
     {
       "accepted_at": null,
@@ -120,12 +120,12 @@
       "assertion": "operating",
       "candidate_id": null,
       "control_id": "CTL-TNE-10",
-      "created_at": "2026-09-24T12:10:17.043201Z",
+      "created_at": "2026-09-25T14:39:53.140677Z",
       "engagement_id": "ENG-DEFAULT",
       "evidence_refs": [],
       "exposure_amount": 1994.79,
       "exposure_basis": "Sum of this finding's own cited amount metric(s) ['duplicate_amount'] -- the same figure(s) rendered into its observation text, never re-derived from raw rows.",
-      "finding_id": "RUN-E332116D538A:T5_2",
+      "finding_id": "RUN-16C7703576EF:T5_2",
       "management_questions": [
         "What is the current process for detecting and resolving duplicate claims?",
         "Have any of these duplicates already been identified and reversed?"
@@ -217,7 +217,7 @@
         }
       },
       "monetary_basis": "excess",
-      "observation": "29 potential duplicate claim groups (60 lines, $1,994.79 at risk) were identified, of which 1 groups contain both an out-of-pocket and a corporate-card line for the same claim. Duplicate claims result in double reimbursement and direct financial loss.\n",
+      "observation": "29 potential duplicate claim groups (60 lines, $1,994.79 at risk) were identified, of which 1 groups contain both an out-of-pocket and a corporate-card line for the same claim. Duplicate claims may result in double reimbursement, representing a potential financial loss pending confirmation.\n",
       "origin": null,
       "prior_finding_id": null,
       "proposed_severity": null,
@@ -227,7 +227,7 @@
       "review_state": "draft",
       "risk_id": "RSK-TNE-10",
       "rule_id": "SKILL-001.T5_2",
-      "run_id": "RUN-E332116D538A",
+      "run_id": "RUN-16C7703576EF",
       "severity": "High",
       "severity_basis": "threshold",
       "severity_rule": "duplicate_groups > thresholds.duplicate_high_count or duplicate_oop_card_groups > thresholds.duplicate_high_count",
@@ -245,7 +245,7 @@
         }
       ],
       "title": "Duplicate Expense Claims Identified",
-      "updated_at": "2026-09-24T12:10:17.069699Z"
+      "updated_at": "2026-09-25T14:39:53.178831Z"
     },
     {
       "accepted_at": null,
@@ -254,12 +254,12 @@
       "assertion": "operating",
       "candidate_id": null,
       "control_id": "CTL-TNE-11",
-      "created_at": "2026-09-24T12:10:17.043201Z",
+      "created_at": "2026-09-25T14:39:53.140677Z",
       "engagement_id": "ENG-DEFAULT",
       "evidence_refs": [],
       "exposure_amount": null,
       "exposure_basis": "non-monetary finding",
-      "finding_id": "RUN-E332116D538A:T6_1a",
+      "finding_id": "RUN-16C7703576EF:T6_1a",
       "management_questions": [
         "Are approvers aware of their obligation to review receipts before approving?",
         "What training has been provided to approvers on their T&E oversight responsibilities?",
@@ -394,7 +394,7 @@
         }
       },
       "monetary_basis": "none",
-      "observation": "Of 799 expense reports reviewed by 11 approvers, 82.7% were approved without the approver viewing the receipt. Additionally, 4.1% of reports assessed as instant (among steps where a receipt was viewed) received approval in under the instant-approval threshold. 1 reports (0.1%) received both instant approval and no receipt review, representing the highest-risk approval behaviour.\n",
+      "observation": "Of 799 expense reports reviewed by 11 approvers, 82.7% were approved without the approver viewing the receipt. Of the reports where the receipt was viewed, 4.1% were nonetheless approved within the instant-approval threshold of that viewing. 1 reports (0.1%) were approved with no receipt review at all, within the instant-approval threshold of when the approver received the report -- the highest-risk approval behaviour.\n",
       "origin": null,
       "prior_finding_id": null,
       "proposed_severity": null,
@@ -404,7 +404,7 @@
       "review_state": "draft",
       "risk_id": "RSK-TNE-11",
       "rule_id": "SKILL-001.T6_1a",
-      "run_id": "RUN-E332116D538A",
+      "run_id": "RUN-16C7703576EF",
       "severity": "High",
       "severity_basis": "threshold",
       "severity_rule": "approver_no_receipt_pct > thresholds.approver_no_receipt_high_pct or approver_instant_pct > thresholds.approver_instant_high_pct",
@@ -429,7 +429,7 @@
         }
       ],
       "title": "Inadequate Approver Review of Expense Reports",
-      "updated_at": "2026-09-24T12:10:17.069699Z"
+      "updated_at": "2026-09-25T14:39:53.178831Z"
     },
     {
       "accepted_at": null,
@@ -438,12 +438,12 @@
       "assertion": "operating",
       "candidate_id": null,
       "control_id": "CTL-TNE-01",
-      "created_at": "2026-09-24T12:10:17.043201Z",
+      "created_at": "2026-09-25T14:39:53.140677Z",
       "engagement_id": "ENG-DEFAULT",
       "evidence_refs": [],
       "exposure_amount": 182552.32,
       "exposure_basis": "Sum of this finding's own cited amount metric(s) ['preapproval_unlinked_amount'] -- the same figure(s) rendered into its observation text, never re-derived from raw rows.",
-      "finding_id": "RUN-E332116D538A:T3_1a",
+      "finding_id": "RUN-16C7703576EF:T3_1a",
       "management_questions": [
         "Is there a follow-up process for pre-approved travel that doesn't result in an expense report?",
         "What percentage of these represent cancelled travel vs missing expense reports?"
@@ -515,7 +515,7 @@
       "review_state": "draft",
       "risk_id": "RSK-TNE-01",
       "rule_id": "SKILL-001.T3_1a",
-      "run_id": "RUN-E332116D538A",
+      "run_id": "RUN-16C7703576EF",
       "severity": "Medium",
       "severity_basis": "fixed",
       "severity_rule": "else",
@@ -525,7 +525,7 @@
       "theme_id": null,
       "threshold_refs": [],
       "title": "Travel Requests Without Linked Expense Reports",
-      "updated_at": "2026-09-24T12:10:17.069699Z"
+      "updated_at": "2026-09-25T14:39:53.178831Z"
     },
     {
       "accepted_at": null,
@@ -534,12 +534,12 @@
       "assertion": "operating",
       "candidate_id": null,
       "control_id": "CTL-TNE-08",
-      "created_at": "2026-09-24T12:10:17.043201Z",
+      "created_at": "2026-09-25T14:39:53.140677Z",
       "engagement_id": "ENG-DEFAULT",
       "evidence_refs": [],
       "exposure_amount": 318785.6,
       "exposure_basis": "Sum of this finding's own cited amount metric(s) ['hv_amount'] -- the same figure(s) rendered into its observation text, never re-derived from raw rows.",
-      "finding_id": "RUN-E332116D538A:T4_4",
+      "finding_id": "RUN-16C7703576EF:T4_4",
       "management_questions": [
         "What additional controls exist for high-value expense claims?",
         "Have any of these high-value claims been subject to post-approval review?"
@@ -611,7 +611,7 @@
       "review_state": "draft",
       "risk_id": "RSK-TNE-08",
       "rule_id": "SKILL-001.T4_4",
-      "run_id": "RUN-E332116D538A",
+      "run_id": "RUN-16C7703576EF",
       "severity": "Medium",
       "severity_basis": "fixed",
       "severity_rule": "else",
@@ -621,7 +621,7 @@
       "theme_id": null,
       "threshold_refs": [],
       "title": "High-Value Claims Requiring Enhanced Scrutiny",
-      "updated_at": "2026-09-24T12:10:17.069699Z"
+      "updated_at": "2026-09-25T14:39:53.178831Z"
     },
     {
       "accepted_at": null,
@@ -630,12 +630,12 @@
       "assertion": "operating",
       "candidate_id": null,
       "control_id": "CTL-TNE-12",
-      "created_at": "2026-09-24T12:10:17.043201Z",
+      "created_at": "2026-09-25T14:39:53.140677Z",
       "engagement_id": "ENG-DEFAULT",
       "evidence_refs": [],
       "exposure_amount": null,
       "exposure_basis": "non-monetary finding",
-      "finding_id": "RUN-E332116D538A:T6_1c",
+      "finding_id": "RUN-16C7703576EF:T6_1c",
       "management_questions": [
         "Is team entertainment (e.g., team lunches) a legitimate and expected expense for ExCo?",
         "Should direct-report entertainment require separate approval from the next level?"
@@ -689,7 +689,7 @@
       "review_state": "draft",
       "risk_id": "RSK-TNE-12",
       "rule_id": "SKILL-001.T6_1c",
-      "run_id": "RUN-E332116D538A",
+      "run_id": "RUN-16C7703576EF",
       "severity": "Medium",
       "severity_basis": "fixed",
       "severity_rule": "else",
@@ -699,7 +699,7 @@
       "theme_id": null,
       "threshold_refs": [],
       "title": "Attendee Hierarchy Validity Exceptions",
-      "updated_at": "2026-09-24T12:10:17.069699Z"
+      "updated_at": "2026-09-25T14:39:53.178831Z"
     },
     {
       "accepted_at": null,
@@ -708,12 +708,12 @@
       "assertion": "operating",
       "candidate_id": null,
       "control_id": "CTL-TNE-13",
-      "created_at": "2026-09-24T12:10:17.043201Z",
+      "created_at": "2026-09-25T14:39:53.140677Z",
       "engagement_id": "ENG-DEFAULT",
       "evidence_refs": [],
       "exposure_amount": 1444.93,
       "exposure_basis": "Sum of this finding's own cited amount metric(s) ['daily_over_amount_dom', 'daily_over_amount_int'] -- the same figure(s) rendered into its observation text, never re-derived from raw rows.",
-      "finding_id": "RUN-E332116D538A:T6_1d",
+      "finding_id": "RUN-16C7703576EF:T6_1d",
       "management_questions": [
         "Are there legitimate business scenarios that would exceed the daily per-diem in a single day?",
         "Should the daily limit be adjusted for international travel days?",
@@ -830,7 +830,7 @@
         }
       },
       "monetary_basis": "excess",
-      "observation": "2 domestic and 2 international employee-days exceeded the applicable per-diem daily spend threshold, totalling $446.40 and $998.53 respectively in excess spend. The highest single domestic day was $437.92 and the highest single international day was $814.25. Concentrated daily spend may indicate bulk personal purchases or policy non-compliance.\n",
+      "observation": "2 domestic and 2 international employee-days exceeded the applicable per-diem daily spend threshold, totalling $446.40 and $998.53 respectively in excess spend. The highest single domestic day was $437.92 and the highest single international day was $814.25. Concentrated single-day spend may reflect legitimate exceptional circumstances, or may warrant review against the control objective.\n",
       "origin": null,
       "prior_finding_id": null,
       "proposed_severity": null,
@@ -840,7 +840,7 @@
       "review_state": "draft",
       "risk_id": "RSK-TNE-13",
       "rule_id": "SKILL-001.T6_1d",
-      "run_id": "RUN-E332116D538A",
+      "run_id": "RUN-16C7703576EF",
       "severity": "Medium",
       "severity_basis": "threshold",
       "severity_rule": "else",
@@ -858,7 +858,7 @@
         }
       ],
       "title": "Daily Spend Limit Exceedances",
-      "updated_at": "2026-09-24T12:10:17.069699Z"
+      "updated_at": "2026-09-25T14:39:53.178831Z"
     },
     {
       "accepted_at": null,
@@ -867,12 +867,12 @@
       "assertion": "operating",
       "candidate_id": null,
       "control_id": "CTL-TNE-01",
-      "created_at": "2026-09-24T12:10:17.043201Z",
+      "created_at": "2026-09-25T14:39:53.140677Z",
       "engagement_id": "ENG-DEFAULT",
       "evidence_refs": [],
       "exposure_amount": null,
       "exposure_basis": "non-monetary finding",
-      "finding_id": "RUN-E332116D538A:T3_1b",
+      "finding_id": "RUN-16C7703576EF:T3_1b",
       "management_questions": [
         "Are all ExCo members and their delegates aware of the pre-approval requirement?",
         "Should certain expense types (e.g., local meals) be exempt from pre-approval?"
@@ -936,17 +936,17 @@
         }
       },
       "monetary_basis": "none",
-      "observation": "8 bookings (2 employees) have no matching travel request on file (name match rate 33.3%). The control objective is that all travel should be pre-approved before expenses are incurred, to support budgetary control and management oversight.\n",
+      "observation": "8 bookings (2 employees) have no matching travel request on file. The control objective is that all travel should be pre-approved before expenses are incurred, to support budgetary control and management oversight. This name-and-class join matched 33.3% of bookings to a travel request overall; a lower match rate limits how completely this test can rely on the join, and is not itself a measure of compliance.\n",
       "origin": null,
       "prior_finding_id": null,
       "proposed_severity": null,
       "proposed_severity_reason": null,
-      "recommendation": "Enforce pre-approval requirements in the expense system by blocking submission without a linked travel request. Review non-compliant claims for policy violations.\n",
+      "recommendation": "Enforce pre-approval requirements in the expense system by blocking submission without a linked travel request. For each flagged booking, confirm whether a matching travel request exists under a different name or class before treating the absence of a match as non-compliance.\n",
       "recurrence_count": 0,
       "review_state": "draft",
       "risk_id": "RSK-TNE-01",
       "rule_id": "SKILL-001.T3_1b",
-      "run_id": "RUN-E332116D538A",
+      "run_id": "RUN-16C7703576EF",
       "severity": "Low",
       "severity_basis": "threshold",
       "severity_rule": "else",
@@ -964,7 +964,7 @@
         }
       ],
       "title": "Employees Submitting Claims Without Pre-Approval",
-      "updated_at": "2026-09-24T12:10:17.069699Z"
+      "updated_at": "2026-09-25T14:39:53.178831Z"
     },
     {
       "accepted_at": null,
@@ -973,12 +973,12 @@
       "assertion": "operating",
       "candidate_id": null,
       "control_id": "CTL-TNE-02",
-      "created_at": "2026-09-24T12:10:17.043201Z",
+      "created_at": "2026-09-25T14:39:53.140677Z",
       "engagement_id": "ENG-DEFAULT",
       "evidence_refs": [],
       "exposure_amount": null,
       "exposure_basis": "non-monetary finding",
-      "finding_id": "RUN-E332116D538A:T3_2a",
+      "finding_id": "RUN-16C7703576EF:T3_2a",
       "management_questions": [
         "What is the estimated cost impact of non-preferred supplier usage?",
         "Are there legitimate reasons (e.g., route availability) for the non-preferred bookings?"
@@ -1058,7 +1058,7 @@
         }
       },
       "monetary_basis": "none",
-      "observation": "1 domestic and 20 international airline bookings, and 1 domestic and 0 international car rental bookings, used non-preferred suppliers (accommodation not assessed -- no preferred-hotel list supplied). Use of non-preferred suppliers foregoes negotiated corporate rates and volume discounts, increasing travel costs.\n",
+      "observation": "1 domestic and 20 international airline bookings, and 1 domestic and 0 international car rental bookings, used non-preferred suppliers (accommodation not assessed -- no preferred-hotel list supplied). Use of non-preferred suppliers foregoes negotiated corporate rates and volume discounts, which may increase travel costs.\n",
       "origin": null,
       "prior_finding_id": null,
       "proposed_severity": null,
@@ -1068,7 +1068,7 @@
       "review_state": "draft",
       "risk_id": "RSK-TNE-02",
       "rule_id": "SKILL-001.T3_2a",
-      "run_id": "RUN-E332116D538A",
+      "run_id": "RUN-16C7703576EF",
       "severity": "Low",
       "severity_basis": "threshold",
       "severity_rule": "else",
@@ -1086,7 +1086,7 @@
         }
       ],
       "title": "Non-Preferred Supplier Usage",
-      "updated_at": "2026-09-24T12:10:17.069699Z"
+      "updated_at": "2026-09-25T14:39:53.178831Z"
     },
     {
       "accepted_at": null,
@@ -1095,12 +1095,12 @@
       "assertion": "operating",
       "candidate_id": null,
       "control_id": "CTL-TNE-04",
-      "created_at": "2026-09-24T12:10:17.043201Z",
+      "created_at": "2026-09-25T14:39:53.140677Z",
       "engagement_id": "ENG-DEFAULT",
       "evidence_refs": [],
       "exposure_amount": 1384.27,
       "exposure_basis": "Sum of this finding's own cited amount metric(s) ['ent_over_amount'] -- the same figure(s) rendered into its observation text, never re-derived from raw rows.",
-      "finding_id": "RUN-E332116D538A:T3_3b",
+      "finding_id": "RUN-16C7703576EF:T3_3b",
       "management_questions": [
         "Are the current per-head thresholds still appropriate?",
         "Are there specific event types that legitimately exceed the thresholds?"
@@ -1193,7 +1193,7 @@
       "review_state": "draft",
       "risk_id": "RSK-TNE-04",
       "rule_id": "SKILL-001.T3_3b",
-      "run_id": "RUN-E332116D538A",
+      "run_id": "RUN-16C7703576EF",
       "severity": "Low",
       "severity_basis": "fixed",
       "severity_rule": "else",
@@ -1203,7 +1203,7 @@
       "theme_id": null,
       "threshold_refs": [],
       "title": "Entertainment Spend Exceeding Per-Head Thresholds",
-      "updated_at": "2026-09-24T12:10:17.069699Z"
+      "updated_at": "2026-09-25T14:39:53.178831Z"
     },
     {
       "accepted_at": null,
@@ -1212,12 +1212,12 @@
       "assertion": "operating",
       "candidate_id": null,
       "control_id": "CTL-TNE-05",
-      "created_at": "2026-09-24T12:10:17.043201Z",
+      "created_at": "2026-09-25T14:39:53.140677Z",
       "engagement_id": "ENG-DEFAULT",
       "evidence_refs": [],
       "exposure_amount": 1009.26,
       "exposure_basis": "Sum of this finding's own cited amount metric(s) ['missing_receipt_amount'] -- the same figure(s) rendered into its observation text, never re-derived from raw rows.",
-      "finding_id": "RUN-E332116D538A:T4_1",
+      "finding_id": "RUN-16C7703576EF:T4_1",
       "management_questions": [
         "What is the current policy for handling claims without receipts?",
         "Are there legitimate reasons for the volume of missing receipts (e.g., system issues)?"
@@ -1315,7 +1315,7 @@
       "review_state": "draft",
       "risk_id": "RSK-TNE-05",
       "rule_id": "SKILL-001.T4_1",
-      "run_id": "RUN-E332116D538A",
+      "run_id": "RUN-16C7703576EF",
       "severity": "Low",
       "severity_basis": "threshold",
       "severity_rule": "else",
@@ -1347,7 +1347,7 @@
         }
       ],
       "title": "Missing Receipt Documentation",
-      "updated_at": "2026-09-24T12:10:17.069699Z"
+      "updated_at": "2026-09-25T14:39:53.178831Z"
     }
   ],
   "run_approved_not_spent_total": {

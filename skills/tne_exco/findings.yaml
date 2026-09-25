@@ -8,6 +8,85 @@
 # citing a metric no test produces, and authoring one now would be exactly the
 # kind of forward-reference the restricted evaluator's load-time checks exist
 # to catch.
+
+# `metric_descriptions` (independent narration-content review 2026-09-25,
+# orchestrator.skills.Skill.metric_descriptions, orchestrator.narration.
+# payloads._metric_entry): one line of plain-English definition per metric
+# this Skill's tests produce, written from docs/specs/
+# SKILL-001_test_specification.md's own per-test "Metrics" entries -- never
+# invented. `narrate` shows a model this text as the metric's "meaning" in
+# its PLACEHOLDERS table instead of the generic "<class> metric of test
+# <id>" filler, and prompts it to use the metric only in that stated sense
+# (system_common.md). This block is OPTIONAL: a Playbook Skill may omit it
+# (a metric then falls back to its bare name, unchanged), and an
+# Explorer-authored Skill's planner may supply it the same way.
+metric_descriptions:
+  # T3.1a
+  preapproval_unlinked_count: count of pre-approved travel requests with no matching expense report on file
+  preapproval_unlinked_amount: total approved amount of those unlinked pre-approved travel requests -- money approved, not money spent
+  preapproval_employees: count of distinct employees with at least one unlinked pre-approved travel request
+  # T3.1b
+  no_preapproval_bookings: count of travel bookings with no matching pre-approved travel request of the same travel class
+  no_preapproval_employees: count of distinct employees with at least one such unmatched booking
+  t31b_name_match_rate: the share of bookings this name-and-class join could match to a travel request at all -- a diagnostic of the join's own reliability, not a measure of compliance
+  # T3.2a
+  pref_dom_airline: count of domestic airline bookings made with a supplier not on the preferred-airline list
+  pref_int_airline: count of international airline bookings made with a supplier not on the preferred-airline list
+  pref_dom_car: count of domestic car-rental bookings made with a supplier not on the preferred-car list
+  pref_int_car: count of international car-rental bookings made with a supplier not on the preferred-car list
+  # T3.3a
+  late_booking_count_dom: count of domestic bookings made fewer days before departure than the domestic advance-purchase threshold
+  late_booking_count_int: count of international or Trans-Tasman bookings made fewer days before departure than the international advance-purchase threshold
+  very_late_booking_count: count of bookings of any class made fewer days before departure than the stricter very-late threshold
+  late_booking_employees_dom: count of distinct employees with at least one late domestic booking
+  late_booking_employees_int: count of distinct employees with at least one late international booking
+  # T3.3b
+  ent_assessed: count of entertainment entries this test could assess a per-head spend for
+  ent_over_internal_count: count of assessed entertainment entries, with every attendee internal, whose per-head spend exceeded the internal per-head threshold
+  ent_over_external_count: count of assessed entertainment entries, with any attendee external, whose per-head spend exceeded the external per-head threshold
+  ent_over_amount: total reimbursed amount of the entertainment entries that exceeded their per-head threshold -- the full entry amount, not an excess figure, since there is no per-entry limit, only a per-head one
+  # T4.1
+  missing_receipt_count: count of expense lines with no receipt on file in the missing-receipt register
+  missing_receipt_pct: the share of tested expense lines that are missing a receipt
+  missing_receipt_amount: total reimbursed amount of the expense lines missing a receipt
+  missing_receipt_no_affidavit_count: of the lines missing a receipt, the count that also have no affidavit on file
+  # T4.2
+  att_missing_count: count of entertainment-related expense lines with no matching attendee record
+  att_total: count of entertainment-related expense lines tested
+  att_missing_pct: the share of tested entertainment-related expense lines with no matching attendee record
+  # T4.4
+  hv_count: count of expense lines whose amount exceeds the high-value threshold
+  hv_amount: total reimbursed amount of the high-value expense lines
+  hv_employees: count of distinct employees with at least one high-value expense line
+  # T5.1
+  split_groups: count of distinct split-claim groups -- a same-day and a window detection that share the identical set of member lines count once
+  split_same_day_groups: count of groups the same-day detection found on its own, before deduplication against the window detection
+  split_window_groups: count of groups the rolling-window detection found on its own, before deduplication against the same-day detection
+  split_lines: count of distinct expense lines belonging to any split-claim group
+  split_amount: total reimbursed amount of the distinct lines belonging to a split-claim group
+  # T5.2
+  duplicate_groups: count of groups of lines that share the same employee, date, vendor and amount
+  duplicate_lines: count of expense lines belonging to any duplicate group
+  duplicate_amount: sum of the extra lines beyond the first in each duplicate group -- the amount at risk of double reimbursement, not the full value of every line
+  duplicate_oop_card_groups: of the duplicate groups, the count where one line is an out-of-pocket claim and another is a corporate-card claim for the same amount
+  # T6.1a
+  approver_total_reports: count of expense reports reviewed by an ExCo approver in the audit period
+  approver_count: count of distinct approvers who reviewed those reports
+  approver_no_receipt_pct: the share of tested reports approved without the approver viewing the receipt
+  approver_instant_pct: of the reports where the approver viewed the receipt, the share that were nonetheless approved within the instant-approval threshold of that viewing
+  approver_worst_case_n: count of reports approved with no receipt review at all, within the instant-approval threshold of when the approver received the report
+  approver_worst_case_pct: the share of tested reports that meet that worst-case definition
+  # T6.1c
+  att_hierarchy_invalid: count of entertainment-entry attendee records where the attendee is within the claimant's own reporting hierarchy
+  att_hierarchy_total: count of entertainment-entry attendee records tested
+  # T6.1d
+  daily_over_count_dom: count of employee-days in Australia where total spend exceeded the applicable per-diem limit
+  daily_over_amount_dom: total amount by which those domestic employee-days exceeded their per-diem limit -- the excess only, not the full day's spend
+  daily_over_count_int: count of employee-days outside Australia where total spend exceeded the applicable per-diem limit
+  daily_over_amount_int: total amount by which those international employee-days exceeded their per-diem limit -- the excess only, not the full day's spend
+  daily_over_max_dom: the single largest domestic employee-day excess over the per-diem limit
+  daily_over_max_int: the single largest international employee-day excess over the per-diem limit
+
 findings:
   - id: T3_1a
     test_id: T3.1a
@@ -53,16 +132,31 @@ findings:
     # Item 7 (CLAUDE.md P2/P3 gate review): reworded from an unattributed
     # "Policy requires" to cite the catalogue's own control objective
     # (catalogue.yaml T3.1b) instead of asserting an uncited policy.
+    # Independent narration-content review 2026-09-25 (live workpaper): the
+    # observation used to place t31b_name_match_rate in the same sentence as
+    # the exception count, which read as if the match rate ITSELF measured
+    # compliance. It is a join diagnostic (spec T3.1b §0.5: bookings carry no
+    # employee ID, so the join to a travel request is by name and travel
+    # class, and "every name join reports its match rate") -- the reliability
+    # of the JOIN, not of the traveller. Given its own sentence and worded as
+    # a diagnostic. The recommendation used to say "review non-compliant
+    # claims for policy violations", which is circular (a flagged booking is
+    # by definition unmatched; telling an auditor to review it for
+    # non-compliance restates the trigger, not a next step) -- reworded to a
+    # concrete investigative step.
     observation: >
       {no_preapproval_bookings} bookings ({no_preapproval_employees} employees) have
-      no matching travel request on file (name match rate {t31b_name_match_rate}).
-      The control objective is that all travel should be pre-approved before
-      expenses are incurred, to support budgetary control and management
-      oversight.
+      no matching travel request on file. The control objective is that all
+      travel should be pre-approved before expenses are incurred, to support
+      budgetary control and management oversight. This name-and-class join
+      matched {t31b_name_match_rate} of bookings to a travel request overall;
+      a lower match rate limits how completely this test can rely on the join,
+      and is not itself a measure of compliance.
     recommendation: >
       Enforce pre-approval requirements in the expense system by blocking
-      submission without a linked travel request. Review non-compliant claims for
-      policy violations.
+      submission without a linked travel request. For each flagged booking,
+      confirm whether a matching travel request exists under a different name
+      or class before treating the absence of a match as non-compliance.
     management_questions:
       - Are all ExCo members and their delegates aware of the pre-approval requirement?
       - Should certain expense types (e.g., local meals) be exempt from pre-approval?
@@ -92,7 +186,8 @@ findings:
       bookings, and {pref_dom_car} domestic and {pref_int_car} international car
       rental bookings, used non-preferred suppliers (accommodation not assessed --
       no preferred-hotel list supplied). Use of non-preferred suppliers foregoes
-      negotiated corporate rates and volume discounts, increasing travel costs.
+      negotiated corporate rates and volume discounts, which may increase travel
+      costs.
     recommendation: >
       Reinforce preferred supplier policy and ensure the corporate booking tool
       defaults to preferred suppliers. Require justification for non-preferred
@@ -260,12 +355,14 @@ findings:
       {split_groups} split-claim groups were identified ({split_same_day_groups}
       found by same-day matching, {split_window_groups} by the rolling window --
       a claim group found by both counts once), spanning {split_lines} lines and
-      totalling {split_amount} at risk. Split claims may indicate intentional
-      structuring of expenses below approval thresholds or policy limits.
+      totalling {split_amount} at risk. Split claims may reflect legitimate
+      separate expenses, or expenses kept under approval thresholds through
+      separate submissions, which the control objective is designed to prevent.
     recommendation: >
-      Investigate flagged split claims to determine if they represent legitimate
-      separate expenses or intentional structuring. Implement automated detection
-      rules in the expense system.
+      Investigate flagged split claims to determine whether they represent
+      legitimate separate expenses or expenses kept under approval thresholds
+      through separate submissions. Implement automated detection rules in the
+      expense system.
     management_questions:
       - Are employees aware that splitting claims to avoid thresholds violates policy?
       - Have similar patterns been identified in prior audit cycles?
@@ -287,8 +384,9 @@ findings:
       {duplicate_groups} potential duplicate claim groups ({duplicate_lines} lines,
       {duplicate_amount} at risk) were identified, of which
       {duplicate_oop_card_groups} groups contain both an out-of-pocket and a
-      corporate-card line for the same claim. Duplicate claims result in double
-      reimbursement and direct financial loss.
+      corporate-card line for the same claim. Duplicate claims may result in
+      double reimbursement, representing a potential financial loss pending
+      confirmation.
     recommendation: >
       Review all flagged duplicates and recover any confirmed double payments.
       Enhance duplicate detection logic in the expense system to prevent
@@ -308,14 +406,28 @@ findings:
     metrics_cited: [approver_total_reports, approver_count, approver_no_receipt_pct, approver_instant_pct, approver_worst_case_n, approver_worst_case_pct]
     # B2: no dollar figure is cited -- non-monetary.
     monetary_basis: none
+    # Independent narration-content review 2026-09-25 (live workpaper): the
+    # observation used to say a share of reports "assessed as instant ...
+    # received approval in under the instant-approval threshold" -- circular,
+    # since being approved under the threshold IS what "instant" means here
+    # (spec T6.1a: instant = receipt viewed AND approved within the threshold
+    # of that viewing). Reworded so approver_instant_pct is stated once, as
+    # what it actually is: the share of receipt-viewed reports that were
+    # nonetheless approved within the threshold. The worst-case sentence used
+    # to call it "instant approval and no receipt review" -- but "instant"
+    # (per spec) REQUIRES the receipt to have been viewed, so a not-viewed
+    # report can never itself be "instant"; worst case is the distinct,
+    # separately-defined case of no receipt review AND fast approval measured
+    # from when the approver received the report, reworded to say so.
     observation: >
       Of {approver_total_reports} expense reports reviewed by {approver_count}
       approvers, {approver_no_receipt_pct} were approved without the approver
-      viewing the receipt. Additionally, {approver_instant_pct} of reports
-      assessed as instant (among steps where a receipt was viewed) received
-      approval in under the instant-approval threshold. {approver_worst_case_n}
-      reports ({approver_worst_case_pct}) received both instant approval and no
-      receipt review, representing the highest-risk approval behaviour.
+      viewing the receipt. Of the reports where the receipt was viewed,
+      {approver_instant_pct} were nonetheless approved within the
+      instant-approval threshold of that viewing. {approver_worst_case_n}
+      reports ({approver_worst_case_pct}) were approved with no receipt review
+      at all, within the instant-approval threshold of when the approver
+      received the report -- the highest-risk approval behaviour.
     recommendation: >
       Implement minimum review time controls in the expense system. Require
       mandatory receipt viewing before approval submission. Establish approver
@@ -378,8 +490,8 @@ findings:
       totalling {daily_over_amount_dom} and {daily_over_amount_int} respectively
       in excess spend. The highest single domestic day was {daily_over_max_dom}
       and the highest single international day was {daily_over_max_int}.
-      Concentrated daily spend may indicate bulk personal purchases or policy
-      non-compliance.
+      Concentrated single-day spend may reflect legitimate exceptional
+      circumstances, or may warrant review against the control objective.
     recommendation: >
       Review high daily-spend instances to verify business purpose. Consider
       implementing real-time daily spend caps with automatic escalation for

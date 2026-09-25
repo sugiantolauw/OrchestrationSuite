@@ -304,6 +304,77 @@ def test_n_s2_negative_policy_requires_is_flagged():
 
 
 # ---------------------------------------------------------------------------
+# N-S4 (G12-lite, independent narration-content review 2026-09-25): a causal
+# connective with no hedge word in the same sentence. Positive/negative
+# pairs below use the real live sentences the review found (before the
+# `findings.yaml` reword) and their hedged rewrites (after), so this is a
+# regression test for the actual reported problem, not only a synthetic one.
+# ---------------------------------------------------------------------------
+def test_n_s4_positive_hedged_result_in_is_not_flagged():
+    r = validate_prose(
+        "Duplicate claims may result in double reimbursement, representing a potential "
+        "financial loss pending confirmation.",
+        TABLE, field="observation",
+    )
+    assert "N-S4" not in _rule_ids(r)
+
+
+def test_n_s4_positive_hedge_later_in_same_sentence_still_licenses_it():
+    r = validate_prose(
+        "This may result in a loss, which could indicate a risk of further exposure.",
+        TABLE, field="observation",
+    )
+    assert "N-S4" not in _rule_ids(r)
+
+
+def test_n_s4_negative_live_duplicate_claims_result_in_direct_financial_loss():
+    # T5.2, live workpaper (before reword): "Duplicate claims result in double
+    # reimbursement and direct financial loss."
+    r = validate_prose(
+        "Duplicate claims result in double reimbursement and direct financial loss.",
+        TABLE, field="observation",
+    )
+    assert "N-S4" in _rule_ids(r)
+
+
+def test_n_s4_negative_live_thereby_increasing_travel_costs():
+    # T3.2a, live workpaper (before reword): "...increasing travel costs."
+    r = validate_prose(
+        "Use of non-preferred suppliers foregoes negotiated corporate rates and volume "
+        "discounts, thereby increasing travel costs.",
+        TABLE, field="observation",
+    )
+    assert "N-S4" in _rule_ids(r)
+
+
+def test_n_s4_negative_bare_leads_to_with_no_hedge_is_flagged():
+    r = validate_prose("This pattern leads to a breakdown in control.", TABLE, field="observation")
+    assert "N-S4" in _rule_ids(r)
+
+
+def test_n_s4_positive_interrogative_sentence_is_exempt():
+    # A real management question (skills/tne_exco/findings.yaml, T3.1a) and
+    # the live fixture's own T2 question (tests/narration_test_support.py)
+    # both use a causal connective to ASK, not to ASSERT.
+    r = validate_prose(
+        "Is there a follow-up process for pre-approved travel that doesn't result in an "
+        "expense report?",
+        TABLE, field="question",
+    )
+    assert "N-S4" not in _rule_ids(r)
+    r2 = validate_prose("What causes a claim to be missing its register match?", TABLE, field="question")
+    assert "N-S4" not in _rule_ids(r2)
+
+
+def test_n_s4_negative_interrogative_exemption_does_not_hide_a_declarative_sentence_in_the_same_field():
+    r = validate_prose(
+        "What causes this? This pattern leads to a breakdown in control.",
+        TABLE, field="question",
+    )
+    assert "N-S4" in _rule_ids(r)
+
+
+# ---------------------------------------------------------------------------
 # N-S3: code-like text.
 # ---------------------------------------------------------------------------
 def test_n_s3_positive_ordinary_prose_is_not_flagged():

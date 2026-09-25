@@ -94,11 +94,27 @@ def _chart_specs(findings: list[dict], metrics: dict[str, dict]) -> tuple[list[d
         }
     ]
     if metrics.get("run_exposure_headline") is not None:
+        metric_names = ["run_exposure_headline"]
+        what_it_plots = "the run's amount-at-risk headline"
+        # Independent narration-content review 2026-09-25: the caption's own
+        # only available number was the headline itself, so every caption
+        # could do no more than restate it. `dominant_exposure_finding` (the
+        # same helper `run_values` uses for the exec summary's own
+        # `run_exposure_dominant_*` entries) gives the caption something
+        # beyond the total to describe: which finding's own amount is the
+        # largest contributor, and on what basis.
+        dominant = exposure.dominant_exposure_finding(findings)
+        if dominant is not None:
+            chart_metrics["run_exposure_dominant_amount"] = {"value": dominant["exposure_amount"], "unit": "AUD"}
+            chart_metrics["run_exposure_dominant_title"] = {"value": dominant.get("title"), "unit": "value"}
+            chart_metrics["run_exposure_dominant_basis"] = {"value": dominant.get("monetary_basis"), "unit": "value"}
+            metric_names += ["run_exposure_dominant_amount", "run_exposure_dominant_title", "run_exposure_dominant_basis"]
+            what_it_plots = "the run's amount-at-risk headline and which finding contributes the most to it"
         specs.append(
             {
                 "chart_id": "risk_and_exposure",
-                "what_it_plots": "the run's amount-at-risk headline",
-                "metric_names": ["run_exposure_headline"],
+                "what_it_plots": what_it_plots,
+                "metric_names": metric_names,
             }
         )
     return specs, chart_metrics
@@ -253,7 +269,9 @@ def narrate(ctx: NodeContext, state: RunState) -> RunState:
     # table), so it stays the one narration call that runs strictly AFTER
     # the bounded stage above rather than inside it.
     catalogue_tests = catalogue_tests_for_skill(skill)
-    exec_summary_id = runner.narrate_exec_summary(rc, state, findings, metrics, catalogue_tests=catalogue_tests, themes=themes)
+    exec_summary_id = runner.narrate_exec_summary(
+        rc, state, findings, metrics, catalogue_tests=catalogue_tests, themes=themes, skill=skill,
+    )
 
     counts = rc.origin_counts
     fallback_count = counts.get("fallback_invalid", 0) + counts.get("fallback_unavailable", 0)
