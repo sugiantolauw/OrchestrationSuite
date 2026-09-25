@@ -192,6 +192,7 @@ def test_main_dry_run_returns_zero_and_never_touches_a_workspace(monkeypatch, tm
     monkeypatch.setenv("DBX_SCHEMA", "sch")
     monkeypatch.setenv("DATABRICKS_HOST", "https://x.cloud.databricks.com")
     monkeypatch.setenv("DBX_APP_NAME", "ai-audit-analyst")
+    monkeypatch.setenv("AUDIT_TIMEZONE", "Australia/Sydney")
     monkeypatch.delenv("DBX_WAREHOUSE_HTTP_PATH", raising=False)
 
     exit_code = deploy_app.main(["--dry-run"])
@@ -206,6 +207,7 @@ def test_main_dry_run_with_source_code_path_mentions_it(monkeypatch, capsys):
     monkeypatch.setenv("DBX_SCHEMA", "sch")
     monkeypatch.setenv("DATABRICKS_HOST", "https://x.cloud.databricks.com")
     monkeypatch.setenv("DBX_APP_NAME", "ai-audit-analyst")
+    monkeypatch.setenv("AUDIT_TIMEZONE", "Australia/Sydney")
     monkeypatch.delenv("DBX_WAREHOUSE_HTTP_PATH", raising=False)
 
     exit_code = deploy_app.main(["--dry-run", "--source-code-path", "/Workspace/Repos/me/app"])
@@ -290,3 +292,162 @@ def test_warn_about_active_runs_never_raises_on_a_persistence_error(capsys):
     deploy_app._warn_about_active_runs(_BrokenPersistence())
     out = capsys.readouterr().out
     assert "Could not check" in out
+
+
+# ── BUG-1/BUG-2 fix (final test round, TEST_REPORT_stage345.md): every
+# runtime setting orchestrator.config.Settings reads is forwarded into
+# app.yaml, secrets never are, and an enabled feature missing a setting it
+# needs fails the deploy loudly instead of shipping silently degraded. ─────
+
+
+def _settings(**overrides):
+    from orchestrator.config import Settings
+
+    base = dict(
+        catalog="cat", schema="sch", host="https://x.cloud.databricks.com",
+        app_name="ai-audit-analyst", audit_timezone="Australia/Sydney",
+    )
+    base.update(overrides)
+    return Settings(**base)
+
+
+def test_check_feature_requirements_flags_missing_audit_timezone():
+    problems = deploy_app._check_feature_requirements(_settings(audit_timezone=None))
+    assert any("AUDIT_TIMEZONE" in p for p in problems)
+
+
+def test_check_feature_requirements_passes_with_audit_timezone_set():
+    assert deploy_app._check_feature_requirements(_settings()) == []
+
+
+def test_check_feature_requirements_flags_missing_endpoints_when_narration_enabled():
+    problems = deploy_app._check_feature_requirements(
+        _settings(narration_enabled=True, model_sonnet=None, model_gpt_oss=None)
+    )
+    assert any("MODEL_SONNET" in p and "NARRATION_ENABLED" in p for p in problems)
+    assert any("MODEL_GPT_OSS" in p and "NARRATION_ENABLED" in p for p in problems)
+
+
+def test_check_feature_requirements_passes_when_narration_enabled_with_both_endpoints():
+    problems = deploy_app._check_feature_requirements(
+        _settings(narration_enabled=True, model_sonnet="s", model_gpt_oss="g")
+    )
+    assert problems == []
+
+
+def test_check_feature_requirements_flags_ai_proposed_without_narration():
+    problems = deploy_app._check_feature_requirements(
+        _settings(narration_enabled=False, ai_proposed_findings_enabled=True)
+    )
+    assert any("AI_PROPOSED_FINDINGS_ENABLED" in p and "NARRATION_ENABLED" in p for p in problems)
+
+
+def test_check_feature_requirements_passes_when_both_narration_flags_enabled_together():
+    problems = deploy_app._check_feature_requirements(
+        _settings(narration_enabled=True, ai_proposed_findings_enabled=True,
+                  model_sonnet="s", model_gpt_oss="g")
+    )
+    assert problems == []
+
+
+def test_runtime_settings_env_vars_forwards_narration_and_timezone_settings():
+    settings = _settings(narration_enabled=True, ai_proposed_findings_enabled=True,
+                          model_sonnet="s", model_gpt_oss="g")
+    out = deploy_app._runtime_settings_env_vars(settings, {})
+    assert out["AUDIT_TIMEZONE"] == "Australia/Sydney"
+    assert out["NARRATION_ENABLED"] == "true"
+    assert out["AI_PROPOSED_FINDINGS_ENABLED"] == "true"
+    assert out["EXECUTOR"] == "thread"
+    assert out["MAX_CONCURRENT_RUNS"] == "2"
+    assert out["DEMO_MODE"] == "false"
+
+
+def test_runtime_settings_env_vars_omits_unset_optional_settings():
+    out = deploy_app._runtime_settings_env_vars(_settings(), {})
+    assert "SOURCE_BINDINGS" not in out
+    assert "PPTX_TEMPLATE_PATH" not in out
+    assert "LLM_MONTHLY_TOKEN_BUDGET" not in out
+    assert "PII_TAG_NAMES" not in out
+
+
+def test_runtime_settings_env_vars_forwards_a_customised_pptx_template_path():
+    out = deploy_app._runtime_settings_env_vars(_settings(), {"PPTX_TEMPLATE_PATH": "/custom/template.pptx"})
+    assert out["PPTX_TEMPLATE_PATH"] == "/custom/template.pptx"
+
+
+def test_runtime_settings_env_vars_forwards_raw_passthrough_settings():
+    out = deploy_app._runtime_settings_env_vars(_settings(), {"DBX_MAX_CELLS": "5000000", "MAX_UPLOAD_MB": "50"})
+    assert out["DBX_MAX_CELLS"] == "5000000"
+    assert out["MAX_UPLOAD_MB"] == "50"
+
+
+def test_runtime_settings_env_vars_never_includes_a_token_or_secret():
+    """CLAUDE.md §10: never write a token to source. DATABRICKS_TOKEN must
+    never appear in app.yaml -- Databricks Apps authenticate as their own
+    platform-injected service principal, never this deploying operator's
+    PAT, even if this process's own environment happens to have one set."""
+    raw_env = {"DATABRICKS_TOKEN": "dapi-super-secret-value"}
+    out = deploy_app._runtime_settings_env_vars(_settings(), raw_env)
+    assert "DATABRICKS_TOKEN" not in out
+    assert "dapi-super-secret-value" not in out.values()
+
+
+def test_main_dry_run_fails_loudly_when_narration_enabled_without_endpoints(monkeypatch):
+    import pytest
+
+    monkeypatch.setenv("DBX_CATALOG", "cat")
+    monkeypatch.setenv("DBX_SCHEMA", "sch")
+    monkeypatch.setenv("DATABRICKS_HOST", "https://x.cloud.databricks.com")
+    monkeypatch.setenv("DBX_APP_NAME", "ai-audit-analyst")
+    monkeypatch.setenv("AUDIT_TIMEZONE", "Australia/Sydney")
+    monkeypatch.setenv("NARRATION_ENABLED", "true")
+    monkeypatch.delenv("MODEL_SONNET", raising=False)
+    monkeypatch.delenv("MODEL_GPT_OSS", raising=False)
+    monkeypatch.delenv("DBX_WAREHOUSE_HTTP_PATH", raising=False)
+
+    with pytest.raises(SystemExit, match="MODEL_SONNET"):
+        deploy_app.main(["--dry-run"])
+
+
+def test_main_dry_run_fails_loudly_when_audit_timezone_unset(monkeypatch):
+    import pytest
+
+    monkeypatch.setenv("DBX_CATALOG", "cat")
+    monkeypatch.setenv("DBX_SCHEMA", "sch")
+    monkeypatch.setenv("DATABRICKS_HOST", "https://x.cloud.databricks.com")
+    monkeypatch.setenv("DBX_APP_NAME", "ai-audit-analyst")
+    monkeypatch.delenv("AUDIT_TIMEZONE", raising=False)
+    monkeypatch.delenv("DBX_WAREHOUSE_HTTP_PATH", raising=False)
+
+    with pytest.raises(SystemExit, match="AUDIT_TIMEZONE"):
+        deploy_app.main(["--dry-run"])
+
+
+def test_main_dry_run_app_yaml_includes_forwarded_settings_and_no_token(monkeypatch, capsys):
+    monkeypatch.setenv("DBX_CATALOG", "cat")
+    monkeypatch.setenv("DBX_SCHEMA", "sch")
+    monkeypatch.setenv("DATABRICKS_HOST", "https://x.cloud.databricks.com")
+    monkeypatch.setenv("DBX_APP_NAME", "ai-audit-analyst")
+    monkeypatch.setenv("AUDIT_TIMEZONE", "Australia/Sydney")
+    monkeypatch.setenv("NARRATION_ENABLED", "true")
+    monkeypatch.setenv("AI_PROPOSED_FINDINGS_ENABLED", "true")
+    monkeypatch.setenv("MODEL_SONNET", "sonnet-endpoint")
+    monkeypatch.setenv("MODEL_GPT_OSS", "gptoss-endpoint")
+    monkeypatch.setenv("DATABRICKS_TOKEN", "dapi-should-never-appear")
+    monkeypatch.delenv("DBX_WAREHOUSE_HTTP_PATH", raising=False)
+
+    exit_code = deploy_app.main(["--dry-run"])
+    assert exit_code == 0
+    app_yaml = capsys.readouterr().out
+
+    for expected in (
+        "name: AUDIT_TIMEZONE", 'value: "Australia/Sydney"',
+        "name: NARRATION_ENABLED", 'value: "true"',
+        "name: AI_PROPOSED_FINDINGS_ENABLED",
+        "name: EXECUTOR", 'value: "thread"',
+        "name: MAX_CONCURRENT_RUNS", 'value: "2"',
+    ):
+        assert expected in app_yaml, app_yaml
+
+    assert "DATABRICKS_TOKEN" not in app_yaml
+    assert "dapi-should-never-appear" not in app_yaml

@@ -751,3 +751,77 @@ def test_selected_sources_are_profiled_in_the_order_selected(monkeypatch, tmp_pa
         flask_ctx.pop()
         real_ctx.executor.stop()
         adapters._ctx = None
+
+
+def test_upload_source_resolves_format_from_filename_not_upload_id(monkeypatch, tmp_path):
+    """BUG-3: an Explorer `upload` source's `ref` is an opaque upload_id
+    (`UP-...`), never a file path or name -- _explorer_source_options's own
+    real option value for an upload is `{"kind": "upload", "ref":
+    upload_id}` with no "format" key at all (see its docstring). Before the
+    fix, `_explorer_source_entries` tried to infer the format from that
+    upload_id itself (no extension to find), raising ExplorerInputError on
+    every uploaded-file Explorer source. Exercised through the exact real
+    path the UI uses: _explorer_source_options -> start_new_objective (the
+    real registered Dash callback) -> adapters.start_explorer_run ->
+    orchestrator.service.start_explorer_run -> profile, against real
+    LocalPersistence with a real .xlsx upload via
+    adapters.upload_audit_file (orchestrator.service.upload_file) -- never a
+    stub DataSourceAdapter and never a format given explicitly anywhere
+    along this path. MODEL_SONNET is unset (degraded mode, same as
+    test_explorer_degrades_gracefully_when_planner_unavailable above) so the
+    plan node's own repair/validation of the proposed tests is irrelevant to
+    what this test asserts -- BUG-3 lives entirely in discover/profile,
+    before the plan node runs at all."""
+    import io
+
+    import pandas as pd
+
+    from src.run_setup import _explorer_source_options
+
+    real_ctx = _real_ctx_for(monkeypatch, _build_real_service_env(tmp_path, model_sonnet=None))
+    real_ctx.executor.start()
+    app = _make_app(real_ctx)
+    flask_ctx = _fake_request(monkeypatch)
+    try:
+        real_ctx.model_client = FakeModelClient(responses={})
+
+        buf = io.BytesIO()
+        pd.DataFrame({"Employee ID": [1, 2, 3, 4], "Amount": [10, 20, 30, 40]}).to_excel(
+            buf, index=False, engine="openpyxl"
+        )
+        upload_row = adapters.upload_audit_file(
+            "claims.xlsx", buf.getvalue(), uploaded_by="explorer-auditor@example.com",
+        )
+        assert upload_row["status"] == "Ready", upload_row
+
+        options = _explorer_source_options("")
+        upload_values = [o["value"] for o in options if json.loads(o["value"])["kind"] == "upload"]
+        assert len(upload_values) == 1, options
+        # The real option value has no "format" key -- confirms this test
+        # exercises the actual bug, not a caller-supplied override.
+        assert "format" not in json.loads(upload_values[0])
+
+        start_new_objective = _find_callback(app, inputs=[("explorer-start-btn", "n_clicks")])
+        store_data, summary = start_new_objective(
+            1, "Assess an ad-hoc uploaded file", AUDIT_PERIOD[0], AUDIT_PERIOD[1], None, None, None,
+            upload_values,
+        )
+        assert isinstance(store_data, dict) and store_data.get("run_id"), summary
+        run_id = store_data["run_id"]
+
+        status = _wait_for(real_ctx, run_id, {"awaiting_confirmation", "failed"})
+        assert status == "awaiting_confirmation", adapters.get_run(run_id).get("status_reason")
+
+        run = adapters.get_run(run_id)
+        sources = run["options"]["explorer"]["sources"]
+        assert len(sources) == 1
+        assert sources[0]["kind"] == "upload"
+        assert sources[0]["format"] == "xlsx"
+
+        state = real_ctx.persistence.load_state(run_id)
+        upload_asset = next(b for b in state.data_assets if b["kind"] == "upload")
+        assert state.profile_result["sources"][upload_asset["source"]]["row_count"] == 4
+    finally:
+        flask_ctx.pop()
+        real_ctx.executor.stop()
+        adapters._ctx = None

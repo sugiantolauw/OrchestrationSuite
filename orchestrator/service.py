@@ -1229,8 +1229,13 @@ def _explorer_source_entries(sources: list[dict]) -> list[dict]:
     """docs/specs/P6_P8_explorer_llm_design.md §4.2: `{"name", "kind", "ref",
     "format", "file"}` per given `{"kind", "ref"}`, names derived
     deterministically from `ref` and de-duplicated in input order. `format`
-    is inferred from `ref`'s own extension for `local_file`/`upload`
-    sources when the caller did not give one; a `uc_table` source has none."""
+    is inferred from `ref`'s own extension for a `local_file` source when
+    the caller did not give one -- `ref` really is a file path/name for that
+    kind. For `upload`, `ref` is an opaque upload_id (BUG-3: it has no
+    extension to infer from), so `format` is left unset here unless the
+    caller gave one explicitly; `_resolve_explorer_upload_entries` fills it
+    in from the uploaded_files row once it is looked up. A `uc_table` source
+    has no format at all."""
     taken: set[str] = set()
     out: list[dict] = []
     for s in sources:
@@ -1242,8 +1247,10 @@ def _explorer_source_entries(sources: list[dict]) -> list[dict]:
             raise ExplorerInputError("start_explorer_run: every source needs a non-empty ref")
         name = _explorer_source_name(ref, taken)
         entry: dict = {"name": name, "kind": kind, "ref": ref}
-        if kind in ("local_file", "upload"):
+        if kind == "local_file":
             entry["format"] = s.get("format") or _infer_source_format(ref)
+        elif kind == "upload" and s.get("format"):
+            entry["format"] = s["format"]
         if s.get("file"):
             entry["file"] = s["file"]
         out.append(entry)
@@ -1263,7 +1270,15 @@ def _resolve_explorer_upload_entries(
     recorded at upload time -- read again, never trusted blind, the next
     time `_build_explorer_data_source` actually reads it. Mutates the three
     dicts in place; a non-Ready or unknown upload_id fails loudly (NN14),
-    never silently skipped."""
+    never silently skipped.
+
+    BUG-3 fix: also resolves `e["format"]` here (when the caller did not
+    give one explicitly in `_explorer_source_entries`), from the upload's
+    own recorded filename -- never from the upload_id `ref`, which has no
+    extension. This is the format `_build_explorer_data_source`'s local
+    branch and `options.explorer.sources` (start_explorer_run below) both
+    read; leaving it unresolved silently defaulted every uploaded file to
+    "csv" on the local backend regardless of its real format."""
     for e in entries:
         if e["kind"] != "upload":
             continue
@@ -1275,6 +1290,8 @@ def _resolve_explorer_upload_entries(
         table_fqn_by_name[e["name"]] = row["volume_path"]
         version_by_name[e["name"]] = row["sha256"]
         uploaded_file_hashes[row["volume_path"]] = row["sha256"]
+        if not e.get("format"):
+            e["format"] = _infer_source_format(row.get("filename") or row["volume_path"])
 
 
 def _resolve_explorer_sources(
