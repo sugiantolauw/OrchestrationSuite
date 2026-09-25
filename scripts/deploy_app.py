@@ -49,6 +49,12 @@ from pathlib import Path
 # real timedelta, not None (passing timeout=None raises AttributeError
 # inside wait_get_app_active: it unconditionally calls timeout.total_seconds()).
 _WAIT_TIMEOUT = timedelta(minutes=20)
+# BUG-DEPLOY-1: bounded wait for the App's compute to reach ACTIVE (starting
+# it) or STOPPED (--stop-after) -- app creation/deployment can take minutes
+# (see _WAIT_TIMEOUT above), but a plain start/stop is a much smaller
+# operation and should not hang the script for as long on a genuine platform
+# problem.
+_APP_START_TIMEOUT = timedelta(minutes=10)
 
 from dotenv import load_dotenv
 
@@ -387,6 +393,42 @@ def _ensure_app(w, app_name: str, warehouse_id: str):
     return w.apps.get(app_name)
 
 
+def _ensure_app_started(w, app_name: str, app):
+    """BUG-DEPLOY-1: `w.apps.deploy()` rejects a STOPPED App outright --
+    `databricks.sdk.errors.platform.BadRequest: Cannot deploy app ... as it
+    is not in RUNNING state. Please start the app first.` -- and STOPPED is
+    exactly the state CLAUDE.md's own cost-incident fixes (§11) leave the
+    App in between sessions ("Never restart the App on a build that lacks
+    the idle-polling fix" is about *starting* it; the documented end state
+    after verification is stopped). Without this, every deploy that follows
+    that guidance wastes a full bundle upload + every grant (§11 recorded
+    workaround) before failing at the very last step.
+
+    Starts the App when its compute is STOPPED, waits (bounded by
+    `_APP_START_TIMEOUT`) for it to reach ACTIVE, and prints a clear line
+    naming the state change and its cost (CLAUDE.md §11: "the App costs
+    about $0.58 an hour while it is running, even when idle") before this
+    deploy bills any of it. Any other compute state (ACTIVE already, or a
+    transient STARTING/STOPPING/UPDATING) is left alone -- `w.apps.deploy()`
+    itself is the authority on whether that state is deployable, and
+    retrying a start against a non-STOPPED App is not this function's job."""
+    from databricks.sdk.service.apps import ComputeState
+
+    state = app.compute_status.state if app.compute_status else None
+    if state != ComputeState.STOPPED:
+        return app
+
+    print(
+        f"App {app_name!r} compute is STOPPED -- starting it before deploying. "
+        f"This will bill ~$0.58/h while the App is running (CLAUDE.md §11)."
+    )
+    wait = w.apps.start(app_name)
+    wait.result(timeout=_APP_START_TIMEOUT) if hasattr(wait, "result") else wait
+    app = w.apps.get(app_name)
+    print(f"App {app_name!r} compute is now ACTIVE.")
+    return app
+
+
 def _ensure_volume(w, catalog: str, schema: str, volume: str) -> None:
     """Creates <catalog>.<schema>.<volume> if DBX_VOLUME points at it and
     it does not exist yet. Never creates the catalog or schema — those are
@@ -497,6 +539,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--source-code-path", default=None,
         help="A workspace path (e.g. a Databricks Git folder) to deploy from instead of uploading a bundle. "
              "Only app.yaml is written there.",
+    )
+    # BUG-DEPLOY-1: for a cost-saving deploy-and-verify pass -- stops the
+    # App again once the deployment has SUCCEEDED and its compute has been
+    # confirmed ACTIVE, so a verification run does not leave the App idling
+    # and billing (CLAUDE.md §11: ~$0.58/h) after this script exits.
+    parser.add_argument(
+        "--stop-after", action="store_true",
+        help="Stop the App again after a SUCCEEDED deployment and start-up check (cost-saving verification).",
     )
     return parser
 
@@ -645,6 +695,7 @@ def main(argv: list[str] | None = None) -> int:
         _finish_deploy(
             w, app_name=app_name, warehouse_id=warehouse_id, workspace_dir=workspace_dir,
             settings=settings, source_schemas=source_schemas, env_vars=env_vars,
+            stop_after=args.stop_after,
         )
         return 0
 
@@ -661,18 +712,24 @@ def main(argv: list[str] | None = None) -> int:
         _finish_deploy(
             w, app_name=app_name, warehouse_id=warehouse_id, workspace_dir=workspace_dir,
             settings=settings, source_schemas=source_schemas, env_vars=env_vars,
+            stop_after=args.stop_after,
         )
     return 0
 
 
 def _finish_deploy(
     w, *, app_name: str, warehouse_id: str, workspace_dir: str, settings, source_schemas: list[str],
-    env_vars: dict[str, str],
+    env_vars: dict[str, str], stop_after: bool = False,
 ) -> None:
     """The part of a deploy common to both a bundle upload and a
     --source-code-path deploy: create/update the App, grant its service
-    principal, and deploy from `workspace_dir`."""
+    principal, and deploy from `workspace_dir`. `stop_after` (BUG-DEPLOY-1)
+    stops the App again once the deployment has SUCCEEDED and its compute
+    has been confirmed ACTIVE -- for a cost-saving deploy-and-verify pass
+    that leaves the App in the documented STOPPED end state (CLAUDE.md §11)
+    rather than idling and billing after this script exits."""
     app = _ensure_app(w, app_name, warehouse_id)
+    app = _ensure_app_started(w, app_name, app)
     # service_principal_client_id (a UUID) first: Unity Catalog GRANT ...
     # TO `<principal>` needs the application/client id, not
     # service_principal_name -- that field is a human-readable DISPLAY
@@ -699,6 +756,26 @@ def _finish_deploy(
     print("\n--- Deployed ---")
     print(f"URL:           {app.url}")
     print(f"Deployment id: {getattr(result, 'deployment_id', None)}")
+
+    if stop_after:
+        from databricks.sdk.service.apps import AppDeploymentState, ComputeState
+
+        deploy_state = getattr(getattr(result, "status", None), "state", None)
+        compute_state = app.compute_status.state if app.compute_status else None
+        if deploy_state == AppDeploymentState.SUCCEEDED and compute_state == ComputeState.ACTIVE:
+            print(
+                f"\n--stop-after: deployment SUCCEEDED and App {app_name!r} is ACTIVE -- "
+                f"stopping it now (cost-saving end state, CLAUDE.md §11)."
+            )
+            wait = w.apps.stop(app_name)
+            wait.result(timeout=_APP_START_TIMEOUT) if hasattr(wait, "result") else wait
+            print(f"App {app_name!r} compute is now STOPPED.")
+        else:
+            print(
+                f"\n--stop-after: not stopping -- deployment state={deploy_state}, "
+                f"compute state={compute_state} (expected SUCCEEDED / ACTIVE); "
+                f"leaving the App running for inspection."
+            )
 
 
 if __name__ == "__main__":
