@@ -106,6 +106,157 @@ def _git_head(repo_root: Path) -> str | None:
         return None
 
 
+# BUG-1/BUG-2 fix (final test round, TEST_REPORT_stage345.md): every runtime
+# setting `orchestrator.config.Settings` reads gets forwarded from this
+# process's own environment (.env) into the deployed App's app.yaml, so the
+# deployed App behaves the same way this machine's `.env` configures it to.
+# `catalog`, `schema`, `volume`, `warehouse_http_path`, `host`, `app_name`,
+# `model_sonnet`, `model_gpt_oss`, `code_revision`, `mlflow_tracking_uri` and
+# `mlflow_experiment_path` are excluded here -- main() already resolves and
+# sets each of those specially (warehouse http_path via the platform,
+# code_revision via git, MLflow derived from app_name). `apps_python_version`
+# is excluded too: scripts/build_vendor_wheelhouse.py reads it at BUILD time,
+# never the running App. Never a secret (CLAUDE.md §10 "never write a token
+# to source"): DATABRICKS_TOKEN is never in this table or in app.yaml --
+# Databricks Apps authenticate with their own platform-injected service
+# principal, not this deploying operator's PAT.
+#
+# (attr on Settings, env var name) -- always forwarded, using
+# Settings' own parsed value (so an unset local .env still forwards the same
+# code-level default the deployed App would otherwise compute for itself,
+# keeping app.yaml self-documenting rather than silently relying on
+# per-process defaults matching by coincidence).
+_ALWAYS_FORWARDED_SETTINGS: list[tuple[str, str]] = [
+    ("executor", "EXECUTOR"),
+    ("max_concurrent_runs", "MAX_CONCURRENT_RUNS"),
+    ("demo_mode", "DEMO_MODE"),
+    ("admission_max_attempts", "ADMISSION_MAX_ATTEMPTS"),
+    ("admission_backoff_base_s", "ADMISSION_BACKOFF_BASE_S"),
+    ("admission_backoff_max_s", "ADMISSION_BACKOFF_MAX_S"),
+    ("executor_active_poll_interval_s", "EXECUTOR_ACTIVE_POLL_INTERVAL_S"),
+    ("executor_idle_poll_interval_s", "EXECUTOR_IDLE_POLL_INTERVAL_S"),
+    ("readiness_cache_ttl_s", "READINESS_CACHE_TTL_S"),
+    ("llm_timeout_s", "LLM_TIMEOUT_S"),
+    ("llm_retry_backoff_s", "LLM_RETRY_BACKOFF_S"),
+    ("enable_row_level_llm", "ENABLE_ROW_LEVEL_LLM"),
+    ("llm_cache_mode", "LLM_CACHE_MODE"),
+    # BUG-1: Explorer refuses to start with this unset (NN14) -- Explorer is
+    # always reachable from the deployed App's landing page, not gated
+    # behind another flag, so it is always forwarded (and required -- see
+    # _check_feature_requirements below), never conditional.
+    ("audit_timezone", "AUDIT_TIMEZONE"),
+    # BUG-2: both default to False in code, but that silent default is
+    # exactly what made the deployed dev App run deterministic-only without
+    # anyone deciding that -- forwarding the actual configured value (from
+    # this machine's .env) makes the deployed App match what was decided,
+    # rather than falling back to app.yaml's own silence meaning "off".
+    ("narration_enabled", "NARRATION_ENABLED"),
+    ("ai_proposed_findings_enabled", "AI_PROPOSED_FINDINGS_ENABLED"),
+    ("narration_max_candidates", "NARRATION_MAX_CANDIDATES"),
+    ("explorer_category_max_distinct", "EXPLORER_CATEGORY_MAX_DISTINCT"),
+    ("explorer_category_min_count", "EXPLORER_CATEGORY_MIN_COUNT"),
+    ("explorer_max_columns", "EXPLORER_MAX_COLUMNS"),
+    ("explorer_max_prompt_chars", "EXPLORER_MAX_PROMPT_CHARS"),
+]
+
+# (attr, env var name) -- forwarded only when this deploying process's own
+# settings actually have a value, exactly like the existing volume/
+# model_sonnet/model_gpt_oss handling in main() (never a value invented
+# here): each of these is genuinely optional, with an unset value meaning a
+# real, safe "off"/"no override" rather than a value that should always be
+# present. `pptx_template_path` and `source_bindings_path` are also local
+# filesystem paths (CLAUDE.md §7; independent review item 1's own docstring
+# on SOURCE_BINDINGS: "a gitignored path... NEVER a committed one") -- a
+# value from THIS machine's `.env` is only meaningful to forward if it is
+# also a path that exists inside the deployed bundle/container, which this
+# script cannot verify, so it forwards exactly what is configured and no
+# more (an unset value correctly leaves the deployed App on its own safe
+# default: the dynamically-resolved template path, or no source bindings).
+_IF_SET_FORWARDED_SETTINGS: list[tuple[str, str]] = [
+    ("pptx_template_path_if_customised", "PPTX_TEMPLATE_PATH"),  # resolved specially below
+    ("source_bindings_path", "SOURCE_BINDINGS"),
+    ("llm_monthly_token_budget", "LLM_MONTHLY_TOKEN_BUDGET"),
+    ("llm_price_per_mtok_json", "LLM_PRICE_PER_MTOK_JSON"),
+    ("explorer_reference_skill_ids", "EXPLORER_REFERENCE_SKILL_IDS"),
+    ("pii_tag_names", "PII_TAG_NAMES"),
+]
+
+# Read directly via os.environ by the running App (never routed through
+# orchestrator.config.Settings) -- still runtime settings the app reads, so
+# still forwarded the same way (CLAUDE.md §7/NN16: never hardcoded, always
+# from the environment).
+_RAW_ENV_PASSTHROUGH = ("DBX_MAX_CELLS", "MAX_UPLOAD_MB")
+
+
+def _scalar_env_value(value) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (tuple, list)):
+        return ",".join(str(v) for v in value)
+    return str(value)
+
+
+def _runtime_settings_env_vars(settings, raw_env: dict) -> dict[str, str]:
+    """Every Settings field this app reads at runtime, forwarded from
+    `settings` (already parsed from `raw_env`/os.environ by load_settings)
+    into app.yaml -- BUG-1/BUG-2's fix. Excludes the fields main() already
+    resolves specially (see the module comment above `_ALWAYS_FORWARDED_
+    SETTINGS`) and every secret."""
+    out: dict[str, str] = {}
+    for attr, env_name in _ALWAYS_FORWARDED_SETTINGS:
+        out[env_name] = _scalar_env_value(getattr(settings, attr))
+    for attr, env_name in _IF_SET_FORWARDED_SETTINGS:
+        if attr == "pptx_template_path_if_customised":
+            # Only forward a value the operator explicitly set in their own
+            # .env -- never the code-level default path (a repo-relative
+            # path that resolves correctly on its own inside the deployed
+            # bundle without needing app.yaml to say so at all).
+            value = raw_env.get("PPTX_TEMPLATE_PATH") or None
+        else:
+            value = getattr(settings, attr)
+        if value in (None, "", ()):
+            continue
+        out[env_name] = _scalar_env_value(value)
+    for env_name in _RAW_ENV_PASSTHROUGH:
+        value = raw_env.get(env_name)
+        if value:
+            out[env_name] = value
+    return out
+
+
+def _check_feature_requirements(settings) -> list[str]:
+    """BUG-1/BUG-2's pre-deploy gate: fails the deploy loudly, listing every
+    setting an enabled feature needs but does not have, rather than shipping
+    an App that silently runs in a degraded or broken mode nobody chose.
+    Returns a list of human-readable problems; empty means the deploy may
+    proceed. Called before any workspace call (CLAUDE.md §10: fail loudly,
+    never guess)."""
+    problems: list[str] = []
+    if not settings.audit_timezone:
+        problems.append(
+            "AUDIT_TIMEZONE is not set -- Explorer Mode raises ConfigError on every attempt "
+            "without it (CLAUDE.md NN14). Set it to the business-calendar timezone the audit "
+            "period's dates are interpreted in (e.g. Australia/Sydney)."
+        )
+    if settings.narration_enabled:
+        if not settings.model_sonnet:
+            problems.append(
+                "NARRATION_ENABLED=true but MODEL_SONNET is not set -- narration needs both "
+                "configured endpoints (CLAUDE.md §6)."
+            )
+        if not settings.model_gpt_oss:
+            problems.append(
+                "NARRATION_ENABLED=true but MODEL_GPT_OSS is not set -- narration needs both "
+                "configured endpoints (CLAUDE.md §6)."
+            )
+    if settings.ai_proposed_findings_enabled and not settings.narration_enabled:
+        problems.append(
+            "AI_PROPOSED_FINDINGS_ENABLED=true but NARRATION_ENABLED=false -- find_candidates "
+            "is never called unless narration is also enabled (.env.example)."
+        )
+    return problems
+
+
 def _render_app_yaml(env_vars: dict[str, str]) -> str:
     lines = ["command:", '  - "python"', '  - "app/app.py"', "", "env:"]
     for name, value in env_vars.items():
@@ -363,6 +514,15 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("DBX_APP_NAME is not set (env or --app-name).")
     settings.require("catalog", "schema", "host")
 
+    # BUG-1/BUG-2 fix: fail the deploy loudly, before touching the
+    # workspace, when an enabled feature is missing a setting it needs --
+    # never ship an App that silently runs degraded/broken because app.yaml
+    # never carried a setting this process's own .env had.
+    problems = _check_feature_requirements(settings)
+    if problems:
+        listed = "\n".join(f"  - {p}" for p in problems)
+        raise SystemExit(f"Cannot deploy -- missing configuration for enabled feature(s):\n{listed}")
+
     # CLAUDE.md §3 non-negotiable 16: the source schema(s) the App's SP reads
     # from (e.g. the Skill's raw source tables) are a portability concern
     # like any other -- this used to hardcode a specific T&E source schema
@@ -411,6 +571,12 @@ def main(argv: list[str] | None = None) -> int:
         env_vars["MODEL_SONNET"] = settings.model_sonnet
     if settings.model_gpt_oss:
         env_vars["MODEL_GPT_OSS"] = settings.model_gpt_oss
+
+    # BUG-1/BUG-2 fix: every other runtime setting the app reads
+    # (orchestrator/config.py), forwarded from this process's own
+    # environment/.env -- never a value invented here (see the module
+    # comment above _ALWAYS_FORWARDED_SETTINGS).
+    env_vars.update(_runtime_settings_env_vars(settings, os.environ))
 
     print(f"App name:      {app_name}")
     print(f"Code revision: {code_revision}")
