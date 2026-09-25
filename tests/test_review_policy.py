@@ -134,6 +134,18 @@ def test_label_for_p7_waived():
     assert label_for(row) == "Self-approved — segregation of duties not enforced"
 
 
+def test_label_for_recomputes_from_runs_listing_row_no_waiver():
+    # A /runs listing row: no sod_waived key (label_for recomputes it from
+    # the three already-projected actor columns instead of a per-run RunState read).
+    row = {"prepared_by": "alice", "reviewed_by": "bob", "approved_by": "carol"}
+    assert label_for(row) is None
+
+
+def test_label_for_recomputes_from_runs_listing_row_waived():
+    row = {"prepared_by": "alice", "reviewed_by": "bob", "approved_by": "alice"}
+    assert label_for(row) == "Self-approved — segregation of duties not enforced"
+
+
 def test_step_decision_is_frozen():
     d = StepDecision(True, role="preparer")
     with pytest.raises(Exception):

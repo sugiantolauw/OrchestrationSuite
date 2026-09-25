@@ -133,6 +133,29 @@ class ConfigRoleResolver:
         return RoleResolution(roles=roles, matched_groups=matched, role_source="config")
 
 
+class LazyRoleResolver:
+    """Defers `build_role_resolver` (and its ConfigError for an
+    unconfigured `enforced` deployment) until an actual role lookup is
+    attempted. `orchestrator.service`'s review-workflow wrappers hand this to
+    every `orchestrator.runs` call regardless of whether that run's P7
+    workflow is even active -- most calls (a legacy self-sign-off with no
+    `review` stage) never touch it at all, and must not fail just because
+    REVIEW_PREPARER_GROUPS/etc were never configured for an environment that
+    never uses the workflow (every pre-P7 test, CLAUDE.md NN14 notwithstanding
+    -- the loud failure belongs to the moment the feature is actually used,
+    not to every unrelated call)."""
+
+    def __init__(self, settings: Settings, *, workspace_client_factory: Callable[[], object] | None = None):
+        self.settings = settings
+        self.workspace_client_factory = workspace_client_factory
+        self._inner: RoleResolver | None = None
+
+    def roles_for(self, email: str) -> RoleResolution:
+        if self._inner is None:
+            self._inner = build_role_resolver(self.settings, workspace_client_factory=self.workspace_client_factory)
+        return self._inner.roles_for(email)
+
+
 def build_role_resolver(
     settings: Settings, *, workspace_client_factory: Callable[[], object] | None = None
 ) -> RoleResolver:

@@ -423,3 +423,19 @@ def test_node_owned_json_includes_module_output():
     payload = node_owned_json(state)
     data = json.loads(payload)
     assert data["module_output"] == {"kind": "planning", "stop_reason": "ceiling:max_llm_calls"}
+
+
+def test_pre_p7_json_without_review_key_loads_with_review_none():
+    # P7 review workflow (docs/specs/P7_mapping_authoring_design.md §3.4):
+    # RunState.review is a lifecycle field added after real runs existed --
+    # a JSON payload from before this field existed simply omits the key,
+    # and from_json's RunState(**data) must fall back to the field's own
+    # default (None) rather than raise a missing-argument TypeError.
+    state = _minimal_state()
+    payload = json.loads(to_json(state))
+    assert "review" in payload
+    del payload["review"]  # simulates a row persisted before this field existed
+    payload["audit_period"] = tuple(payload["audit_period"])
+
+    loaded = RunState(**payload)
+    assert loaded.review is None

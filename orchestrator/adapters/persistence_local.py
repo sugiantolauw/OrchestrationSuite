@@ -569,12 +569,27 @@ class LocalPersistence:
         # §2.4). Without this it stayed NULL on every completed run forever
         # (found live: P2/P3 gate review item 9).
         approved_by = (state.signoff or {}).get("approver")
+        # prepared_by/prepared_at/reviewed_by/reviewed_at (P7 review workflow,
+        # docs/specs/P7_mapping_authoring_design.md §3.4) have no matching
+        # RunState attribute either -- derived from state.review the SAME
+        # way approved_by is derived from state.signoff above. orchestrator.
+        # runs.prepare/mark_reviewed set review.prepared/reviewed via a plain
+        # CAS save_state (no status/phase change, §3.4), and this projection
+        # update is the only place those two columns are ever written.
+        review = state.review or {}
+        prepared = review.get("prepared") or {}
+        reviewed = review.get("reviewed") or {}
         values = [getattr(state, c) for c in _RUN_STATE_SUMMARY_COLUMNS]
         set_clause = ", ".join(f"{c} = ?" for c in _RUN_STATE_SUMMARY_COLUMNS)
         conn.execute(
             f"UPDATE runs SET {set_clause}, audit_period_start = ?, audit_period_end = ?, "
-            f"approved_by = ?, state_version = ? WHERE run_id = ? AND state_version < ?",
-            (*values, audit_start, audit_end, approved_by, state.state_version, state.run_id, state.state_version),
+            f"approved_by = ?, prepared_by = ?, prepared_at = ?, reviewed_by = ?, reviewed_at = ?, "
+            f"state_version = ? WHERE run_id = ? AND state_version < ?",
+            (
+                *values, audit_start, audit_end, approved_by,
+                prepared.get("actor"), prepared.get("at"), reviewed.get("actor"), reviewed.get("at"),
+                state.state_version, state.run_id, state.state_version,
+            ),
         )
 
     def _update_runs_projection_with_retry(self, state: RunState) -> None:

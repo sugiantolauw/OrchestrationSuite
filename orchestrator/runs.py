@@ -9,11 +9,13 @@ from orchestrator.errors import (
     CandidatesUndecided,
     EngagementNotFound,
     FingerprintMismatch,
+    ReviewActionRefused,
+    RoleLookupFailed,
     RunCodeRevisionStale,
     RunNotAwaitingSignoff,
 )
 from orchestrator.fingerprint import verify_fingerprint
-from orchestrator.signoff_policy import evaluate_signoff
+from orchestrator.signoff_policy import compute_sod_waived, evaluate_signoff, evaluate_step
 from orchestrator.state import ENGAGEMENT_SCOPED_KINDS, RunState, validate
 from orchestrator.status import transition
 
@@ -58,6 +60,13 @@ _LIFECYCLE_STAGE_LABELS: dict[str, str] = {
     "signed_off": "Sign-off",
     "resumed": "Recovery",
     "narration_regenerate_requested": "Narration",
+    "review_prepared": "Preparation",
+    "review_reviewed": "Review",
+    "review_returned": "Review",
+    "review_note_raised": "Review",
+    "review_note_responded": "Review",
+    "review_note_cleared": "Review",
+    "review_action_refused": "Review",
 }
 
 
@@ -177,33 +186,360 @@ def confirm_plan(persistence, run_id: str, *, actor: str, now: str) -> RunState:
     return saved
 
 
-def sign_off(persistence, run_id: str, *, actor: str, now: str) -> RunState:
+# ── P7 review workflow (docs/specs/P7_mapping_authoring_design.md §3.3-3.4) ──
+#
+# `sign_off` below stays the SAME function every pre-P7 caller already uses,
+# with a dual path (D-P7-9 / the many pre-P7 tests that call it directly with
+# no `role_resolver`/`settings`, never having called `prepare`/`mark_reviewed`
+# first): `state.review` is None (or stage != 'approval') for any run that
+# never entered the P7 workflow, so it takes the LEGACY self-sign-off path
+# exactly as before -- zero behaviour change for those callers. A run whose
+# stage IS 'approval' only got there via `prepare()` + `mark_reviewed()`
+# below, both of which already required a `role_resolver`/`settings`, so by
+# the time `sign_off` needs them for the gated path they are always the
+# caller's to supply (the App's service layer always does, WP B3b).
+
+
+def _configured_groups(settings, role: str) -> tuple[str, ...]:
+    return {
+        "preparer": settings.review_preparer_groups,
+        "reviewer": settings.review_reviewer_groups,
+        "approver": settings.review_approver_groups,
+    }[role]
+
+
+def _step_id(run_id: str, action: str, state_version: int) -> str:
+    # §3.4: deterministic on (run_id, action, the state_version the action was
+    # attempted AGAINST, i.e. before save_state's own CAS increment) -- a
+    # replayed click that resubmits the same request (never having seen a
+    # response) is a no-op insert, not a duplicate row.
+    return hashlib.sha256(f"{run_id}:{action}:{state_version}".encode("utf-8")).hexdigest()[:32]
+
+
+def _resolve_role_or_refuse(role_resolver, persistence, state: RunState, action: str, actor: str, now: str):
+    try:
+        return role_resolver.roles_for(actor)
+    except RoleLookupFailed:
+        reason = "Could not verify group membership — try again."
+        _emit(persistence, state, event_type="review_action_refused", actor=actor,
+              message=f"{action} refused: {reason}", now=now)
+        raise ReviewActionRefused(state.run_id, action, reason)
+
+
+def _refuse(persistence, state: RunState, action: str, actor: str, reason: str, now: str) -> None:
+    _emit(persistence, state, event_type="review_action_refused", actor=actor,
+          message=f"{action} refused: {reason}", now=now)
+    raise ReviewActionRefused(state.run_id, action, reason)
+
+
+def _prior_actors(review: dict) -> dict[str, str]:
+    actors: dict[str, str] = {}
+    if review.get("prepared"):
+        actors["preparer"] = review["prepared"]["actor"]
+    if review.get("reviewed"):
+        actors["reviewer"] = review["reviewed"]["actor"]
+    return actors
+
+
+def _open_note_count(persistence, run_id: str) -> int:
+    return sum(1 for n in persistence.list_review_notes(run_id) if n["state"] == "open")
+
+
+def _load_awaiting_signoff(persistence, run_id: str) -> RunState:
     state = persistence.load_state(run_id)
     if state.status != "awaiting_signoff":
         raise RunNotAwaitingSignoff(run_id, state.status)
+    return state
 
-    # P6 §5.2 / §7 UI-3: "Sign-off is refused while any current-generation row
-    # is candidate" -- checked BEFORE anything else is written, so a rejected
-    # call leaves nothing touched (the same "check first" discipline
-    # write_findings uses for NonDraftFindingWouldBeDeleted).
+
+def _check_candidates_decided(persistence, run_id: str) -> list[dict]:
     candidates = persistence.list_candidates(run_id)
     undecided = [c["candidate_id"] for c in candidates if c["candidate_status"] == "candidate"]
     if undecided:
         raise CandidatesUndecided(run_id, undecided)
+    return candidates
 
-    policy = evaluate_signoff(actor=actor, run_owner=state.run_owner)
-    signoff = {
-        "approver": actor,
-        "timestamp": now,
-        "self_approved": policy["self_approved"],
-        "sod_enforced": policy["sod_enforced"],
-    }
+
+def prepare(persistence, run_id: str, *, actor: str, now: str, role_resolver, settings) -> RunState:
+    """§3.3 "Mark as prepared": findings `draft` -> `prepared`; the current
+    narration/theme generation is recorded as confirmed on the `review_steps`
+    row, closing the §4.6 theme-confirmation gap with no new theme table."""
+    state = _load_awaiting_signoff(persistence, run_id)
+    _check_candidates_decided(persistence, run_id)
+
+    review = state.review or {}
+    stage = review.get("stage", "preparation")
+    resolution = _resolve_role_or_refuse(role_resolver, persistence, state, "prepared", actor, now)
+    decision = evaluate_step(
+        "prepared", actor, stage=stage, resolution=resolution,
+        configured_groups=settings.review_preparer_groups, prior_actors={},
+        open_notes=_open_note_count(persistence, run_id), sod_mode=settings.review_sod_mode,
+    )
+    if not decision.allowed:
+        _refuse(persistence, state, "prepared", actor, decision.reason, now)
+
+    narration_generation = int((state.options or {}).get("narration_generation", 0) or 0)
+
+    new_review = dict(review)
+    new_review["stage"] = "review"
+    new_review["prepared"] = {"actor": actor, "at": now, "role_source": decision.role_source}
+    new_review.setdefault("returns", [])
+    new_state = dataclasses.replace(state, review=new_review)
+    # CAS FIRST (mirrors sign_off's existing ordering): only the racer whose
+    # save_state wins may advance findings below -- a loser's save_state
+    # raises StaleStateError here, before it ever touches a finding row, so
+    # two concurrent "Mark as prepared" clicks can never both try to walk the
+    # same finding forward (CLAUDE.md §9C failure-injection discipline).
+    saved = persistence.save_state(new_state)
+
+    for finding in persistence.list_findings(run_id):
+        if (finding.get("review_state") or "draft") == "draft":
+            persistence.set_finding_review_state(finding["finding_id"], to_state="prepared", actor=actor, now=now)
+
+    persistence.append_review_step({
+        "step_id": _step_id(run_id, "prepared", state.state_version),
+        "run_id": run_id, "engagement_id": state.engagement_id, "action": "prepared",
+        "actor": actor, "role": "preparer", "matched_group": decision.matched_group,
+        "role_source": decision.role_source, "sod_mode": settings.review_sod_mode,
+        "reason": None, "theme_generation": narration_generation,
+        "narration_generation": narration_generation, "state_version": state.state_version, "at": now,
+    })
+    _emit(persistence, saved, event_type="review_prepared", actor=actor,
+          message=f"Marked as prepared by {actor}", now=now)
+    return saved
+
+
+def mark_reviewed(persistence, run_id: str, *, actor: str, now: str, role_resolver, settings) -> RunState:
+    """§3.3 "Mark as reviewed": findings `prepared` -> `reviewed`."""
+    state = _load_awaiting_signoff(persistence, run_id)
+
+    review = state.review or {}
+    stage = review.get("stage", "preparation")
+    resolution = _resolve_role_or_refuse(role_resolver, persistence, state, "reviewed", actor, now)
+    decision = evaluate_step(
+        "reviewed", actor, stage=stage, resolution=resolution,
+        configured_groups=settings.review_reviewer_groups, prior_actors=_prior_actors(review),
+        open_notes=_open_note_count(persistence, run_id), sod_mode=settings.review_sod_mode,
+    )
+    if not decision.allowed:
+        _refuse(persistence, state, "reviewed", actor, decision.reason, now)
+
+    new_review = dict(review)
+    new_review["stage"] = "approval"
+    new_review["reviewed"] = {"actor": actor, "at": now, "role_source": decision.role_source}
+    new_state = dataclasses.replace(state, review=new_review)
+    # CAS FIRST -- see prepare()'s own comment above.
+    saved = persistence.save_state(new_state)
+
+    for finding in persistence.list_findings(run_id):
+        if (finding.get("review_state") or "draft") == "prepared":
+            persistence.set_finding_review_state(finding["finding_id"], to_state="reviewed", actor=actor, now=now)
+
+    persistence.append_review_step({
+        "step_id": _step_id(run_id, "reviewed", state.state_version),
+        "run_id": run_id, "engagement_id": state.engagement_id, "action": "reviewed",
+        "actor": actor, "role": "reviewer", "matched_group": decision.matched_group,
+        "role_source": decision.role_source, "sod_mode": settings.review_sod_mode,
+        "reason": None, "theme_generation": None, "narration_generation": None,
+        "state_version": state.state_version, "at": now,
+    })
+    _emit(persistence, saved, event_type="review_reviewed", actor=actor,
+          message=f"Marked as reviewed by {actor}", now=now)
+    return saved
+
+
+def return_to_preparer(persistence, run_id: str, *, actor: str, reason: str, now: str, role_resolver, settings) -> RunState:
+    """§3.3 "Return to preparer": stage -> `preparation`, findings -> `draft`
+    (the only backwards move). Candidate decisions and open notes are left
+    untouched."""
+    state = _load_awaiting_signoff(persistence, run_id)
+    review = state.review or {}
+    stage = review.get("stage", "preparation")
+    if stage not in ("review", "approval"):
+        _refuse(
+            persistence, state, "returned", actor,
+            f"This run is at stage {stage!r} -- returning is only valid during review or approval.", now,
+        )
+    if not reason:
+        _refuse(persistence, state, "returned", actor, "A reason is required to return a run to the preparer.", now)
+
+    required_role = "reviewer" if stage == "review" else "approver"
+    resolution = _resolve_role_or_refuse(role_resolver, persistence, state, "returned", actor, now)
+    if required_role not in resolution.roles:
+        groups = _configured_groups(settings, required_role)
+        _refuse(
+            persistence, state, "returned", actor,
+            f"You are not in a preparer/reviewer/approver group ({', '.join(groups) or 'none configured'}).", now,
+        )
+
+    new_review = dict(review)
+    new_review["stage"] = "preparation"
+    new_review["returns"] = list(review.get("returns", [])) + [{"actor": actor, "at": now, "reason": reason}]
+    new_state = dataclasses.replace(state, review=new_review)
+    # CAS FIRST -- see prepare()'s own comment above.
+    saved = persistence.save_state(new_state)
+
+    persistence.reset_findings_review_state(run_id, actor=actor, now=now)
+
+    persistence.append_review_step({
+        "step_id": _step_id(run_id, "returned", state.state_version),
+        "run_id": run_id, "engagement_id": state.engagement_id, "action": "returned",
+        "actor": actor, "role": required_role, "matched_group": resolution.matched_groups.get(required_role),
+        "role_source": resolution.role_source, "sod_mode": settings.review_sod_mode,
+        "reason": reason, "theme_generation": None, "narration_generation": None,
+        "state_version": state.state_version, "at": now,
+    })
+    _emit(persistence, saved, event_type="review_returned", actor=actor,
+          message=f"Returned to preparer by {actor}: {reason}", now=now)
+    return saved
+
+
+def raise_review_note(
+    persistence, run_id: str, *, actor: str, body: str, finding_id: str | None, now: str, role_resolver, settings
+) -> dict:
+    """§3.3 "Raise note": reviewer during `review`, approver during `approval`."""
+    state = _load_awaiting_signoff(persistence, run_id)
+    review = state.review or {}
+    stage = review.get("stage", "preparation")
+    if stage not in ("review", "approval"):
+        _refuse(
+            persistence, state, "note_raised", actor,
+            f"This run is at stage {stage!r} -- notes may only be raised during review or approval.", now,
+        )
+    required_role = "reviewer" if stage == "review" else "approver"
+    resolution = _resolve_role_or_refuse(role_resolver, persistence, state, "note_raised", actor, now)
+    if required_role not in resolution.roles:
+        groups = _configured_groups(settings, required_role)
+        _refuse(
+            persistence, state, "note_raised", actor,
+            f"You are not in a preparer/reviewer/approver group ({', '.join(groups) or 'none configured'}).", now,
+        )
+
+    note_id = hashlib.sha256(f"{run_id}:{actor}:{now}:{finding_id or ''}".encode("utf-8")).hexdigest()[:32]
+    note = persistence.add_review_note({
+        "note_id": note_id, "run_id": run_id, "engagement_id": state.engagement_id,
+        "finding_id": finding_id, "raised_by": actor, "raised_at": now, "body": body,
+        "raised_role": required_role,
+    })
+    target = f"finding {finding_id}" if finding_id else "the run"
+    _emit(persistence, state, event_type="review_note_raised", actor=actor,
+          message=f"Note raised by {actor} on {target}", now=now)
+    return note
+
+
+def respond_to_review_note(
+    persistence, run_id: str, note_id: str, *, actor: str, response: str, now: str, role_resolver, settings
+) -> dict:
+    """§3.3 "Respond to note": the preparer only, during either review or
+    approval -- the note stays open until `clear_a_review_note` clears it."""
+    state = _load_awaiting_signoff(persistence, run_id)
+    resolution = _resolve_role_or_refuse(role_resolver, persistence, state, "note_responded", actor, now)
+    if "preparer" not in resolution.roles:
+        groups = _configured_groups(settings, "preparer")
+        _refuse(
+            persistence, state, "note_responded", actor,
+            f"You are not in a preparer/reviewer/approver group ({', '.join(groups) or 'none configured'}).", now,
+        )
+    ok = persistence.respond_review_note(note_id, response=response, actor=actor, role="preparer", now=now)
+    if not ok:
+        _refuse(persistence, state, "note_responded", actor, "This note is no longer open.", now)
+    _emit(persistence, state, event_type="review_note_responded", actor=actor,
+          message=f"Note responded by {actor}", now=now)
+    return next(n for n in persistence.list_review_notes(run_id) if n["note_id"] == note_id)
+
+
+def clear_a_review_note(
+    persistence, run_id: str, note_id: str, *, actor: str, now: str, role_resolver, settings
+) -> dict:
+    """§3.3 "Clear note": the raiser, or anyone currently holding the
+    raiser's role -- requires the note to already have a response."""
+    state = _load_awaiting_signoff(persistence, run_id)
+    notes = persistence.list_review_notes(run_id)
+    note = next((n for n in notes if n["note_id"] == note_id), None)
+    if note is None:
+        _refuse(persistence, state, "note_cleared", actor, "Note not found.", now)
+
+    resolution = _resolve_role_or_refuse(role_resolver, persistence, state, "note_cleared", actor, now)
+    raiser_role = note.get("raised_role")
+    allowed = actor == note.get("raised_by") or (raiser_role and raiser_role in resolution.roles)
+    if not allowed:
+        _refuse(
+            persistence, state, "note_cleared", actor,
+            "Only the person who raised this note, or anyone holding their role, may clear it.", now,
+        )
+    ok = persistence.clear_review_note(note_id, actor=actor, role=raiser_role or "", now=now)
+    if not ok:
+        _refuse(persistence, state, "note_cleared", actor, "Respond to this note before clearing it.", now)
+    _emit(persistence, state, event_type="review_note_cleared", actor=actor,
+          message=f"Note cleared by {actor}", now=now)
+    return next(n for n in persistence.list_review_notes(run_id) if n["note_id"] == note_id)
+
+
+def sign_off(
+    persistence, run_id: str, *, actor: str, now: str, role_resolver=None, settings=None
+) -> RunState:
+    state = persistence.load_state(run_id)
+    if state.status != "awaiting_signoff":
+        raise RunNotAwaitingSignoff(run_id, state.status)
+
+    # P6 §5.2 / §7 UI-3, P7 §3.3 "re-checks it": "Sign-off is refused while
+    # any current-generation row is candidate" -- checked BEFORE anything
+    # else is written, so a rejected call leaves nothing touched (the same
+    # "check first" discipline write_findings uses for
+    # NonDraftFindingWouldBeDeleted).
+    candidates = _check_candidates_decided(persistence, run_id)
+
+    review = state.review or {}
+    stage = review.get("stage")
+    # A run only reaches stage 'approval' by having gone through prepare()
+    # and mark_reviewed() above, both of which already required a
+    # role_resolver/settings -- any OTHER run (state.review is None, or the
+    # workflow never ran) takes the pre-P7 self-sign-off path unchanged.
+    p7_active = stage == "approval"
+
+    prior_actors: dict[str, str] = {}
+    decision = None
+    if p7_active:
+        prior_actors = _prior_actors(review)
+        resolution = _resolve_role_or_refuse(role_resolver, persistence, state, "approved", actor, now)
+        decision = evaluate_step(
+            "approved", actor, stage=stage, resolution=resolution,
+            configured_groups=settings.review_approver_groups, prior_actors=prior_actors,
+            open_notes=_open_note_count(persistence, run_id), sod_mode=settings.review_sod_mode,
+        )
+        if not decision.allowed:
+            _refuse(persistence, state, "approved", actor, decision.reason, now)
+
+        all_actors = dict(prior_actors)
+        all_actors["approver"] = actor
+        sod_waived = compute_sod_waived(all_actors)
+        signoff = {
+            "approver": actor,
+            "timestamp": now,
+            "self_approved": bool(sod_waived),
+            "sod_enforced": settings.review_sod_mode == "enforced",
+            "sod_mode": settings.review_sod_mode,
+            "prepared_by": prior_actors.get("preparer"),
+            "reviewed_by": prior_actors.get("reviewer"),
+            "role_source": decision.role_source,
+            "sod_waived": sod_waived,
+            "open_notes_at_signoff": 0,
+        }
+    else:
+        policy = evaluate_signoff(actor=actor, run_owner=state.run_owner)
+        signoff = {
+            "approver": actor,
+            "timestamp": now,
+            "self_approved": policy["self_approved"],
+            "sod_enforced": policy["sod_enforced"],
+        }
+
     # §5.2: "Sign-off snapshots the decisions and the exact narrative versions
     # signed off into RunState.signoff" -- attached only when this run
     # actually has narration/candidates to snapshot, so a run that never
     # touched narration (narration off, or a pre-P6 fixture/test) gets
-    # EXACTLY the four-key `signoff` dict it always has -- purely additive,
-    # never a shape change for a run this feature does not apply to.
+    # EXACTLY the four/twelve-key `signoff` dict it always has -- purely
+    # additive, never a shape change for a run this feature does not apply to.
     narratives = persistence.get_narratives(run_id)
     if narratives or candidates:
         signoff["narration"] = {
@@ -228,13 +564,30 @@ def sign_off(persistence, run_id: str, *, actor: str, now: str) -> RunState:
     new_state = transition(state, "queued", now=now, phase="export")
     saved = persistence.save_state(new_state)
 
-    # Independent-review audit gap (this WP's brief): sign-off is the gate
-    # that says what leaves the system -- move every finding to 'approved' so
-    # the exports and /workspace/tne agree with what was actually signed off.
-    _advance_findings_to_approved(persistence, run_id, actor=actor, now=now)
+    if p7_active:
+        for finding in persistence.list_findings(run_id):
+            current = finding.get("review_state") or "draft"
+            if current in _REVIEW_STATE_SEQUENCE:
+                for step in _REVIEW_STATE_SEQUENCE[_REVIEW_STATE_SEQUENCE.index(current) + 1 :]:
+                    persistence.set_finding_review_state(finding["finding_id"], to_state=step, actor=actor, now=now)
+        persistence.append_review_step({
+            "step_id": _step_id(run_id, "approved", state.state_version),
+            "run_id": run_id, "engagement_id": state.engagement_id, "action": "approved",
+            "actor": actor, "role": "approver", "matched_group": decision.matched_group,
+            "role_source": decision.role_source, "sod_mode": settings.review_sod_mode,
+            "reason": None, "theme_generation": None, "narration_generation": None,
+            "state_version": state.state_version, "at": now,
+        })
+    else:
+        # Independent-review audit gap (this WP's brief): sign-off is the gate
+        # that says what leaves the system -- move every finding to 'approved' so
+        # the exports and /workspace/tne agree with what was actually signed off.
+        _advance_findings_to_approved(persistence, run_id, actor=actor, now=now)
 
     message = f"Findings signed off by {actor}"
-    if policy["self_approved"]:
+    if p7_active:
+        message += f" (prepared by {prior_actors.get('preparer')}, reviewed by {prior_actors.get('reviewer')})"
+    if signoff["self_approved"]:
         message += " — self-approved (segregation of duties not enforced)"
     accepted = sum(1 for c in candidates if c["candidate_status"] == "accepted")
     rejected = sum(1 for c in candidates if c["candidate_status"] == "rejected")

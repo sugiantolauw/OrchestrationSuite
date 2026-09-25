@@ -6,6 +6,7 @@ from orchestrator.config import load_settings
 from orchestrator.errors import ConfigError, RoleLookupFailed
 from orchestrator.identity import (
     ConfigRoleResolver,
+    LazyRoleResolver,
     WorkspaceGroupsRoleResolver,
     build_role_resolver,
 )
@@ -171,3 +172,30 @@ def test_build_role_resolver_unknown_source_raises():
 
     with pytest.raises(ConfigError):
         build_role_resolver(settings)
+
+
+def test_lazy_role_resolver_does_not_build_until_used():
+    # default Settings(): enforced mode, no groups configured -- would raise
+    # ConfigError from build_role_resolver eagerly, but LazyRoleResolver must
+    # not touch it until roles_for is actually called.
+    settings = load_settings({})
+    LazyRoleResolver(settings)  # constructing it alone must never raise
+
+
+def test_lazy_role_resolver_raises_only_on_first_use():
+    settings = load_settings({})
+    resolver = LazyRoleResolver(settings)
+
+    with pytest.raises(ConfigError):
+        resolver.roles_for("alice@example.invalid")
+
+
+def test_lazy_role_resolver_delegates_to_config_resolver(tmp_path):
+    path = tmp_path / "roles.yaml"
+    path.write_text("alice@example.invalid: [approver]\n")
+    settings = _settings(review_role_source="config", review_role_assignments_path=str(path))
+    resolver = LazyRoleResolver(settings)
+
+    resolution = resolver.roles_for("alice@example.invalid")
+
+    assert resolution.roles == frozenset({"approver"})

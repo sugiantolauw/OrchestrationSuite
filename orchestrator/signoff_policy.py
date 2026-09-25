@@ -25,20 +25,17 @@ from dataclasses import dataclass
 
 SELF_APPROVED_LABEL = "Self-approved — segregation of duties not enforced"
 
-# Retained for `orchestrator.service`'s pre-P7 call sites, removed there in
-# WP B3b once `sign_off` gains the P7 stage gate (§3.7: "SOD_ENFORCED is
-# removed, and the policy comes from config") -- self sign-off was never
-# blocked by this flag, only labelled by it.
-SOD_ENFORCED = False
-
 
 def evaluate_signoff(*, actor: str, run_owner: str) -> dict:
     """Returns the `self_approved` / `sod_enforced` fields to record on a
     LEGACY `RunState.signoff` (no `prepared_by`/`reviewed_by`, §3.7) --
-    never blocks the sign-off itself."""
+    never blocks the sign-off itself. `sod_enforced` is always `False` here
+    (§3.7: "SOD_ENFORCED is removed, and the policy comes from config") --
+    the legacy path never enforced anything; only the P7 workflow's
+    `sod_mode` (`orchestrator.runs.sign_off`'s gated path) does."""
     return {
         "self_approved": actor == run_owner,
-        "sod_enforced": SOD_ENFORCED,
+        "sod_enforced": False,
     }
 
 
@@ -142,11 +139,26 @@ def compute_sod_waived(prior_actors: dict[str, str]) -> list[list[str]]:
 def label_for(row: dict) -> str | None:
     """§3.7: derives the SAME `SELF_APPROVED_LABEL` text from either shape --
     a legacy `signoff` dict (`self_approved`, no `prepared_by`) or a P7
-    `signoff`/`runs` row (`prepared_by`/`reviewed_by`/`approved_by`,
-    `sod_waived`). `row.get("prepared_by")` being `None` is what
-    distinguishes "no P7 workflow ran" from "P7 workflow ran, roles held by
-    different people" -- the latter has `prepared_by` set and an empty
-    `sod_waived`, and must NOT show the label."""
+    `signoff`/`runs` row (`prepared_by`/`reviewed_by`/`approved_by`).
+    `row.get("prepared_by")` being `None` is what distinguishes "no P7
+    workflow ran" from "P7 workflow ran, roles held by different people" --
+    the latter has `prepared_by` set and no actor shared across roles, and
+    must NOT show the label.
+
+    `sod_waived`, if present on `row` (RunState.signoff carries it, computed
+    once at sign-off by `compute_sod_waived`), is used directly. Otherwise
+    (a `runs` LISTING row, §3.7 "`list_runs` derives it ... from
+    prepared_by/reviewed_by/approved_by/run_owner" -- no per-run RunState
+    read for a whole page of rows) it is recomputed from whichever of
+    `prepared_by`/`reviewed_by`/`approved_by` are set. Either way the answer
+    is identical: the same three actors, the same pairing rule."""
     if row.get("prepared_by") is None:
         return SELF_APPROVED_LABEL if row.get("self_approved") else None
-    return SELF_APPROVED_LABEL if row.get("sod_waived") else None
+    if "sod_waived" in row:
+        return SELF_APPROVED_LABEL if row.get("sod_waived") else None
+    actors = {
+        role: row[column]
+        for role, column in (("preparer", "prepared_by"), ("reviewer", "reviewed_by"), ("approver", "approved_by"))
+        if row.get(column)
+    }
+    return SELF_APPROVED_LABEL if compute_sod_waived(actors) else None

@@ -103,6 +103,7 @@ from orchestrator.errors import (
     NarrativeTargetNotFound,
     PlanIntegrityError,
     PromotionRequirementsNotMet,
+    ReviewActionRefused,
     RunCodeRevisionStale,
     RunNotAwaitingSignoff,
     RunNotReady,
@@ -113,10 +114,11 @@ from orchestrator.explorer.materialise import check_materialised_skill, material
 from orchestrator.explorer.validate import validate_proposal
 from orchestrator.fingerprint import compute_fingerprint, hash_skill_content_entries, verify_fingerprint
 from orchestrator.frames import not_testable_flags, read_frame_parquet
+from orchestrator.identity import LazyRoleResolver
 from orchestrator.nodes.context import NodeContext
 from orchestrator.nodes.registry import NODES_FOR
 from orchestrator.pipeline import NODE_STAGE_LABELS
-from orchestrator.signoff_policy import SOD_ENFORCED, evaluate_signoff
+from orchestrator.signoff_policy import evaluate_signoff, label_for
 from orchestrator.skill_registry import register_skill
 from orchestrator.skills import Skill, load_skill, load_skill_from_ledger, plan_test_flags
 from orchestrator.source_bindings import (
@@ -2159,16 +2161,25 @@ def list_runs(
         exposure_metric = metrics_by_run.get(run_id, {}).get("run_exposure_headline")
         skill_entry = skills_by_id.get(r.get("skill_id"))
 
-        # approved_by (runs.approved_by, populated by orchestrator.runs.sign_off
-        # via persistence) is the same `actor` string evaluate_signoff compared
-        # against run_owner at sign-off time -- re-deriving self_approved from
-        # these two already-projected columns is exactly that same equality,
-        # not a second policy decision (CLAUDE.md §11 self sign-off decision;
-        # orchestrator/signoff_policy.py is the single source of the rule).
         approved_by = r.get("approved_by")
-        self_approved = bool(approved_by) and evaluate_signoff(
-            actor=approved_by, run_owner=r["run_owner"]
-        )["self_approved"]
+        legacy_signoff_policy = evaluate_signoff(actor=approved_by, run_owner=r["run_owner"])
+        # P7 review workflow (§3.7): label_for derives self_approved from
+        # runs.prepared_by/reviewed_by/approved_by (all already-projected
+        # columns, no per-run RunState read for a whole page of rows) --
+        # falling back to the pre-P7 approved_by==run_owner rule when
+        # prepared_by is null (a run the P7 workflow never touched). Either
+        # way this is the SAME single policy decision
+        # (orchestrator/signoff_policy.py), never re-derived ad hoc here.
+        self_approved = bool(
+            label_for(
+                {
+                    "prepared_by": r.get("prepared_by"),
+                    "reviewed_by": r.get("reviewed_by"),
+                    "approved_by": approved_by,
+                    "self_approved": bool(approved_by) and legacy_signoff_policy["self_approved"],
+                }
+            )
+        )
 
         out.append(
             {
@@ -2207,7 +2218,7 @@ def list_runs(
                 "has_workspace": bool(skill_entry and skill_entry.get("has_workspace")),
                 "approved_by": approved_by,
                 "self_approved": self_approved,
-                "sod_enforced": SOD_ENFORCED,
+                "sod_enforced": legacy_signoff_policy["sod_enforced"],
                 "queue_note": _queue_affinity_note_from_fingerprint(
                     r["status"], own_code_revision, fingerprints_by_id.get(r.get("fingerprint_id"))
                 ),
@@ -2575,7 +2586,16 @@ def restart_stale_run(ctx: AppContext, run_id: str, actor: str) -> str:
 
 
 def sign_off(ctx: AppContext, run_id: str, actor: str) -> RunState:
-    state = runs_module.sign_off(ctx.persistence, run_id, actor=actor, now=ctx.clock())
+    # role_resolver/settings are always passed through -- orchestrator.runs.
+    # sign_off only ever touches them on the P7-gated path (state.review.stage
+    # == 'approval'), which itself required prepare()/mark_reviewed() to have
+    # already run, so a legacy self-sign-off (state.review is None) is
+    # completely unaffected (LazyRoleResolver defers the ConfigError an
+    # unconfigured REVIEW_* environment would otherwise raise eagerly).
+    state = runs_module.sign_off(
+        ctx.persistence, run_id, actor=actor, now=ctx.clock(),
+        role_resolver=_role_resolver_for(ctx), settings=ctx.settings,
+    )
     if ctx.executor is not None:
         ctx.executor.start(run_id, state.phase)
     return state
@@ -2617,6 +2637,75 @@ def _emit_service_event(persistence, state: RunState, *, event_id: str, event_ty
     )
 
 
+# ── P7 review workflow wrappers (docs/specs/P7_mapping_authoring_design.md
+# §3.3, D-P7-10) ──────────────────────────────────────────────────────────
+
+
+def _refuse_unless_preparation_stage(ctx: AppContext, state: RunState, action: str, actor: str) -> None:
+    """D-P7-10: only the preparer edits model text and decides AI-proposed
+    findings, and only during `preparation` -- a legacy run whose P7 workflow
+    never ran (`state.review is None`) is unrestricted, exactly as before."""
+    review = state.review or {}
+    if not review or review.get("stage") == "preparation":
+        return
+    now = ctx.clock()
+    message = "Text can only be edited during preparation — ask the reviewer to return the run."
+    _emit_service_event(
+        ctx.persistence, state,
+        event_id=_service_trace_event_id(state.run_id, action, "refused", now),
+        event_type="review_action_refused", actor=actor,
+        message=f"{action} refused: {message}", now=now,
+    )
+    raise ReviewActionRefused(state.run_id, action, message)
+
+
+def _role_resolver_for(ctx: AppContext):
+    return LazyRoleResolver(ctx.settings)
+
+
+def prepare_findings(ctx: AppContext, run_id: str, actor: str) -> RunState:
+    state = runs_module.prepare(
+        ctx.persistence, run_id, actor=actor, now=ctx.clock(),
+        role_resolver=_role_resolver_for(ctx), settings=ctx.settings,
+    )
+    return state
+
+
+def mark_reviewed(ctx: AppContext, run_id: str, actor: str) -> RunState:
+    return runs_module.mark_reviewed(
+        ctx.persistence, run_id, actor=actor, now=ctx.clock(),
+        role_resolver=_role_resolver_for(ctx), settings=ctx.settings,
+    )
+
+
+def return_to_preparer(ctx: AppContext, run_id: str, actor: str, reason: str) -> RunState:
+    return runs_module.return_to_preparer(
+        ctx.persistence, run_id, actor=actor, reason=reason, now=ctx.clock(),
+        role_resolver=_role_resolver_for(ctx), settings=ctx.settings,
+    )
+
+
+def raise_review_note(ctx: AppContext, run_id: str, actor: str, body: str, finding_id: str | None = None) -> dict:
+    return runs_module.raise_review_note(
+        ctx.persistence, run_id, actor=actor, body=body, finding_id=finding_id, now=ctx.clock(),
+        role_resolver=_role_resolver_for(ctx), settings=ctx.settings,
+    )
+
+
+def respond_to_review_note(ctx: AppContext, run_id: str, note_id: str, actor: str, response: str) -> dict:
+    return runs_module.respond_to_review_note(
+        ctx.persistence, run_id, note_id, actor=actor, response=response, now=ctx.clock(),
+        role_resolver=_role_resolver_for(ctx), settings=ctx.settings,
+    )
+
+
+def clear_review_note(ctx: AppContext, run_id: str, note_id: str, actor: str) -> dict:
+    return runs_module.clear_a_review_note(
+        ctx.persistence, run_id, note_id, actor=actor, now=ctx.clock(),
+        role_resolver=_role_resolver_for(ctx), settings=ctx.settings,
+    )
+
+
 _CANDIDATE_DECISIONS = ("accepted", "rejected")
 
 
@@ -2643,6 +2732,7 @@ def decide_candidate(
     state = ctx.persistence.load_state(run_id)
     if state.status != "awaiting_signoff":
         raise RunNotAwaitingSignoff(run_id, state.status)
+    _refuse_unless_preparation_stage(ctx, state, "candidate_decided", actor)
     if decision == "accepted" and not decided_severity:
         raise CandidateSeverityRequired(candidate_id)
     if decision == "rejected" and not (reason and reason.strip()):
@@ -2893,6 +2983,7 @@ def edit_narrative(ctx: AppContext, run_id: str, narrative_id: str, new_text, *,
     state = ctx.persistence.load_state(run_id)
     if state.status != "awaiting_signoff":
         raise NarrativeEditNotAllowed(narrative_id, state.status)
+    _refuse_unless_preparation_stage(ctx, state, "narrative_edited", actor)
 
     row = next((r for r in ctx.persistence.get_narratives(run_id) if r["narrative_id"] == narrative_id), None)
     if row is None:
@@ -2995,6 +3086,7 @@ def regenerate_narration(ctx: AppContext, run_id: str, actor: str) -> RunState:
     state = ctx.persistence.load_state(run_id)
     if state.status != "awaiting_signoff":
         raise RunNotAwaitingSignoff(run_id, state.status)
+    _refuse_unless_preparation_stage(ctx, state, "narration_regenerated", actor)
 
     node_names = [name for name, _ in NODES_FOR.get(state.run_kind, {}).get(state.phase, [])]
     try:

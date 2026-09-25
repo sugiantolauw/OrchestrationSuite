@@ -38,11 +38,29 @@ _PHASE_REQUIRED_FOR_STATUS: dict[str, str] = {
 # needs. Explorer mode can never satisfy the auto-confirm clause because it checks
 # `mode == "playbook"` explicitly -- Explorer can only pass via plan_confirmed, which
 # only the explicit confirm_plan() call sets.
+def _signoff_gate(s: RunState) -> bool:
+    if s.signoff is None:
+        return False
+    # P7 review workflow (docs/specs/P7_mapping_authoring_design.md §3.4):
+    # a LEGACY signoff (no 'sod_mode' key -- every pre-P7 sign_off() call,
+    # orchestrator.runs.sign_off's non-gated path) passes exactly as it did
+    # before this feature existed: `signoff is not None` alone was already
+    # sufficient. A P7-gated signoff always carries 'sod_mode', and passes
+    # only when it is 'labelled' (SoD waived, labelled) or both
+    # prepared_by/reviewed_by are recorded -- defence in depth: orchestrator.
+    # runs.sign_off's gated path already enforces this before it ever sets
+    # `signoff` at all, so this only matters if that path were ever bypassed.
+    sod_mode = s.signoff.get("sod_mode")
+    if sod_mode is None or sod_mode == "labelled":
+        return True
+    return bool(s.signoff.get("prepared_by") and s.signoff.get("reviewed_by"))
+
+
 _PHASE_CHANGE_GATES: dict[tuple[str, str], Callable[[RunState], bool]] = {
     ("plan", "execute"): lambda s: bool(
         s.plan_confirmed or (s.mode == "playbook" and bool(s.options.get("auto_confirm_plan")))
     ),
-    ("execute", "export"): lambda s: s.signoff is not None,
+    ("execute", "export"): _signoff_gate,
 }
 
 

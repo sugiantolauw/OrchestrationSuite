@@ -996,6 +996,13 @@ class DeltaPersistence:
         # §2.4). Without this it stayed NULL on every completed run forever
         # (found live: P2/P3 gate review item 9).
         approved_by = (state.signoff or {}).get("approver")
+        # prepared_by/prepared_at/reviewed_by/reviewed_at (P7 review workflow,
+        # §3.4): derived from state.review the same way approved_by is
+        # derived from state.signoff above -- see persistence_local's
+        # counterpart for the full rationale.
+        review = state.review or {}
+        prepared = review.get("prepared") or {}
+        reviewed = review.get("reviewed") or {}
         set_clause = ", ".join(f"{c} = :{c}" for c in _RUN_STATE_SUMMARY_COLUMNS)
         params = {c: getattr(state, c) for c in _RUN_STATE_SUMMARY_COLUMNS}
         params.update(
@@ -1003,6 +1010,10 @@ class DeltaPersistence:
                 "audit_period_start": audit_start,
                 "audit_period_end": audit_end,
                 "approved_by": approved_by,
+                "prepared_by": prepared.get("actor"),
+                "prepared_at": prepared.get("at"),
+                "reviewed_by": reviewed.get("actor"),
+                "reviewed_at": reviewed.get("at"),
                 "new_state_version": state.state_version,
                 "run_id": state.run_id,
             }
@@ -1011,6 +1022,8 @@ class DeltaPersistence:
             conn,
             f"UPDATE {self._table('runs')} SET {set_clause}, audit_period_start = :audit_period_start, "
             "audit_period_end = :audit_period_end, approved_by = :approved_by, "
+            "prepared_by = :prepared_by, prepared_at = :prepared_at, "
+            "reviewed_by = :reviewed_by, reviewed_at = :reviewed_at, "
             "state_version = :new_state_version "
             "WHERE run_id = :run_id AND state_version < :new_state_version",
             params,
