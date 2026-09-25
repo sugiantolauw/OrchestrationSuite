@@ -4,6 +4,8 @@ import datetime as _dt
 import hashlib
 import json
 import logging
+import random
+import re
 import threading
 import time
 from pathlib import Path
@@ -24,6 +26,7 @@ from orchestrator.errors import (
     RunNotFound,
     SkillVersionConflict,
     StaleStateError,
+    TransientInfrastructureError,
 )
 from orchestrator.migrations import plan_migrations, split_statements
 from orchestrator.state import RunState, assert_json_safe, from_json, to_json, validate
@@ -34,10 +37,37 @@ logger = logging.getLogger(__name__)
 _DEFAULT_DDL_DIR = Path(__file__).resolve().parent.parent / "ddl" / "delta"
 
 _CONCURRENCY_MARKERS = (
+    # Legacy Spark/Delta exception CLASS names, as they appear embedded in a
+    # driver error message (e.g. "... ConcurrentAppendException: ...").
     "ConcurrentAppend",
     "ConcurrentDelete",
     "ConcurrentTransaction",
-    "DELTA_CONCURRENT",
+    # Modern Databricks bracketed error-class codes ([CLASS] message) -- the
+    # DELTA_CONCURRENT_* family plus CONCURRENT_UPDATE, listed by their exact
+    # top-level class rather than a truncated "DELTA_CONCURRENT" prefix
+    # (independent review round 3, 2026-09-25, BUG-FINALISE-CONCURRENCY-1):
+    # a truncated prefix combined with plain `in` substring matching is
+    # exactly the "broad substring" shape that can false-positive on an
+    # unrelated identifier that merely CONTAINS these characters. Matched
+    # via `_is_concurrency_error` below as whole, word-bounded tokens, never
+    # `marker in text`.
+    "DELTA_CONCURRENT_APPEND",
+    "DELTA_CONCURRENT_DELETE_READ",
+    "DELTA_CONCURRENT_DELETE_DELETE",
+    "DELTA_CONCURRENT_TRANSACTION",
+    "DELTA_METADATA_CHANGED",
+    "CONCURRENT_UPDATE",
+)
+
+# Word-bounded (`\b...\b`), never a bare `marker in text` substring check --
+# `\b` requires a non-identifier character (or string start/end) on each
+# side, so e.g. "DELTA_CONCURRENT_APPEND" matches inside
+# "[DELTA_CONCURRENT_APPEND.ROW_LEVEL_CHANGES] Transaction conflict
+# detected..." (a `.` follows, ending the identifier) but a marker could
+# never match as a fragment buried inside some longer, unrelated identifier
+# that merely happens to contain the same letters.
+_CONCURRENCY_MARKER_RE = re.compile(
+    "|".join(r"\b" + re.escape(marker) + r"\b" for marker in _CONCURRENCY_MARKERS)
 )
 
 # Heuristic markers for "the connection itself is dead", distinct from a Delta
@@ -61,6 +91,50 @@ _ALREADY_EXISTS_MARKERS = (
 
 _CAS_RETRY_ATTEMPTS = 3
 _CAS_RETRY_BACKOFF_S = 0.05
+
+# BUG-FINALISE-CONCURRENCY-1 (independent review round 3, 2026-09-25):
+# statement-level retry for a Delta concurrency conflict on ANY write, not
+# only the run_state CAS update above. Reproduced live: `finalise`'s MERGE
+# into `findings` aborted on a genuine DELTA_CONCURRENT_APPEND.ROW_LEVEL_
+# CHANGES conflict with no retry at all, permanently stranding a
+# already-signed-off run (see run_phase's node-failure handling in
+# pipeline.py, which now classifies a concurrency conflict that survives
+# these retries as `interrupted`, never `failed`).
+#
+# Root cause of the CONFLICT itself (not just the missing retry): `findings`
+# is one shared, un-partitioned Delta table every run's `narrate`/`finalise`
+# node MERGEs into, and MAX_CONCURRENT_RUNS (default 2, CLAUDE.md §2.3 rule
+# 3) lets two DIFFERENT runs' pipeline passes execute at the same time in
+# the ThreadExecutor's thread pool. Delta's optimistic concurrency control
+# on MERGE can reject two simultaneous commits even when they touch
+# logically disjoint finding_id rows, because conflict detection compares
+# the underlying data FILES a MERGE rewrites, not just the rows a caller
+# intended to touch -- two runs' MERGEs landing in the same commit window is
+# therefore a real, expected condition under ordinary multi-run concurrency,
+# not a rare edge case, and the fix must cover every write path, not just
+# `finalise`'s.
+#
+# Retrying is safe exactly because Delta's optimistic concurrency check is
+# all-or-nothing: a transaction that aborts with one of these errors never
+# partially committed anything, so re-issuing the SAME statement is never a
+# duplicate write. Every write path this retries is additionally already
+# idempotent on its own terms -- write_findings/write_flagged_rows/
+# write_run_metrics/upsert_risks/upsert_controls MERGE on a stable key, and
+# a plain UPDATE/INSERT retried after a genuine abort (nothing committed)
+# reapplies the identical change, never a second one.
+_STATEMENT_CONCURRENCY_RETRY_ATTEMPTS = 4
+_STATEMENT_CONCURRENCY_RETRY_BASE_BACKOFF_S = 0.1
+_STATEMENT_CONCURRENCY_RETRY_MAX_BACKOFF_S = 1.0
+
+
+def _statement_concurrency_backoff_s(attempt: int) -> float:
+    # Full jitter, bounded exponential: several writers retrying the same
+    # conflict must not all wake and collide again at the same instant.
+    cap = min(
+        _STATEMENT_CONCURRENCY_RETRY_BASE_BACKOFF_S * (2**attempt),
+        _STATEMENT_CONCURRENCY_RETRY_MAX_BACKOFF_S,
+    )
+    return random.uniform(0, cap)
 
 _FINGERPRINT_COLUMNS = (
     "source_table_versions",
@@ -382,8 +456,7 @@ def _attempt_id(execution_key: str) -> str:
 
 
 def _is_concurrency_error(exc: Exception) -> bool:
-    text = str(exc)
-    return any(marker in text for marker in _CONCURRENCY_MARKERS)
+    return _CONCURRENCY_MARKER_RE.search(str(exc)) is not None
 
 
 def _is_connection_error(exc: Exception) -> bool:
@@ -581,18 +654,51 @@ class DeltaPersistence:
     def _lease_cursor_ctx(self):
         return _LeaseCursorCtx(self)
 
-    def _execute(self, conn, sql_text: str, params: dict | None = None):
-        try:
-            cur = conn.raw.cursor()
-            cur.execute(sql_text, params or {})
-            return cur
-        except Exception as exc:
-            if _is_connection_error(exc):
-                conn.replace_broken()
+    def _execute(self, conn, sql_text: str, params: dict | None = None, *, retry_concurrency: bool = True):
+        # BUG-FINALISE-CONCURRENCY-1: a genuine Delta concurrency conflict
+        # (DELTA_CONCURRENT_APPEND and the rest of the family) is retried,
+        # bounded and jittered, before this ever surfaces to a caller -- see
+        # `_STATEMENT_CONCURRENCY_RETRY_ATTEMPTS`'s own comment for why every
+        # statement executed through here is safe to retry this way. Either
+        # kind of failure that still cannot be recovered once these retries
+        # are exhausted is wrapped in `TransientInfrastructureError` (never
+        # raised bare) so orchestrator.pipeline's node-failure handling can
+        # route it to `interrupted` rather than `failed` without having to
+        # know anything about Delta or the driver's own exception shapes.
+        #
+        # `retry_concurrency=False` is for `_cas_update_run_state` alone: its
+        # OWN retry loop already re-reads `state_version` between attempts to
+        # tell a spurious conflict (retry) from a genuinely stale write
+        # (raise StaleStateError with the true version) -- a blind retry
+        # IN HERE first would just delay that distinction reaching it, not
+        # improve it, since that loop's own `_is_concurrency_error` check
+        # and re-read already do the same job with more information (whether
+        # `state_version` actually moved) than a statement-level retry can.
+        attempts = _STATEMENT_CONCURRENCY_RETRY_ATTEMPTS if retry_concurrency else 1
+        for attempt in range(attempts):
+            try:
                 cur = conn.raw.cursor()
                 cur.execute(sql_text, params or {})
                 return cur
-            raise
+            except Exception as exc:
+                if _is_connection_error(exc):
+                    conn.replace_broken()
+                    try:
+                        cur = conn.raw.cursor()
+                        cur.execute(sql_text, params or {})
+                        return cur
+                    except Exception as exc2:
+                        raise TransientInfrastructureError(
+                            f"connection could not be recovered after one reconnect attempt: {exc2}"
+                        ) from exc2
+                if retry_concurrency and _is_concurrency_error(exc):
+                    if attempt < attempts - 1:
+                        time.sleep(_statement_concurrency_backoff_s(attempt))
+                        continue
+                    raise TransientInfrastructureError(
+                        f"Delta concurrency conflict persisted after {attempts} attempts: {exc}"
+                    ) from exc
+                raise
 
     # Every read/write above passes a plain dict, which the driver's own
     # dbsql_parameter_from_primitive infers per-value (a Python float already
@@ -607,19 +713,37 @@ class DeltaPersistence:
     # FakeConnection test harness for CAS/state-machine paths (tests/
     # test_delta_sql.py) asserts on a plain params dict, so those call sites
     # keep using `_execute` unchanged.
-    def _execute_typed(self, conn, sql_text: str, params: dict | None = None):
+    def _execute_typed(self, conn, sql_text: str, params: dict | None = None, *, retry_concurrency: bool = True):
         prepared = _typed_params(params)
-        try:
-            cur = conn.raw.cursor()
-            cur.execute(sql_text, prepared)
-            return cur
-        except Exception as exc:
-            if _is_connection_error(exc):
-                conn.replace_broken()
+        # Same statement-level concurrency retry as `_execute` above --
+        # `prepared` is computed once outside the loop since it does not
+        # depend on anything a retry could change. See `_execute`'s own
+        # docstring comment for `retry_concurrency`.
+        attempts = _STATEMENT_CONCURRENCY_RETRY_ATTEMPTS if retry_concurrency else 1
+        for attempt in range(attempts):
+            try:
                 cur = conn.raw.cursor()
                 cur.execute(sql_text, prepared)
                 return cur
-            raise
+            except Exception as exc:
+                if _is_connection_error(exc):
+                    conn.replace_broken()
+                    try:
+                        cur = conn.raw.cursor()
+                        cur.execute(sql_text, prepared)
+                        return cur
+                    except Exception as exc2:
+                        raise TransientInfrastructureError(
+                            f"connection could not be recovered after one reconnect attempt: {exc2}"
+                        ) from exc2
+                if retry_concurrency and _is_concurrency_error(exc):
+                    if attempt < attempts - 1:
+                        time.sleep(_statement_concurrency_backoff_s(attempt))
+                        continue
+                    raise TransientInfrastructureError(
+                        f"Delta concurrency conflict persisted after {attempts} attempts: {exc}"
+                    ) from exc
+                raise
 
     def close(self) -> None:
         """Idempotent, deterministic close of the pool (every connection it
@@ -836,7 +960,11 @@ class DeltaPersistence:
         )
         for attempt in range(_CAS_RETRY_ATTEMPTS):
             try:
-                cur = self._execute(conn, sql_text, params)
+                # retry_concurrency=False: this loop's own re-read-then-
+                # compare below already handles a concurrency conflict with
+                # more information than a blind statement-level retry could
+                # (see `_execute`'s own docstring comment) -- never doubled up.
+                cur = self._execute(conn, sql_text, params, retry_concurrency=False)
                 return _num_affected_rows(cur)
             except Exception as exc:
                 if not _is_concurrency_error(exc):
@@ -845,6 +973,7 @@ class DeltaPersistence:
                     conn,
                     f"SELECT state_version FROM {self._table('run_state')} WHERE run_id = :run_id",
                     {"run_id": run_id},
+                    retry_concurrency=False,
                 )
                 actual_row = _fetchone_dict(cur)
                 actual = actual_row["state_version"] if actual_row else None
@@ -2587,11 +2716,16 @@ class _ConnectionPool:
                 self._cond.wait(remaining)
         try:
             conn = self._factory()
-        except Exception:
+        except Exception as exc:
             with self._cond:
                 self._all.remove(_POOL_RESERVED)
                 self._cond.notify()
-            raise
+            # BUG-FINALISE-CONCURRENCY-1: opening a brand-new SQL session
+            # failing (warehouse unreachable, cold-starting, or otherwise
+            # unavailable) is infrastructure trouble, not a deterministic
+            # bug -- wrapped so orchestrator.pipeline's node-failure
+            # handling routes it to `interrupted`, never `failed`.
+            raise TransientInfrastructureError(f"could not open a new connection: {exc}") from exc
         with self._cond:
             if self._closed:
                 # Closed while this connection was opening -- never hand out

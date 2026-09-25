@@ -243,6 +243,44 @@ class _UCConnectionPool:
             return len(self._all)
 
 
+class _UCCursorCtx:
+    """One checkout from a `_UCConnectionPool`, scoped to a single `with`
+    block (BUG-UCPOOL-1 fix, independent review round 3, 2026-09-25) --
+    mirrors `persistence_delta._CursorCtx`. `execute()` may be called more
+    than once inside the same block (read_population's DESCRIBE/COUNT/SELECT
+    all pin the same Delta version and belong to one logical read), and the
+    connection goes back to the pool on a clean exit. Any exception out of
+    `execute()` drops the connection from the pool instead -- it is never
+    checked back in possibly-broken, and never handed to another instance or
+    another statement on this same instance."""
+
+    __slots__ = ("_pool", "_conn", "_dropped")
+
+    def __init__(self, pool: "_UCConnectionPool"):
+        self._pool = pool
+        self._conn = None
+        self._dropped = False
+
+    def __enter__(self) -> "_UCCursorCtx":
+        self._conn = self._pool.checkout()
+        return self
+
+    def execute(self, sql_text: str, params: dict | None = None):
+        try:
+            cur = self._conn.cursor()
+            cur.execute(sql_text, params or {})
+            return cur
+        except Exception:
+            self._dropped = True
+            self._pool.drop(self._conn)
+            raise
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        if not self._dropped and self._conn is not None:
+            self._pool.checkin(self._conn)
+        return False
+
+
 def _quote_ident(name: str) -> str:
     return "`" + str(name).replace("`", "``") + "`"
 
@@ -345,16 +383,33 @@ class UCTableDataSource:
     # P3/P4 perf gap review 2026-09-25, warm-pool follow-up: a caller that
     # already has a process-lifetime `_UCConnectionPool` (service.py's
     # `_uc_factory`/`_build_explorer_data_source`, via `AppContext.uc_pool`)
-    # passes it here so this instance's connection comes from -- and, on
-    # close(), goes back to -- that SHARED, already-warm pool instead of a
-    # private one. A caller with no pool in hand (every existing direct
-    # `UCTableDataSource(settings, bindings)` construction -- tests, the
-    # live equality test, `_resolve_explorer_sources`) is unaffected: `None`
-    # here means "build and own a private pool", the exact behaviour a
-    # single lazily-opened connection used to give, just pool-shaped.
+    # passes it here so every connection this instance uses comes from --
+    # and, immediately after each statement/read, goes straight back to --
+    # that SHARED, already-warm pool instead of a private one. A caller with
+    # no pool in hand (every existing direct `UCTableDataSource(settings,
+    # bindings)` construction -- tests, the live equality test,
+    # `_resolve_explorer_sources`) is unaffected: `None` here means "build
+    # and own a private pool", pool-shaped either way.
+    #
+    # BUG-UCPOOL-1 (independent review round 3, 2026-09-25): a connection
+    # used to be checked out ONCE on first use and cached on `self._conn`
+    # for this instance's entire lifetime, returned to the pool only by
+    # `close()` -- but nothing in the fieldwork pipeline or web tier ever
+    # called `close()` on a `UCTableDataSource` (`ctx.data_source_factory`
+    # builds a fresh instance per executor pass and per web request, e.g.
+    # every keystroke in the source-search box), so every one of those
+    # instances permanently pinned one pool slot. Once `DBX_MAX_CONNECTIONS`
+    # slots were all pinned this way, the pool never recovered for the rest
+    # of the process's life -- every later page load or run needing a UC
+    # connection hung until `UCConnectionPoolExhausted`. Fixed by holding a
+    # connection only for the duration of each statement/read (`_cursor_ctx`
+    # below, mirroring `persistence_delta.DeltaPersistence._exec1`/
+    # `_cursor_ctx`) -- never cached across calls -- so a shared pool never
+    # needs `close()` to stay healthy. `close()` is kept for the belt-and-
+    # braces case (a privately-owned pool, and any caller that wants to tear
+    # one down explicitly) but is no longer load-bearing for the shared-pool
+    # path.
     pool: Any = None
-    _conn: object | None = field(default=None, init=False, repr=False, compare=False)
-    _conn_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False, compare=False)
     _ws_client: object | None = field(default=None, init=False, repr=False, compare=False)
     _ws_client_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False, compare=False)
     _owns_pool: bool = field(default=False, init=False, repr=False, compare=False)
@@ -408,53 +463,27 @@ class UCTableDataSource:
             )
         return fqn
 
-    def _get_connection(self):
-        # P3/P4 perf gap review 2026-09-25, warm-pool follow-up: checked out
-        # from `self._pool` (shared and already-warm, or private and freshly
-        # opened) rather than opened directly -- still cached on `self._conn`
-        # and reused for every call THIS instance makes, exactly as before;
-        # only the SOURCE of that one connection changed.
-        with self._conn_lock:
-            if self._conn is None:
-                self._conn = self._pool.checkout()
-            return self._conn
-
-    def _execute(self, sql_text: str, params: dict | None = None):
-        conn = self._get_connection()
-        try:
-            cur = conn.cursor()
-            cur.execute(sql_text, params or {})
-            return cur
-        except Exception:
-            # Connection-shaped failures aren't distinguished from query
-            # failures here the way persistence_delta.py does (that
-            # heuristic lives with the PersistenceAdapter this task must not
-            # touch) -- but now that a connection may be SHARED (checked
-            # back into a pool other instances also draw from), any
-            # exception drops it rather than caching it for a future
-            # checkin(): a caller that hits a dead connection gets a clear
-            # failure and the NEXT call on this instance (or the next
-            # instance to check out from a shared pool) gets a fresh
-            # connection instead of the same broken one, and a broken
-            # connection is never handed to another instance via the pool.
-            with self._conn_lock:
-                if self._conn is not None:
-                    self._pool.drop(self._conn)
-                    self._conn = None
-            raise
+    def _cursor_ctx(self) -> "_UCCursorCtx":
+        # BUG-UCPOOL-1 fix: checks a connection OUT of `self._pool` for the
+        # duration of one `with` block -- a single statement, or several
+        # statements that make up one logical read against the same
+        # version-pinned snapshot (read_population's DESCRIBE/COUNT/SELECT)
+        # -- and checks it back IN (or drops it, if a statement failed) on
+        # exit. Never cached on `self` across calls, so this instance never
+        # pins a pool slot for longer than the read actually takes, and a
+        # shared pool needs no `close()` to stay healthy. Mirrors
+        # `persistence_delta.DeltaPersistence._cursor_ctx`/`_exec1`.
+        return _UCCursorCtx(self._pool)
 
     def close(self) -> None:
-        # A connection this instance was using goes back to the pool for
-        # reuse (`checkin`), never actually closed here -- that is what
-        # makes a SHARED pool (`self.pool` was given) stay warm across
-        # UCTableDataSource instances. Only a PRIVATELY-owned pool (no
-        # `pool=` was given -- every existing caller before this change) is
-        # itself torn down, matching the exact previous behaviour: closing
-        # this instance closes everything it opened, and nothing else.
-        with self._conn_lock:
-            if self._conn is not None:
-                self._pool.checkin(self._conn)
-                self._conn = None
+        # No connection is ever cached on this instance any more (see
+        # `_cursor_ctx` above) -- every checkout is already returned to (or
+        # dropped from) the pool by the time a call returns, so there is
+        # nothing left for a SHARED pool's close() to check in. Only a
+        # PRIVATELY-owned pool (no `pool=` was given) is itself torn down --
+        # kept for callers that still want a deterministic teardown (tests,
+        # the live equality test, `_resolve_explorer_sources`) and as the
+        # belt-and-braces close every run/node call site now also performs.
         if self._owns_pool:
             self._pool.close()
 
@@ -462,9 +491,10 @@ class UCTableDataSource:
 
     def _resolve_version_for_fqn(self, fqn: str) -> str:
         quoted = _quoted_fqn(fqn)
-        cur = self._execute(f"DESCRIBE HISTORY {quoted} LIMIT 1")
-        columns = [d[0] for d in cur.description]
-        row = cur.fetchone()
+        with self._cursor_ctx() as cc:
+            cur = cc.execute(f"DESCRIBE HISTORY {quoted} LIMIT 1")
+            columns = [d[0] for d in cur.description]
+            row = cur.fetchone()
         if row is None:
             raise UCSourceError(f"DESCRIBE HISTORY returned no rows for {fqn} -- table has no commits")
         idx = columns.index("version")
@@ -482,12 +512,10 @@ class UCTableDataSource:
         # keys), not table_fqns -- callers resolve a whole Skill's sources by name.
         #
         # P3/P4 perf gap review (2026-09-25): a plain `{name: self.resolve_version(name)
-        # for name in sources}` loop runs every DESCRIBE HISTORY sequentially, because
-        # resolve_version -> _resolve_version_for_fqn -> _execute -> _get_connection() all
-        # share this instance's ONE cached connection, guarded by `_conn_lock` -- a
-        # second thread's resolve_version blocks on the lock for the first thread's
-        # entire round trip. Live measurement: service.start_audit_run resolving
-        # SKILL-001's 8 bound sources sequentially took 13.0s (0.97-5.66s each).
+        # for name in sources}` loop runs every DESCRIBE HISTORY sequentially -- one
+        # round trip after another, each 0.97-5.66s live. Live measurement:
+        # service.start_audit_run resolving SKILL-001's 8 bound sources sequentially
+        # took 13.0s.
         #
         # Warm-pool follow-up (same date): the first attempt at concurrency gave each
         # resolution its OWN short-lived, one-shot connection (opened via
@@ -523,28 +551,13 @@ class UCTableDataSource:
         if cap == 1:
             return {name: self._resolve_version_for_fqn(fqns[name]) for name in sources}
 
-        def _resolve_on_pooled_connection(fqn: str) -> str:
-            conn = self._pool.checkout()
-            try:
-                cur = conn.cursor()
-                cur.execute(f"DESCRIBE HISTORY {_quoted_fqn(fqn)} LIMIT 1")
-                columns = [d[0] for d in cur.description]
-                row = cur.fetchone()
-                if row is None:
-                    raise UCSourceError(
-                        f"DESCRIBE HISTORY returned no rows for {fqn} -- table has no commits"
-                    )
-                idx = columns.index("version")
-                result = str(row[idx])
-            except Exception:
-                self._pool.drop(conn)
-                raise
-            else:
-                self._pool.checkin(conn)
-                return result
-
         with ThreadPoolExecutor(max_workers=cap) as executor:
-            futures = {name: executor.submit(_resolve_on_pooled_connection, fqns[name]) for name in sources}
+            # `_resolve_version_for_fqn` already checks a connection out of
+            # `self._pool` and back in (or drops it) via `_cursor_ctx()` for
+            # just this one statement (BUG-UCPOOL-1) -- safe to call
+            # concurrently from several threads, each getting its own
+            # checkout.
+            futures = {name: executor.submit(self._resolve_version_for_fqn, fqns[name]) for name in sources}
             # .result() on each future re-raises that source's exception (if
             # any) here -- a single failure fails the whole batch loudly
             # (CLAUDE.md NN14), exactly as the sequential version's first
@@ -554,12 +567,12 @@ class UCTableDataSource:
             # regardless of which resolution actually finished first.
             return {name: futures[name].result() for name in sources}
 
-    def _describe_columns(self, quoted_fqn: str, version: int) -> list[str]:
-        cur = self._execute(f"SELECT * FROM {quoted_fqn} VERSION AS OF {version} LIMIT 0")
+    def _describe_columns(self, cc: "_UCCursorCtx", quoted_fqn: str, version: int) -> list[str]:
+        cur = cc.execute(f"SELECT * FROM {quoted_fqn} VERSION AS OF {version} LIMIT 0")
         return [d[0] for d in cur.description]
 
-    def _row_count_at_version(self, quoted_fqn: str, version: int) -> int:
-        cur = self._execute(f"SELECT count(*) AS n FROM {quoted_fqn} VERSION AS OF {version}")
+    def _row_count_at_version(self, cc: "_UCCursorCtx", quoted_fqn: str, version: int) -> int:
+        cur = cc.execute(f"SELECT count(*) AS n FROM {quoted_fqn} VERSION AS OF {version}")
         row = cur.fetchone()
         return int(row[0])
 
@@ -601,57 +614,62 @@ class UCTableDataSource:
         except (TypeError, ValueError) as exc:
             raise UCSourceError(f"{source}: version must be an integer Delta version, got {version!r}") from exc
 
-        actual_columns = self._describe_columns(quoted, version_int)
-        if "_source_row" not in actual_columns:
-            raise UCSourceError(
-                f"{source}: table {fqn} has no `_source_row` column -- it was not loaded by "
-                f"scripts/load_tne_sources_to_uc.py, so rows cannot be traced back to the source file"
-            )
-        raw_columns = [c for c in actual_columns if c != "_source_row"]
-        logical_to_actual = self._logical_column_map(raw_columns)
-
-        if columns:
-            selected_logical = list(columns)
-        else:
-            selected_logical = [c.strip() for c in raw_columns]
-
-        select_bits = ["`_source_row`"]
-        for logical in selected_logical:
-            actual = logical_to_actual.get(logical)
-            if actual is None:
+        # BUG-UCPOOL-1: one connection, checked out for the whole logical read
+        # (DESCRIBE + COUNT + the SELECT itself all pin the same version) and
+        # checked back in when this `with` block exits -- never cached on
+        # `self` beyond this call.
+        with self._cursor_ctx() as cc:
+            actual_columns = self._describe_columns(cc, quoted, version_int)
+            if "_source_row" not in actual_columns:
                 raise UCSourceError(
-                    f"{source}: column {logical!r} not found in {fqn} "
-                    f"(available: {sorted(logical_to_actual)})"
+                    f"{source}: table {fqn} has no `_source_row` column -- it was not loaded by "
+                    f"scripts/load_tne_sources_to_uc.py, so rows cannot be traced back to the source file"
                 )
-            if actual == logical:
-                select_bits.append(_quote_ident(actual))
+            raw_columns = [c for c in actual_columns if c != "_source_row"]
+            logical_to_actual = self._logical_column_map(raw_columns)
+
+            if columns:
+                selected_logical = list(columns)
             else:
-                select_bits.append(f"{_quote_ident(actual)} AS {_quote_ident(logical)}")
+                selected_logical = [c.strip() for c in raw_columns]
 
-        where_sql, where_params = _build_where(filters, logical_to_actual)
+            select_bits = ["`_source_row`"]
+            for logical in selected_logical:
+                actual = logical_to_actual.get(logical)
+                if actual is None:
+                    raise UCSourceError(
+                        f"{source}: column {logical!r} not found in {fqn} "
+                        f"(available: {sorted(logical_to_actual)})"
+                    )
+                if actual == logical:
+                    select_bits.append(_quote_ident(actual))
+                else:
+                    select_bits.append(f"{_quote_ident(actual)} AS {_quote_ident(logical)}")
 
-        row_count = self._row_count_at_version(quoted, version_int)
-        n_selected_cols = len(select_bits) - 1  # `_source_row` is bookkeeping, not a data column
-        cells = row_count * max(n_selected_cols, 1)
-        if cells > self._max_cells:
-            raise UCSourceError(
-                f"{source}: {row_count:,} rows x {n_selected_cols} columns = {cells:,} cells "
-                f"exceeds the DBX_MAX_CELLS ceiling ({self._max_cells:,}). Narrow `columns` or "
-                f"push a filter down; this adapter never silently samples (CLAUDE.md §2.3 rule 4)."
-            )
+            where_sql, where_params = _build_where(filters, logical_to_actual)
 
-        sql_text = f"SELECT {', '.join(select_bits)} FROM {quoted} VERSION AS OF {version_int}"
-        if where_sql:
-            sql_text += f" WHERE {where_sql}"
-        # Spark/Delta makes no row-order guarantee without an ORDER BY. Ordering by
-        # `_source_row` (assigned 1-based, in file order, at load time) is what makes
-        # a UC-backed read line up row-for-row with the equivalent LocalFileDataSource
-        # read on the same file (verified in tests/test_datasource_uc.py's live
-        # equality test) rather than an incidental artifact of a single-file CTAS.
-        sql_text += " ORDER BY `_source_row`"
+            row_count = self._row_count_at_version(cc, quoted, version_int)
+            n_selected_cols = len(select_bits) - 1  # `_source_row` is bookkeeping, not a data column
+            cells = row_count * max(n_selected_cols, 1)
+            if cells > self._max_cells:
+                raise UCSourceError(
+                    f"{source}: {row_count:,} rows x {n_selected_cols} columns = {cells:,} cells "
+                    f"exceeds the DBX_MAX_CELLS ceiling ({self._max_cells:,}). Narrow `columns` or "
+                    f"push a filter down; this adapter never silently samples (CLAUDE.md §2.3 rule 4)."
+                )
 
-        cur = self._execute(sql_text, where_params)
-        arrow_table = cur.fetchall_arrow()
+            sql_text = f"SELECT {', '.join(select_bits)} FROM {quoted} VERSION AS OF {version_int}"
+            if where_sql:
+                sql_text += f" WHERE {where_sql}"
+            # Spark/Delta makes no row-order guarantee without an ORDER BY. Ordering by
+            # `_source_row` (assigned 1-based, in file order, at load time) is what makes
+            # a UC-backed read line up row-for-row with the equivalent LocalFileDataSource
+            # read on the same file (verified in tests/test_datasource_uc.py's live
+            # equality test) rather than an incidental artifact of a single-file CTAS.
+            sql_text += " ORDER BY `_source_row`"
+
+            cur = cc.execute(sql_text, where_params)
+            arrow_table = cur.fetchall_arrow()
         df = arrow_table.to_pandas()
         df = _normalise_datetime_dtypes(df, audit_timezone)
         df = df.reset_index(drop=True)
@@ -684,32 +702,35 @@ class UCTableDataSource:
         quoted = _quoted_fqn(table_fqn)
         version_int = int(version) if version is not None else None
 
-        actual_columns = self._describe_columns(quoted, version_int) if version_int is not None else None
-        logical_to_actual = self._logical_column_map(actual_columns) if actual_columns else {}
+        # BUG-UCPOOL-1: one connection for the whole call (an optional
+        # DESCRIBE plus the aggregation query), checked back in on exit.
+        with self._cursor_ctx() as cc:
+            actual_columns = self._describe_columns(cc, quoted, version_int) if version_int is not None else None
+            logical_to_actual = self._logical_column_map(actual_columns) if actual_columns else {}
 
-        select_bits = []
-        for g in group_by:
-            actual = logical_to_actual.get(g, g)
-            select_bits.append(
-                _quote_ident(actual) if actual == g else f"{_quote_ident(actual)} AS {_quote_ident(g)}"
-            )
-        for out_name, expr in aggregations.items():
-            select_bits.append(f"{expr} AS {_quote_ident(out_name)}")
+            select_bits = []
+            for g in group_by:
+                actual = logical_to_actual.get(g, g)
+                select_bits.append(
+                    _quote_ident(actual) if actual == g else f"{_quote_ident(actual)} AS {_quote_ident(g)}"
+                )
+            for out_name, expr in aggregations.items():
+                select_bits.append(f"{expr} AS {_quote_ident(out_name)}")
 
-        where_sql, where_params = _build_where(filters, logical_to_actual)
+            where_sql, where_params = _build_where(filters, logical_to_actual)
 
-        sql_text = f"SELECT {', '.join(select_bits)} FROM {quoted}"
-        if version_int is not None:
-            sql_text += f" VERSION AS OF {version_int}"
-        if where_sql:
-            sql_text += f" WHERE {where_sql}"
-        if group_by:
-            sql_text += " GROUP BY " + ", ".join(
-                _quote_ident(logical_to_actual.get(g, g)) for g in group_by
-            )
+            sql_text = f"SELECT {', '.join(select_bits)} FROM {quoted}"
+            if version_int is not None:
+                sql_text += f" VERSION AS OF {version_int}"
+            if where_sql:
+                sql_text += f" WHERE {where_sql}"
+            if group_by:
+                sql_text += " GROUP BY " + ", ".join(
+                    _quote_ident(logical_to_actual.get(g, g)) for g in group_by
+                )
 
-        cur = self._execute(sql_text, where_params)
-        arrow_table = cur.fetchall_arrow()
+            cur = cc.execute(sql_text, where_params)
+            arrow_table = cur.fetchall_arrow()
         return _normalise_datetime_dtypes(arrow_table.to_pandas())
 
     def row_count(self, source: str, *, version: str | None = None) -> int:
@@ -725,12 +746,13 @@ class UCTableDataSource:
         fqn = self._fqn(source)
         quoted = _quoted_fqn(fqn)
         v = int(version) if version is not None else None
-        if v is None:
-            cur = self._execute(f"DESCRIBE HISTORY {quoted} LIMIT 1")
-            cols = [d[0] for d in cur.description]
-            row = cur.fetchone()
-            v = int(row[cols.index("version")])
-        return self._row_count_at_version(quoted, v)
+        with self._cursor_ctx() as cc:
+            if v is None:
+                cur = cc.execute(f"DESCRIBE HISTORY {quoted} LIMIT 1")
+                cols = [d[0] for d in cur.description]
+                row = cur.fetchone()
+                v = int(row[cols.index("version")])
+            return self._row_count_at_version(cc, quoted, v)
 
     def column_stats(
         self,
@@ -757,32 +779,37 @@ class UCTableDataSource:
         fqn = self._fqn(source)
         quoted = _quoted_fqn(fqn)
         v = int(version) if version is not None else None
-        if v is None:
-            cur = self._execute(f"DESCRIBE HISTORY {quoted} LIMIT 1")
-            cols = [d[0] for d in cur.description]
+
+        # BUG-UCPOOL-1: one connection for the whole call (an optional
+        # DESCRIBE HISTORY, the column-describe, and the aggregation query),
+        # checked back in on exit.
+        with self._cursor_ctx() as cc:
+            if v is None:
+                cur = cc.execute(f"DESCRIBE HISTORY {quoted} LIMIT 1")
+                cols = [d[0] for d in cur.description]
+                row = cur.fetchone()
+                v = int(row[cols.index("version")])
+
+            actual_columns = self._describe_columns(cc, quoted, v)
+            logical_to_actual = self._logical_column_map([c for c in actual_columns if c != "_source_row"])
+
+            aggregations: dict[str, str] = {}
+            if amount_column:
+                actual = logical_to_actual.get(amount_column)
+                if actual is None:
+                    raise UCSourceError(f"{source}: amount_column {amount_column!r} not found in {fqn}")
+                aggregations["__amount"] = f"sum({_quote_ident(actual)})"
+            if date_column:
+                actual = logical_to_actual.get(date_column)
+                if actual is None:
+                    raise UCSourceError(f"{source}: date_column {date_column!r} not found in {fqn}")
+                aggregations["__min_date"] = f"min({_quote_ident(actual)})"
+                aggregations["__max_date"] = f"max({_quote_ident(actual)})"
+
+            select_sql = ", ".join(f"{expr} AS {_quote_ident(out)}" for out, expr in aggregations.items())
+            cur = cc.execute(f"SELECT {select_sql} FROM {quoted} VERSION AS OF {v}")
             row = cur.fetchone()
-            v = int(row[cols.index("version")])
-
-        actual_columns = self._describe_columns(quoted, v)
-        logical_to_actual = self._logical_column_map([c for c in actual_columns if c != "_source_row"])
-
-        aggregations: dict[str, str] = {}
-        if amount_column:
-            actual = logical_to_actual.get(amount_column)
-            if actual is None:
-                raise UCSourceError(f"{source}: amount_column {amount_column!r} not found in {fqn}")
-            aggregations["__amount"] = f"sum({_quote_ident(actual)})"
-        if date_column:
-            actual = logical_to_actual.get(date_column)
-            if actual is None:
-                raise UCSourceError(f"{source}: date_column {date_column!r} not found in {fqn}")
-            aggregations["__min_date"] = f"min({_quote_ident(actual)})"
-            aggregations["__max_date"] = f"max({_quote_ident(actual)})"
-
-        select_sql = ", ".join(f"{expr} AS {_quote_ident(out)}" for out, expr in aggregations.items())
-        cur = self._execute(f"SELECT {select_sql} FROM {quoted} VERSION AS OF {v}")
-        row = cur.fetchone()
-        cols = [d[0] for d in cur.description]
+            cols = [d[0] for d in cur.description]
 
         amount = None
         if amount_column:
@@ -843,12 +870,13 @@ class UCTableDataSource:
         fqn = self._fqn(source)
         catalog, schema, table = _split_and_validate_fqn(fqn)
         try:
-            cur = self._execute(
-                f"SELECT column_name, tag_name FROM {_quote_ident(catalog)}.information_schema.column_tags "
-                f"WHERE schema_name = :schema_name AND table_name = :table_name",
-                {"schema_name": schema, "table_name": table},
-            )
-            rows = cur.fetchall()
+            with self._cursor_ctx() as cc:
+                cur = cc.execute(
+                    f"SELECT column_name, tag_name FROM {_quote_ident(catalog)}.information_schema.column_tags "
+                    f"WHERE schema_name = :schema_name AND table_name = :table_name",
+                    {"schema_name": schema, "table_name": table},
+                )
+                rows = cur.fetchall()
         except PermissionDenied:
             return None
         tags: dict[str, list[str]] = {}
@@ -874,8 +902,9 @@ class UCTableDataSource:
         if cached is not None:
             return cached
         quoted = _quoted_fqn(fqn)
-        cur = self._execute(f"SELECT COUNT(*) FROM {quoted} VERSION AS OF {version}")
-        row = cur.fetchone()
+        with self._cursor_ctx() as cc:
+            cur = cc.execute(f"SELECT COUNT(*) FROM {quoted} VERSION AS OF {version}")
+            row = cur.fetchone()
         count = int(row[0]) if row is not None else 0
         _ROW_COUNT_CACHE[key] = count
         return count
@@ -886,12 +915,14 @@ class UCTableDataSource:
         exists. `information_schema.table_tags` is catalog-scoped, so the
         query runs against the table's own catalog."""
         catalog, schema, table = _split_and_validate_fqn(fqn)
-        cur = self._execute(
-            f"SELECT tag_name, tag_value FROM {_quote_ident(catalog)}.information_schema.table_tags "
-            f"WHERE schema_name = :schema_name AND table_name = :table_name",
-            {"schema_name": schema, "table_name": table},
-        )
-        for tag_name, tag_value in cur.fetchall():
+        with self._cursor_ctx() as cc:
+            cur = cc.execute(
+                f"SELECT tag_name, tag_value FROM {_quote_ident(catalog)}.information_schema.table_tags "
+                f"WHERE schema_name = :schema_name AND table_name = :table_name",
+                {"schema_name": schema, "table_name": table},
+            )
+            rows = cur.fetchall()
+        for tag_name, tag_value in rows:
             if str(tag_name).lower() == "classification":
                 return tag_value
         return None

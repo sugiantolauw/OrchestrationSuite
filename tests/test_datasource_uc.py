@@ -375,15 +375,14 @@ def test_resolve_source_versions_checks_connections_back_into_the_pool_not_close
 
 
 def test_resolve_source_versions_single_source_uses_the_existing_single_connection_path():
-    """cap collapses to 1 for a single source -- no ThreadPoolExecutor, no
-    extra connection opened; goes through the same `_execute`/shared-`_conn`
-    path `resolve_version` always used, so a Skill with one source sees no
-    behaviour change at all."""
+    """cap collapses to 1 for a single source -- no ThreadPoolExecutor, and
+    the checked-out connection is returned to the pool immediately after the
+    call (BUG-UCPOOL-1), never held by the instance."""
     handlers = {"DESCRIBE HISTORY": lambda sql, p: (["version"], [(9,)])}
     ds, conn = _ds(handlers)
     result = ds.resolve_source_versions(["expense_report"])
     assert result == {"expense_report": "9"}
-    assert ds._conn is conn, "singular resolve must still use the instance's shared lazy connection"
+    assert ds._pool._idle == [conn], "the connection must be checked back into the pool right after the call"
 
 
 # ── persistent/shared connection pool (P3/P4 perf gap review 2026-09-25, ──
@@ -492,7 +491,6 @@ def test_broken_connection_is_dropped_from_a_shared_pool_never_reused():
 
     with pytest.raises(RuntimeError, match="connection died mid-query"):
         ds.resolve_version("expense_report")
-    assert ds._conn is None, "a failed connection must be dropped, not cached for reuse by this instance"
     assert pool.size() == 0, "a broken connection must never sit in the pool for another instance to inherit"
 
     # The SAME shared pool, used again, opens a fresh (second, working)
@@ -500,6 +498,124 @@ def test_broken_connection_is_dropped_from_a_shared_pool_never_reused():
     ds2 = UCTableDataSource(_settings(), {"expense_report": "cat.sch.expense_report"}, pool=pool)
     assert ds2.resolve_version("expense_report") == "7"
     assert calls["n"] == 2
+
+
+# ── BUG-UCPOOL-1 (independent review round 3, 2026-09-25): a connection must ─
+# be held only for the duration of each statement/read, never for an
+# instance's lifetime -- SKILL-001 alone binds 8 sources, more than
+# DBX_MAX_CONNECTIONS' default pool size of 6, and ctx.data_source_factory
+# builds a fresh UCTableDataSource per executor pass/web request with nothing
+# ever calling close() on it.
+
+
+def test_many_sources_many_reads_never_leak_connections():
+    """Reading many sources, many times, through several instances sharing
+    one small pool must never accumulate held connections -- every checkout
+    is matched by a checkin (or a drop on failure), so the pool never grows
+    past what it actually needs concurrently and never gets stuck exhausted
+    for the rest of the process's life."""
+    n_sources = 8
+    bindings = {f"s{i}": f"cat.sch.t{i}" for i in range(n_sources)}
+    handlers = _std_handlers()
+
+    def factory():
+        return FakeConnection(handlers)
+
+    pool = _UCConnectionPool(factory, max_size=2, checkout_timeout_s=5.0)
+
+    for _ in range(3):  # several executor passes -- a fresh instance each time, never closed
+        ds = UCTableDataSource(_settings(), bindings, pool=pool)
+        for name in bindings:
+            ds.read_population(name, version=1)
+        # Deliberately NOT calling ds.close() here -- the whole point of the
+        # fix is that a shared-pool instance needs no close() to stay
+        # healthy (belt-and-braces close() calls are covered separately).
+
+    assert pool.size() <= 2, f"pool grew to {pool.size()} despite max_size=2 -- a connection leaked"
+    assert len(pool._idle) == pool.size(), "every checked-out connection must be back in the pool, none leaked"
+
+
+def test_pool_of_size_one_completes_a_full_skill001_shaped_runs_reads():
+    """A pool bounded to size 1 must still be able to read every one of
+    SKILL-001's 8 sources within a single run/executor pass, because a
+    connection is held only per statement/read, never for the whole run."""
+    n_sources = 8
+    bindings = {f"s{i}": f"cat.sch.t{i}" for i in range(n_sources)}
+    handlers = _std_handlers(row_count=2)
+
+    def factory():
+        return FakeConnection(handlers)
+
+    pool = _UCConnectionPool(factory, max_size=1, checkout_timeout_s=5.0)
+    ds = UCTableDataSource(_settings(), bindings, pool=pool)
+
+    for name in bindings:
+        df = ds.read_population(name, version=1)
+        assert len(df) == 2
+    ds.close()
+
+
+def test_sequential_reads_across_many_sources_never_exhaust_a_small_pool():
+    """The regression this guards against: before the fix, each
+    UCTableDataSource instance held its one checked-out connection for its
+    whole lifetime, so reading N sources sequentially through instances
+    sharing a pool smaller than N eventually raised
+    UCConnectionPoolExhausted even though nothing was genuinely concurrent.
+    After the fix this never exhausts, no matter how many sources are read
+    one after another."""
+    n_sources = 8
+    bindings = {f"s{i}": f"cat.sch.t{i}" for i in range(n_sources)}
+    handlers = _std_handlers(row_count=1)
+
+    def factory():
+        return FakeConnection(handlers)
+
+    pool = _UCConnectionPool(factory, max_size=1, checkout_timeout_s=0.2)
+    ds = UCTableDataSource(_settings(), bindings, pool=pool)
+
+    for name in bindings:
+        ds.read_population(name, version=1)  # would previously exhaust a size-1 pool by the 2nd source
+
+
+def test_pool_exhaustion_still_fails_loudly_under_genuine_concurrent_pressure():
+    """Exhaustion is still a real, reachable failure mode -- just not from
+    ordinary sequential use any more. Two callers genuinely holding a read
+    open AT THE SAME TIME against a size-1 pool must still raise
+    UCConnectionPoolExhausted rather than hang or silently proceed with no
+    connection (CLAUDE.md NN14)."""
+
+    release = threading.Event()
+    entered = threading.Event()
+
+    class _BlockingCursor:
+        description = [("version",)]
+
+        def execute(self, sql_text, params=None):
+            entered.set()
+            release.wait(timeout=5)
+
+        def fetchone(self):
+            return (1,)
+
+    class _BlockingConnection:
+        def cursor(self):
+            return _BlockingCursor()
+
+        def close(self):
+            pass
+
+    pool = _UCConnectionPool(lambda: _BlockingConnection(), max_size=1, checkout_timeout_s=0.3)
+    ds = UCTableDataSource(_settings(), {"expense_report": "cat.sch.expense_report"}, pool=pool)
+
+    t = threading.Thread(target=ds.resolve_version, args=("expense_report",))
+    t.start()
+    try:
+        assert entered.wait(timeout=5), "background read never started"
+        with pytest.raises(UCConnectionPoolExhausted):
+            ds.resolve_version("expense_report")
+    finally:
+        release.set()
+        t.join(timeout=5)
 
 
 def test_uc_pool_checkout_times_out_loudly_when_exhausted():

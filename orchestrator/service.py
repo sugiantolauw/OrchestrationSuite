@@ -463,6 +463,28 @@ def _build_explorer_data_source(ctx: AppContext, state: RunState):
     )
 
 
+def _close_data_source(data_source: Any) -> None:
+    """BUG-UCPOOL-1 (independent review round 3, 2026-09-25): belt-and-braces
+    close for every data source `ctx.data_source_factory`/`UCTableDataSource(
+    ...)` builds outside a `NodeContext` (executor.py._run_one closes the
+    one attached to a run's own NodeContext). The pool fix in
+    orchestrator.adapters.datasource_uc means a connection is never held
+    across calls any more, so this is no longer load-bearing for leak
+    prevention -- but a private (no `pool=` given) UCTableDataSource still
+    OWNS the connections it opens, and closing it here is what actually
+    releases them rather than leaving them for garbage collection. `close`
+    is optional -- LocalFileDataSource has none -- and a failure here must
+    never surface as a failure of whatever real work this data source was
+    built for."""
+    close = getattr(data_source, "close", None)
+    if close is None:
+        return
+    try:
+        close()
+    except Exception:
+        _LOG.exception("data_source.close() failed")
+
+
 def _explorer_run_sources_for_materialise(options: dict) -> list[dict]:
     """`orchestrator.explorer.materialise.materialise`'s `run_sources` shape
     (`{"name", "kind", "format", "file"}`) from `options.explorer.sources`
@@ -1151,15 +1173,18 @@ def list_governed_tables(ctx: AppContext) -> list[dict]:
         return out
 
     data_source = ctx.data_source_factory({})
-    list_tables = getattr(data_source, "list_tables", None)
-    if list_tables is None:
-        from orchestrator.errors import ConfigError
+    try:
+        list_tables = getattr(data_source, "list_tables", None)
+        if list_tables is None:
+            from orchestrator.errors import ConfigError
 
-        raise ConfigError(
-            "UCTableDataSource.list_tables() is not available -- the Unity Catalog source-data "
-            "work has not landed in this checkout yet"
-        )
-    return list_tables()
+            raise ConfigError(
+                "UCTableDataSource.list_tables() is not available -- the Unity Catalog source-data "
+                "work has not landed in this checkout yet"
+            )
+        return list_tables()
+    finally:
+        _close_data_source(data_source)
 
 
 def list_data_asset_cards(ctx: AppContext, query: str = "", limit: int | None = None) -> list[dict]:
@@ -1192,26 +1217,30 @@ def list_data_asset_cards(ctx: AppContext, query: str = "", limit: int | None = 
 
     data_source = ctx.data_source_factory({}) if ctx.backend != "local" else None
 
-    cards = []
-    for t in tables:
-        card = {
-            "name": t.get("fqn") or t.get("table") or "",
-            "type": "Table",
-            "description": t.get("comment") or "",
-            "access": "Restricted" if t.get("restricted") else "Available",
-        }
-        if t.get("owner"):
-            card["owner"] = t["owner"]
-        if t.get("last_refreshed"):
-            card["last_refreshed"] = t["last_refreshed"]
-        if limit is not None and data_source is not None and not t.get("restricted") and t.get("fqn"):
-            fqn = t["fqn"]
-            card["rows"] = data_source.get_row_count(fqn)
-            classification = data_source.get_classification(fqn)
-            if classification:
-                card["classification"] = classification
-        cards.append(card)
-    return cards
+    try:
+        cards = []
+        for t in tables:
+            card = {
+                "name": t.get("fqn") or t.get("table") or "",
+                "type": "Table",
+                "description": t.get("comment") or "",
+                "access": "Restricted" if t.get("restricted") else "Available",
+            }
+            if t.get("owner"):
+                card["owner"] = t["owner"]
+            if t.get("last_refreshed"):
+                card["last_refreshed"] = t["last_refreshed"]
+            if limit is not None and data_source is not None and not t.get("restricted") and t.get("fqn"):
+                fqn = t["fqn"]
+                card["rows"] = data_source.get_row_count(fqn)
+                classification = data_source.get_classification(fqn)
+                if classification:
+                    card["classification"] = classification
+            cards.append(card)
+        return cards
+    finally:
+        if data_source is not None:
+            _close_data_source(data_source)
 
 
 def suggest_bindings(ctx: AppContext, skill_id: str) -> dict[str, str | None]:
@@ -1336,7 +1365,14 @@ def start_audit_run(
     # live measurement showed SKILL-001's 8 sources taking 13.0s resolved
     # sequentially. Still resolved before any read either way; this only
     # changes how the resolutions themselves run.
-    source_versions = data_source.resolve_source_versions(list(contract_sources))
+    try:
+        source_versions = data_source.resolve_source_versions(list(contract_sources))
+    finally:
+        # This resolve-only data source is never reused past this point
+        # (a fresh instance is built for the run's own executor pass, via
+        # NodeContext) -- closed here rather than left for GC (BUG-UCPOOL-1
+        # belt-and-braces).
+        _close_data_source(data_source)
 
     # A source bound to an uploaded file (run_setup._auto_bind's exact-
     # filename-stem match), or to a SOURCE_BINDINGS-configured Volume file
@@ -1511,9 +1547,12 @@ def _resolve_explorer_sources(
 
         uc_bindings = {e["name"]: e["ref"] for e in uc_names}
         uc_source = UCTableDataSource(ctx.settings, uc_bindings)
-        for e in uc_names:
-            table_fqn_by_name[e["name"]] = e["ref"]
-            version_by_name[e["name"]] = uc_source.resolve_version(e["name"])
+        try:
+            for e in uc_names:
+                table_fqn_by_name[e["name"]] = e["ref"]
+                version_by_name[e["name"]] = uc_source.resolve_version(e["name"])
+        finally:
+            _close_data_source(uc_source)
 
     _resolve_explorer_upload_entries(ctx, entries, table_fqn_by_name, version_by_name, uploaded_file_hashes)
 
@@ -1720,10 +1759,13 @@ def edit_explorer_plan(ctx: AppContext, run_id: str, edits: list[dict], actor: s
     data_source = _build_explorer_data_source(ctx, state)
     sources = (state.profile_result or {}).get("sources", {})
     pinned_versions = {b["source"]: b["version"] for b in state.data_assets}
-    report = validate_proposal(
-        effective, profile=sources, run_sources=sorted(sources), data_source=data_source,
-        pinned_versions=pinned_versions,
-    )
+    try:
+        report = validate_proposal(
+            effective, profile=sources, run_sources=sorted(sources), data_source=data_source,
+            pinned_versions=pinned_versions,
+        )
+    finally:
+        _close_data_source(data_source)
     included_keys = {t["key"] for t in effective.get("tests", [])}
     invalid_included = sorted(key for key in included_keys if not report["tests"].get(key, {}).get("valid"))
     if invalid_included:
@@ -2230,10 +2272,13 @@ def _confirm_explorer_plan(ctx: AppContext, run_id: str, actor: str) -> RunState
     sources = (state.profile_result or {}).get("sources", {})
     data_source = _build_explorer_data_source(ctx, state)
     pinned_versions = {b["source"]: b["version"] for b in state.data_assets}
-    report = validate_proposal(
-        effective, profile=sources, run_sources=sorted(sources), data_source=data_source,
-        pinned_versions=pinned_versions,
-    )
+    try:
+        report = validate_proposal(
+            effective, profile=sources, run_sources=sorted(sources), data_source=data_source,
+            pinned_versions=pinned_versions,
+        )
+    finally:
+        _close_data_source(data_source)
     valid_tests = [t for t in effective.get("tests", []) if report["tests"].get(t["key"], {}).get("valid")]
     if not valid_tests:
         raise ExplorerPlanNotConfirmable(f"run {run_id!r}: no included test is valid -- nothing to confirm")
@@ -2899,26 +2944,29 @@ def _get_run_frames_from_sources(ctx: AppContext, state: RunState, skill) -> dic
 
     nt_flags = not_testable_flags(skill)
 
-    frames: dict[str, pd.DataFrame] = {}
-    for source in skill.contract.get("sources", {}):
-        version = versions.get(source)
-        if version is None:
-            continue
-        df = data_source.read_population(source, version=version, audit_timezone=audit_timezone)
+    try:
+        frames: dict[str, pd.DataFrame] = {}
+        for source in skill.contract.get("sources", {}):
+            version = versions.get(source)
+            if version is None:
+                continue
+            df = data_source.read_population(source, version=version, audit_timezone=audit_timezone)
 
-        rows = by_source.get(source, [])
-        flags_present = sorted({r["flag"] for r in rows})
-        for flag in flags_present:
-            keys = {r["row_key"] for r in rows if r["flag"] == flag}
-            df[flag] = df["__row_key"].isin(keys).astype("Int64")
-        for flag in nt_flags:
-            if flag not in df.columns:
-                df[flag] = pd.array([pd.NA] * len(df), dtype="Int64")
+            rows = by_source.get(source, [])
+            flags_present = sorted({r["flag"] for r in rows})
+            for flag in flags_present:
+                keys = {r["row_key"] for r in rows if r["flag"] == flag}
+                df[flag] = df["__row_key"].isin(keys).astype("Int64")
+            for flag in nt_flags:
+                if flag not in df.columns:
+                    df[flag] = pd.array([pd.NA] * len(df), dtype="Int64")
 
-        frames[source] = df
-        FRAME_COLUMNS[source] = tuple(df.columns)
+            frames[source] = df
+            FRAME_COLUMNS[source] = tuple(df.columns)
 
-    return frames
+        return frames
+    finally:
+        _close_data_source(data_source)
 
 
 # ── Uploaded files (build brief P5) ────────────────────────────────────────

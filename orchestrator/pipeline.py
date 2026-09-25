@@ -6,7 +6,12 @@ import json
 import time
 
 from orchestrator.adapters.protocols import NullTracing
-from orchestrator.errors import FingerprintMismatch, InvalidTransition, NodeContractViolation
+from orchestrator.errors import (
+    FingerprintMismatch,
+    InvalidTransition,
+    NodeContractViolation,
+    TransientInfrastructureError,
+)
 from orchestrator.fingerprint import verify_fingerprint
 from orchestrator.state import LIFECYCLE, RunState, apply_node_output, from_json, node_owned_json
 from orchestrator.status import transition
@@ -35,6 +40,14 @@ _NODE_EVENT_STATUS: dict[str, str] = {
     "node_started": "running",
     "node_completed": "complete",
     "node_failed": "failed",
+    # BUG-FINALISE-CONCURRENCY-1: no distinct Trace-page style exists for
+    # "interrupted" (reference_app/src/platform/components.py's
+    # _TRACE_STATUS_STYLE, which this build never restyles without asking
+    # the user first) -- it falls through to that lookup's own "pending"
+    # default, the SAME rendering the reaper's existing run_interrupted
+    # events already get. Listed here anyway so the mapping states its
+    # intent rather than relying on the fallback silently.
+    "node_interrupted": "interrupted",
 }
 
 
@@ -315,21 +328,39 @@ def run_phase(
             except Exception as exc:
                 duration = time.monotonic() - started_at
                 now_fail = clock()
+                # BUG-FINALISE-CONCURRENCY-1 (independent review round 3,
+                # 2026-09-25): a TransientInfrastructureError is a failure
+                # the persistence/data-source layer already retried and
+                # still could not recover -- a Delta concurrency conflict,
+                # a lost connection, an unreachable warehouse, a pool
+                # checkout timeout. Retrying THIS node again later is
+                # exactly the right response, so the run is marked
+                # `interrupted` (resumable via the existing Resume action,
+                # CLAUDE.md §2.3 rule 2) rather than `failed` (terminal, no
+                # outbound transition -- orchestrator/status.py). A
+                # deterministic failure (ContractViolation, a validation
+                # error, NodeContractViolation, a code bug) would fail again
+                # identically on retry, so it stays `failed`.
+                transient = isinstance(exc, TransientInfrastructureError)
+                outcome = "interrupted" if transient else "failed"
+                event_type = "node_interrupted" if transient else "node_failed"
+                to_status = "interrupted" if transient else "failed"
+                verb = "interrupted" if transient else "failed"
                 persistence.complete_node_attempt(
-                    attempt["execution_key"], outcome="failed", now=now_fail, error_detail=repr(exc)
+                    attempt["execution_key"], outcome=outcome, now=now_fail, error_detail=repr(exc)
                 )
                 _end_node_span(
-                    tracing, span_id, outcome="failed",
+                    tracing, span_id, outcome=outcome,
                     attributes={"attempt_number": attempt.get("attempt_number"), "duration_s": duration, "error": repr(exc)},
                 )
-                failed_state = transition(state, "failed", now=now_fail, reason=f"node {node_name!r} failed: {exc!r}")
-                failed_state = dataclasses.replace(failed_state, current_node_attempt_id=attempt["attempt_id"])
-                state = persistence.save_state(failed_state)
+                new_run_state = transition(state, to_status, now=now_fail, reason=f"node {node_name!r} {verb}: {exc!r}")
+                new_run_state = dataclasses.replace(new_run_state, current_node_attempt_id=attempt["attempt_id"])
+                state = persistence.save_state(new_run_state)
                 _emit_node_event(
-                    persistence, state, attempt, event_type="node_failed",
-                    message=f"{node_name} failed: {exc!r}", now=now_fail, duration_s=duration,
+                    persistence, state, attempt, event_type=event_type,
+                    message=f"{node_name} {verb}: {exc!r}", now=now_fail, duration_s=duration,
                 )
-                _end_pipeline_trace(tracing, run_id, status="FAILED")
+                _end_pipeline_trace(tracing, run_id, status="KILLED" if transient else "FAILED")
                 return state
 
             duration = time.monotonic() - started_at
