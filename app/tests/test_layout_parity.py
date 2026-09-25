@@ -56,6 +56,35 @@ def _app_tree(component) -> str:
     return render(shape(component))
 
 
+# Allow-list: D2 (docs/specs/P6_P8_explorer_llm_design.md §12) -- exactly
+# the three Explorer buttons that gain a hidden `id=` (no visible change:
+# tree.py's shape() ignores style entirely, and these ids add no new
+# element, text or className) so Dash callbacks can bind to them. Each
+# entry is asserted present exactly once in the prototype's own reference
+# tree before being rewritten to the app's real id, so a future reshuffle
+# of the prototype page that moves or duplicates one of these lines makes
+# this fail loudly rather than silently stop checking.
+_D2_HIDDEN_IDS = [
+    ("Button id=None class='btn-generate'", "Button id='explorer-start-btn' class='btn-generate'"),
+    ("Button id=None class='ghost'", "Button id='explorer-save-draft-btn' class='ghost'"),
+]
+
+_D2_LIBRARY_HIDDEN_ID = (
+    "Button id=None class='ghost'", "Button id='start-explorer-from-library-btn' class='ghost'",
+)
+
+
+def _apply_allow_list(reference: str, substitutions: list[tuple[str, str]]) -> str:
+    for old, new in substitutions:
+        count = reference.count(old)
+        assert count == 1, (
+            f"expected exactly one {old!r} in the reference tree (found {count}) -- "
+            f"update this allow-list rather than silently mismatching"
+        )
+        reference = reference.replace(old, new, 1)
+    return reference
+
+
 def test_landing_page_matches_prototype(monkeypatch, reference_fixtures):
     from src.platform import adapters
     from src.run_setup import home_layout
@@ -76,7 +105,8 @@ def test_landing_page_matches_prototype(monkeypatch, reference_fixtures):
     # tests/test_portability.py NN16) be the prototype's own hardcoded path.
     monkeypatch.setattr(adapters, "get_upload_base_path", lambda: "/Volumes/placeholder/uploads")
 
-    assert _app_tree(home_layout()) == _reference_tree("landing")
+    reference = _apply_allow_list(_reference_tree("landing"), _D2_HIDDEN_IDS)
+    assert _app_tree(home_layout()) == reference
 
 
 def test_skill_library_page_matches_prototype(monkeypatch, reference_fixtures):
@@ -86,7 +116,8 @@ def test_skill_library_page_matches_prototype(monkeypatch, reference_fixtures):
     monkeypatch.setattr(adapters, "list_skills", lambda filters=None: reference_fixtures["DEMO_SKILLS"])
     monkeypatch.setattr(adapters, "is_demo_mode", lambda: True)
 
-    assert _app_tree(skill_library_page()) == _reference_tree("skills")
+    reference = _apply_allow_list(_reference_tree("skills"), [_D2_LIBRARY_HIDDEN_ID])
+    assert _app_tree(skill_library_page()) == reference
 
 
 def test_audit_runs_page_matches_prototype(monkeypatch, reference_fixtures):

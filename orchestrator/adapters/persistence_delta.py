@@ -999,6 +999,20 @@ class DeltaPersistence:
             rows = _fetchall_dicts(cur)
         return [_skill_version_dict_from_row(r) for r in rows]
 
+    def list_skill_versions_by_origin(self, origin: str) -> list[dict]:
+        with self._cursor_ctx() as conn:
+            cur = self._execute(
+                conn, f"SELECT * FROM {self._table('skill_versions')} ORDER BY skill_id, created_at"
+            )
+            rows = _fetchall_dicts(cur)
+        latest_by_skill: dict[str, dict] = {}
+        for r in rows:
+            d = _skill_version_dict_from_row(r)
+            if d["content"].get("origin") != origin:
+                continue
+            latest_by_skill[d["skill_id"]] = d  # ordered by created_at asc -- last write wins
+        return list(latest_by_skill.values())
+
     # ── risk / control register (P2) ─────────────────────────────────────────
 
     def upsert_risks(self, risks: list[dict], *, now: str) -> None:
