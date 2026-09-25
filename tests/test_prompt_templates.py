@@ -439,19 +439,24 @@ _GOLDEN_PAYLOADS: dict[str, dict] = {
 # section) -- a deliberate template edit changes these, and the diff makes
 # that visible rather than silent (§12 T-PT: "golden prompt_sha256 per task").
 _GOLDEN_PROMPT_SHA256: dict[str, str] = {
-    "profile": "69a093a88ada84a5c2244a06701698ea8b154e3dba38012d2203f0bac32ca3da",
-    "find": "74ce514d5e7a2c21438c1e7d58d873aa7f16f55311da53c2cdf8409ecbf3f536",
+    # Updated 2026-09-25 (independent narration-content review, task item 1/2/3): every task's
+    # digest changed because system_common.md's rule 1 (use each placeholder only in its stated
+    # "meaning") and rule 4 (no unhedged causal connective without a same-sentence hedge word) are
+    # shared by every prompt; exec_summary_user.md (lead with the most systemic finding, explain
+    # the exposure basis) and captions_user.md (go beyond the headline) changed on top of that.
+    "profile": "1cf9f83524a8f4a5f5d64a38c1351f2cf35bb1d095a95fd776ec2f3ddbfb6fa0",
+    "find": "1a47038e1e9351f870152edaf1ec3b398f8bb277aeb9d431e6566d53b67c39e3",
     # Updated 2026-09-25 (quality review, category (c) prompt fix): synthesis_user.md's
     # IDENTIFIERS line now spells out that a test_id must be copied in full including any
     # suffix, and that a finding's `key` is never a valid identifier -- see
     # tests/test_narration_validate_quality_regression.py for the real-data regression this
     # closes (a bare "T6.1d" used instead of the run's actual "T6.1d_dom").
-    "find_synthesis": "2234f45cc967cb3c2c58d311b895412ba48b9b4804aaac02deae6c7f7bfed98b",
-    "find_candidates": "fd0c9c52b79eb138d98bcf25b5892f4d3eae15f1065cacd995a76e5bbb9c84ea",
-    "prioritise": "328d869d1804fb1e4224150318f97a4c4472e3cb9fe0076d8dffe218248b6fce",
-    "act": "e03ad52c8d57fcc357de8ff803f4b631b8da3e047705d3d96137aea9812e4589",
-    "export_summary": "06c7450a34278ad46de168f8f33d0941b266d4bb30c31fc3f5b708543a931034",
-    "export_caption": "b28ef06e79b429aac58720cc9d6358bd3b0d76f50f53f7d2ae50480c88771643",
+    "find_synthesis": "d970df4c030dea09f9b18a15f5f1b9ded67b752155ab90c5cf71777063d21670",
+    "find_candidates": "8f3a5d7fd6677e52e08f01dccc9612ecbdb380caa5f6ff477de0a609ae666ab7",
+    "prioritise": "7285b8504f492a7e9761ba12577ac5d9662b130fd78d8c6d1229cce437ca3218",
+    "act": "d107386ecaefbcdc670530019bfde4b7a6872497a1d79d35a11bdff4e0029157",
+    "export_summary": "a28ea3ec616cb3d2fe2b19a1cc06f9118cc4ba3d38e8a837f633570e9e918c2f",
+    "export_caption": "2daab21292416c8a9c919876ce622ed59e1415568202ad5e059e8db019123698",
 }
 
 

@@ -671,9 +671,11 @@ def narrate_remediation(rc: RunnerContext, items: list[dict], *, skill, period: 
 
 def narrate_exec_summary(
     rc: RunnerContext, state, findings: list[dict], metrics: dict[str, dict], *,
-    catalogue_tests: list[dict], themes: list[dict] = (),
+    catalogue_tests: list[dict], themes: list[dict] = (), skill=None,
 ) -> str | None:
-    built = build_exec_summary_payload(state, findings, metrics, catalogue_tests=catalogue_tests, themes=themes)
+    built = build_exec_summary_payload(
+        state, findings, metrics, catalogue_tests=catalogue_tests, themes=themes, skill=skill,
+    )
     if built is None:  # G10: zero rule findings -- no call, the deterministic clean-run text is used at export
         return None
     payload, table = built

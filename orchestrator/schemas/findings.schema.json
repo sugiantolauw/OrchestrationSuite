@@ -1,6 +1,10 @@
 {
   "type": "object",
   "properties": {
+    "metric_descriptions": {
+      "type": "object",
+      "additionalProperties": {"type": "string"}
+    },
     "findings": {
       "type": "array",
       "items": {

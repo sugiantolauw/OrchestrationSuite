@@ -44,6 +44,7 @@ that fallback by omission any more."""
 from __future__ import annotations
 
 from orchestrator.catalogue_counts import catalogue_test_counts
+from orchestrator.exposure import dominant_exposure_finding
 from orchestrator.narration.placeholders import PlaceholderEntry
 
 __all__ = ["run_values"]
@@ -69,6 +70,70 @@ def _money_passthrough_entry(name: str, metrics: dict[str, dict], meaning: str) 
 
 def _date_entry(name: str, value: str | None, meaning: str) -> PlaceholderEntry:
     return PlaceholderEntry(name=name, unit="date", value=value, source_field="RunState.audit_period", meaning=meaning)
+
+
+_BASIS_MEANING = {
+    "spend": "'spend': the full amount is spend under review, not a confirmed loss",
+    "excess": "'excess': only the portion over a threshold is at risk, not the whole transaction",
+}
+
+
+def _dominant_exposure_entries(
+    findings: list[dict], headline_row: dict | None,
+) -> dict[str, PlaceholderEntry]:
+    """Independent narration-content review 2026-09-25: neither the exec
+    summary nor the 'risk_and_exposure' chart caption previously had any way
+    to say WHAT drives the amount-at-risk headline -- only the total itself
+    was in either one's table, so a model asked to explain the figure had
+    nothing to explain it with beyond restating it. `orchestrator.exposure.
+    dominant_exposure_finding` picks the single largest headline-eligible
+    contributor; this turns that finding into placeholder entries so a
+    model may name it, its own amount, whether that amount is 'spend' under
+    review or an 'excess' over a threshold (never a confirmed loss either
+    way -- CLAUDE.md non-negotiable 2's ban on unhedged causal language), and
+    its share of the headline. Returns {} when there is no dominant finding
+    (a clean run, or every finding's basis is 'approved_not_spent'/'none') --
+    the same "omit rather than fabricate" rule every other entry here
+    follows (§3.2: "Rows whose value is None are omitted")."""
+    dominant = dominant_exposure_finding(findings)
+    if dominant is None:
+        return {}
+    finding_id = dominant.get("finding_id") or dominant.get("rule_id") or "?"
+    amount = dominant["exposure_amount"]
+    basis = dominant.get("monetary_basis")
+    entries: dict[str, PlaceholderEntry] = {
+        "run_exposure_dominant_test_id": PlaceholderEntry(
+            name="run_exposure_dominant_test_id", unit="value", value=dominant.get("test_id"),
+            source_field=f"findings[{finding_id}].test_id",
+            meaning="the test id of the single finding contributing the most to the amount-at-risk headline",
+        ),
+        "run_exposure_dominant_title": PlaceholderEntry(
+            name="run_exposure_dominant_title", unit="value", value=dominant.get("title"),
+            source_field=f"findings[{finding_id}].title",
+            meaning="the title of the single finding contributing the most to the amount-at-risk headline",
+        ),
+        "run_exposure_dominant_amount": PlaceholderEntry(
+            name="run_exposure_dominant_amount", unit="AUD", value=amount,
+            source_field=f"findings[{finding_id}].exposure_amount",
+            meaning=(
+                "that finding's own amount at risk, the largest of any headline-eligible finding "
+                f"this run; {_BASIS_MEANING.get(basis, 'basis not recorded')}"
+            ),
+        ),
+        "run_exposure_dominant_basis": PlaceholderEntry(
+            name="run_exposure_dominant_basis", unit="value", value=basis,
+            source_field=f"findings[{finding_id}].monetary_basis",
+            meaning=_BASIS_MEANING.get(basis, "this finding's monetary basis"),
+        ),
+    }
+    headline_value = headline_row.get("value") if headline_row else None
+    if headline_value:
+        entries["run_exposure_dominant_pct"] = PlaceholderEntry(
+            name="run_exposure_dominant_pct", unit="%", value=round((amount / headline_value) * 100, 1),
+            source_field="computed:run_exposure_dominant_pct",
+            meaning="that finding's own amount at risk as a share of the run's headline",
+        )
+    return entries
 
 
 def run_values(
@@ -108,7 +173,7 @@ def run_values(
     audit_period = getattr(state, "audit_period", None)
     period_start, period_end = tuple(audit_period) if audit_period else (None, None)
 
-    return {
+    table = {
         "run_finding_count": _count_entry(
             "run_finding_count", len(findings),
             "count of this run's findings (rule findings, plus at export every accepted "
@@ -156,3 +221,5 @@ def run_values(
             "run_audit_period_end", period_end, "the audit period's end date",
         ),
     }
+    table.update(_dominant_exposure_entries(findings, metrics.get("run_exposure_headline")))
+    return table

@@ -2534,7 +2534,6 @@ def _narrative_table(ctx: AppContext, state: RunState, row: dict) -> dict:
     rendering of a metric the item cites) validates an edit against."""
     from orchestrator.catalogue_counts import catalogue_tests_for_skill
     from orchestrator.narration.payloads import build_finding_table, build_profile_payload, build_theme_table
-    from orchestrator.narration.run_values import run_values
 
     target_kind = row["target_kind"]
     target_id = row["target_id"]
@@ -2567,15 +2566,18 @@ def _narrative_table(ctx: AppContext, state: RunState, row: dict) -> dict:
         skill = resolve_run_skill(ctx, state)
         return build_theme_table(members, skill=skill)
     if target_kind == "run":
+        from orchestrator.narration.payloads import build_run_table
+
         findings = ctx.persistence.list_findings(state.run_id)
         metrics = ctx.persistence.get_run_metrics(state.run_id)
         skill = resolve_run_skill(ctx, state)
         # skill is None only for an unconfirmed Explorer run (resolve_run_skill's
         # own docstring) -- no plan-grain result exists to count either way yet,
         # so [] (run_values' own explicit-empty fallback) is correct here, not a
-        # forgotten argument.
+        # forgotten argument. `build_run_table` itself skips the per-finding
+        # merge when skill is None (its own docstring).
         catalogue_tests = catalogue_tests_for_skill(skill) if skill is not None else []
-        return run_values(state, findings, metrics, catalogue_tests=catalogue_tests)
+        return build_run_table(state, findings, metrics, skill=skill, catalogue_tests=catalogue_tests)
     if target_kind == "profile":
         _, table = build_profile_payload(state)
         return table

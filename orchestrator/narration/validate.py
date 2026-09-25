@@ -31,10 +31,12 @@ from orchestrator.narration.lexicon import (
     OBSERVATION_TYPE_FIELDS,
     RATIONALE_FIELD,
     TITLE_FIELDS,
+    find_causal_connectives,
     find_causation_language,
     find_code_like_text,
     find_count_noun_after,
     find_currency_symbols,
+    find_hedge_markers,
     find_number_words,
     find_ordinal_words,
     find_percent_words,
@@ -497,6 +499,37 @@ def validate_prose(
                 hit.end,
             )
         )
+
+    # G12-lite / N-S4 (independent narration-content review 2026-09-25; see
+    # `lexicon.find_causal_connectives`'s own docstring): a causal
+    # connective ("result(s/ed) in", "thereby", "caused"/"causes",
+    # "lead(s)/led to") asserts a definite cause-and-effect UNLESS a hedge
+    # marker ("may", "could", "potential(ly)", "risk of", "indicates a risk
+    # of", ...) appears anywhere in the SAME sentence -- checked per
+    # sentence, not per whole field, so a hedge earlier in a long paragraph
+    # cannot license an unhedged claim several sentences later, and a hedge
+    # later in the same sentence still licenses an earlier connective
+    # ("Duplicate claims may result in ... loss" and "result in ... loss,
+    # which may indicate ..." both pass; a bare "result in ... loss" with no
+    # hedge anywhere in that sentence does not). Runs on `stripped` (already
+    # placeholder-free, like N-S1/N-S2 above) -- no rendering is needed
+    # since every word involved is literal, never a placeholder's value.
+    for sentence in SENTENCE_SPLIT_RE.split(stripped):
+        connective_hits = find_causal_connectives(sentence)
+        if not connective_hits:
+            continue
+        if find_hedge_markers(sentence):
+            continue
+        for hit in connective_hits:
+            violations.append(
+                Violation(
+                    "N-S4",
+                    f"{hit.text!r} asserts a definite cause or result with no hedge word (\"may\", "
+                    "\"could\", \"potential\", \"risk of\") anywhere in the same sentence; a cause "
+                    "is a hypothesis, never a fact",
+                    hit.text,
+                )
+            )
 
     for hit in find_code_like_text(text):
         violations.append(

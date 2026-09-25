@@ -53,6 +53,7 @@ __all__ = [
     "build_candidates_payload",
     "build_priority_payload",
     "build_remediation_payload",
+    "build_run_table",
     "build_exec_summary_payload",
     "build_caption_payload",
     "build_profile_payload",
@@ -145,13 +146,31 @@ def finding_key(item: dict) -> str:
 # priority rationale, remediation and synthesis's theme validation) ────────
 
 
-def _metric_entry(name: str, metric: dict, *, test_id: str | None, test_name: str | None, source_field: str) -> PlaceholderEntry | None:
+def _metric_entry(
+    name: str, metric: dict, *, test_id: str | None, test_name: str | None, source_field: str,
+    description: str | None = None,
+) -> PlaceholderEntry | None:
+    """`description` (independent narration-content review 2026-09-25, task
+    item 1): the Skill's own `findings.yaml` `metric_descriptions[name]`, a
+    one-line plain-English definition an auditor wrote from the test
+    specification -- when present, this REPLACES the generic
+    "<class> metric of test ..." wording (which only ever restated the
+    metric's own NAME, never its meaning -- the exact gap the live workpaper
+    review found: T6.1a's `approver_instant_pct` prose used the metric as if
+    it meant something circular, because nothing told the model, or a
+    reader, what the number actually counts) while still keeping the class
+    and unit and the source_ref label, so a model is never left without unit
+    information. Absent (no Skill definition for this metric): the old
+    behaviour, unchanged."""
     value = metric.get("value")
     unit = metric.get("unit")
     if value is None:
         return None
     cls = class_for_unit(unit)
-    meaning = f"{cls} metric of test {test_id} ({test_name}), unit {unit}"
+    if description:
+        meaning = f"{description} ({cls}, unit {unit})"
+    else:
+        meaning = f"{cls} metric of test {test_id} ({test_name}), unit {unit}"
     label = (metric.get("source_ref") or {}).get("label")
     if label:
         meaning = f"{meaning}; {label}"
@@ -169,11 +188,13 @@ def build_finding_table(finding: dict, *, skill, period: tuple[str, str] | None 
     test_id = finding.get("test_id")
     test_name = _catalogue_row(skill, test_id).get("test_name")
 
+    metric_descriptions = getattr(skill, "metric_descriptions", None) or {}
     table: dict[str, PlaceholderEntry] = {}
     for name, metric in (finding.get("metrics_cited") or {}).items():
         entry = _metric_entry(
             name, metric, test_id=test_id, test_name=test_name,
             source_field=f"findings[{finding_id}].metrics_cited.{name}",
+            description=metric_descriptions.get(name),
         )
         if entry is not None:
             table[name] = entry
@@ -340,13 +361,14 @@ def build_candidates_payload(
         metrics_spec = (test.get("params") or {}).get("metrics") or {}
         table: dict[str, PlaceholderEntry] = {}
         metric_items = []
+        metric_descriptions = getattr(skill, "metric_descriptions", None) or {}
         for name, spec in metrics_spec.items():
             row = metrics.get(name)
             if row is None:
                 continue
             entry = _metric_entry(
                 name, row, test_id=test_id, test_name=catalogue_row.get("test_name"),
-                source_field=f"run_metrics.{name}",
+                source_field=f"run_metrics.{name}", description=metric_descriptions.get(name),
             )
             if entry is None:
                 continue
@@ -429,19 +451,75 @@ def build_remediation_payload(items: list[dict], *, skill, period: tuple[str, st
 # same way `build_candidates_payload` signals a skip) ──────────────────────
 
 
+def _top_findings_by_severity(findings: list[dict], limit: int = 5) -> list[dict]:
+    """This run's findings, most severe first, ties broken by the larger
+    `exposure_amount` (independent narration-content review 2026-09-25: a
+    tie on severity alone left the ordering to whatever order `findings`
+    happened to already be in, which is not necessarily "the biggest story
+    first" the exec summary is meant to lead with)."""
+    return sorted(
+        findings,
+        key=lambda f: (_SEVERITY_ORDER.get(f.get("severity"), 3), -(f.get("exposure_amount") or 0)),
+    )[:limit]
+
+
+def build_run_table(
+    state, findings: list[dict], metrics: dict[str, dict], *, skill, catalogue_tests: list[dict],
+) -> dict[str, PlaceholderEntry]:
+    """The 'run' target's placeholder table (§3.2's exec-summary row):
+    `run_values()` plus, for each of the top-severity findings, that
+    finding's own cited-metric and threshold placeholders -- so the exec
+    summary may name a SPECIFIC finding's own number (for example the share
+    of reports approved without receipt review) rather than only run-wide
+    counts (independent narration-content review 2026-09-25, "lead with the
+    most systemic result"). `exposure_amount` is deliberately dropped from
+    each merged per-finding table before merging: it is the SAME placeholder
+    NAME on every finding (each finding's own total, not a name unique to
+    one finding, unlike its `metrics_cited`) -- merging it here would let a
+    later finding's value silently overwrite an earlier one's under one
+    shared name. `run_exposure_dominant_amount` (`run_values`) is the
+    unambiguous run-level equivalent for "the single biggest contributor".
+
+    Shared by `build_exec_summary_payload` (generation) and
+    `orchestrator.service._narrative_table`'s "run" case (human-edit
+    re-validation) so the two can never drift -- the exact drift this
+    module's own 'chart' case (BUG-4b, same file) was written to prevent.
+    `skill=None` (an unconfirmed Explorer run, per that function's own
+    docstring) skips the per-finding merge entirely and returns exactly
+    `run_values()`'s own table, since `build_finding_table` needs a Skill's
+    catalogue to resolve a test's name."""
+    from orchestrator.narration.run_values import run_values
+
+    table = dict(run_values(state, findings, metrics, catalogue_tests=catalogue_tests))
+    if skill is not None:
+        for finding in _top_findings_by_severity(findings):
+            finding_table = build_finding_table(finding, skill=skill)
+            finding_table.pop("exposure_amount", None)
+            for name, entry in finding_table.items():
+                table.setdefault(name, entry)
+    return table
+
+
 def build_exec_summary_payload(
-    state, findings: list[dict], metrics: dict[str, dict], *, catalogue_tests: list[dict], themes: list[dict] = (),
+    state, findings: list[dict], metrics: dict[str, dict], *,
+    catalogue_tests: list[dict], themes: list[dict] = (), skill=None,
 ) -> tuple[dict, dict[str, PlaceholderEntry]] | None:
     if not findings:
         return None
-    from orchestrator.narration.run_values import run_values
-
-    table = run_values(state, findings, metrics, catalogue_tests=catalogue_tests)
-    top5 = sorted(findings, key=lambda f: _SEVERITY_ORDER.get(f.get("severity"), 3))[:5]
+    table = build_run_table(state, findings, metrics, skill=skill, catalogue_tests=catalogue_tests)
+    top5 = _top_findings_by_severity(findings)
+    top_findings_payload = []
+    for f in top5:
+        item = {"title": f.get("title"), "severity": f.get("severity")}
+        if skill is not None:
+            finding_table = build_finding_table(f, skill=skill)
+            finding_table.pop("exposure_amount", None)
+            item["placeholders"] = _serialise_table(finding_table)
+        top_findings_payload.append(item)
     payload = {
         "placeholders": _serialise_table(table),
         "theme_titles": [t.get("title") for t in themes],
-        "top_findings": [{"title": f.get("title"), "severity": f.get("severity")} for f in top5],
+        "top_findings": top_findings_payload,
     }
     return payload, table
 

@@ -24,6 +24,8 @@ __all__ = [
     "find_universal_quantifiers",
     "find_causation_language",
     "find_policy_assertions",
+    "find_causal_connectives",
+    "find_hedge_markers",
     "find_code_like_text",
     "find_count_noun_after",
     "find_currency_symbols",
@@ -188,18 +190,65 @@ def find_universal_quantifiers(text: str) -> list[LexiconHit]:
 
 
 # --------------------------------------------------------------------------
-# §3.4 N-S1: intent/causation language.
+# §3.4 N-S1: intent/causation language. Independent narration-content review
+# 2026-09-25 (live example: T6.1d's "could suggest bulk personal purchases")
+# added "personal purchase(s)" here, in the blanket, NO-hedge-exception list,
+# not the hedge-aware N-S4 connectives below: attributing a specific
+# transaction to the claimant's PERSONAL (non-business) use is a judgment
+# about that person's conduct, the same category as "fraud"/"intentional" --
+# softening it with "could suggest" does not make it an appropriate thing for
+# a model to write into a workpaper. Contrast "elevated risk of misuse", a
+# standard, hedged audit-risk phrase this codebase's own live output also
+# produced (T4.4) and which is correctly NOT banned here -- see N-S4 instead
+# for the "X results in/caused Y" shape that phrase does not use.
 # --------------------------------------------------------------------------
 _CAUSATION_RE = re.compile(
     r"\b(fraud\w*|deliberate\w*|intentional\w*|on purpose|circumvent\w*"
     r"|evad\w*|evasion|conceal\w*|misconduct|dishonest\w*|theft|steal\w*"
-    r"|abuse\w*|collu\w*|manipulat\w*)\b",
+    r"|abuse\w*|collu\w*|manipulat\w*|personal purchases?)\b",
     re.IGNORECASE,
 )
 
 
 def find_causation_language(text: str) -> list[LexiconHit]:
     return _find_all(_CAUSATION_RE, text)
+
+
+# --------------------------------------------------------------------------
+# G12-lite / N-S4 (independent narration-content review 2026-09-25, live
+# examples: T5.2 "Duplicate claims result in ... direct financial loss" and
+# T3.2a "... thereby increasing travel costs"): a causal CONNECTIVE asserting
+# that one thing in this run's data definitely produced another is banned
+# UNLESS the same sentence also carries a hedge marker (§3.4's own
+# CLAUDE.md-quoted rule: "A cause is a hypothesis, never a fact"). Unlike
+# N-S1 above, this rule is hedge-AWARE by design: "may result in a loss" and
+# "could indicate a risk of increased travel costs" are legitimate audit
+# prose this must not flag, so the connective and the hedge marker are two
+# separate finders -- `validate.py` decides, per sentence, whether a
+# connective hit is accompanied by a hedge marker anywhere in that same
+# sentence (mirroring how N-Q2's universal-quantifier check already works
+# per-sentence against a rendered percentage) before raising N-S4. This is
+# deliberately narrower than banning "cause" outright: "root cause
+# hypothesis" is this system's OWN required synthesis vocabulary (§4.6,
+# synthesis_user.md) and must never trip this rule -- only the verb forms
+# "caused"/"causes" do, never the bare noun "cause".
+# --------------------------------------------------------------------------
+_CAUSAL_CONNECTIVE_RE = re.compile(
+    r"\b(result(?:s|ed)?\s+in|thereby|caused|causes|leads?\s+to|led\s+to)\b",
+    re.IGNORECASE,
+)
+_HEDGE_MARKER_RE = re.compile(
+    r"\b(may|might|could|possibly|potential(?:ly)?|risk\s+of|indicat\w*\s+a\s+risk\s+of)\b",
+    re.IGNORECASE,
+)
+
+
+def find_causal_connectives(text: str) -> list[LexiconHit]:
+    return _find_all(_CAUSAL_CONNECTIVE_RE, text)
+
+
+def find_hedge_markers(text: str) -> list[LexiconHit]:
+    return _find_all(_HEDGE_MARKER_RE, text)
 
 
 # --------------------------------------------------------------------------

@@ -115,6 +115,19 @@ class Skill:
     content_hash: str | None = None
 
     @property
+    def metric_descriptions(self) -> dict[str, str]:
+        """Independent narration-content review 2026-09-25: `findings.yaml`'s
+        OPTIONAL `metric_descriptions` block -- `{metric_name: one-line
+        plain-English definition}`, written from the audit-approved test
+        specification (never invented), never required. A Playbook Skill
+        supplies these directly in its `findings.yaml`; an Explorer-authored
+        Skill's planner MAY supply them the same way -- absent, a metric
+        falls back to its bare name (the payload builders' existing
+        behaviour, unchanged). `orchestrator.narration.payloads._metric_entry`
+        is the one place this is read."""
+        return self.findings.get("metric_descriptions") or {}
+
+    @property
     def skill_id(self) -> str:
         return self.manifest["id"]
 
