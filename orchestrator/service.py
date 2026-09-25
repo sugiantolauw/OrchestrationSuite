@@ -335,21 +335,56 @@ def _infer_source_format(ref: str) -> str:
     return fmt
 
 
-def _explorer_inputs_hash(reference_skill_ids: list[str]) -> str:
+def _default_reference_skill_ids(ctx: AppContext) -> list[str]:
+    """CLAUDE.md §4.5 / docs/specs/P6_P8_explorer_llm_design.md §4.4: the 1-2
+    reference Skills the Explorer planner sees as worked examples of how a
+    test, its finding rules, its metric names and its threshold references
+    are actually written. Independent review round 2 (BUG-EXPLORER-2): every
+    real planner/repair call in this workspace passed none (`start_explorer_
+    run`'s `reference_skill_ids` parameter was never resolved from anywhere
+    when a caller left it unset), and the model's own metric names,
+    trigger/severity expressions and template placeholders -- none of which
+    have a schema-level format signal, only a worked example teaches them --
+    were consistently wrong in the same ways a worked example would have
+    shown correctly. `Settings.explorer_reference_skill_ids` is an explicit
+    override when set (config.py's own docstring for that field); otherwise
+    the first two valid (successfully `load_skill()`-able) repo Skill ids,
+    sorted -- an invalid repo Skill directory is simply not offered, never a
+    reason to fail run creation."""
+    override = getattr(ctx.settings, "explorer_reference_skill_ids", None)
+    if override:
+        return list(override)
+    ids: list[str] = []
+    for d in sorted(Path(ctx.skills_dir).iterdir()):
+        if not d.is_dir():
+            continue
+        try:
+            ids.append(load_skill(d).skill_id)
+        except Exception:  # noqa: BLE001 -- an invalid repo Skill directory is simply not offered
+            continue
+    return sorted(ids)[:2]
+
+
+def _explorer_inputs_hash(ctx: AppContext, reference_skill_ids: list[str]) -> str:
     """docs/specs/P6_P8_explorer_llm_design.md §4.2: the Explorer run
     fingerprint's skill_content_hash override -- there is no Skill on disk
     yet (skill_dir=None), so this hashes exactly what the plan node's own
-    proposal depends on: the wire schema and the validator's rule version
-    (WHICH reference Skills to pass is a later work package, per
-    orchestrator.explorer.payload's own docstring -- this step always
-    passes none, so reference_skills is always {}). Recomputed identically
-    by build_run_fingerprint on every executor pass and at resume (CLAUDE.md
-    §4.1), so it never drifts from what start_explorer_run pinned."""
+    proposal depends on: the wire schema, the validator's rule version, and
+    (BUG-EXPLORER-2 fix) each reference Skill's OWN content_hash, keyed by
+    id -- `{"reference_skills": {id: content_hash}}`, the shape this design
+    doc's §4.2 documents. Recomputed identically by build_run_fingerprint on
+    every executor pass and at resume (CLAUDE.md §4.1), so it never drifts
+    from what start_explorer_run pinned unless a reference Skill's own repo
+    directory genuinely changed underneath it -- the same kind of drift a
+    Playbook run's fingerprint already surfaces for its own Skill."""
     from orchestrator.explorer.validate import EXPLORER_VALIDATOR_VERSION
     from orchestrator.explorer.wire_schema import WIRE_SCHEMA_SHA256
 
+    reference_skills = {
+        skill_id: load_skill_by_id(ctx, skill_id).content_hash for skill_id in sorted(reference_skill_ids)
+    }
     payload = {
-        "reference_skills": {}, "wire_schema_sha256": WIRE_SCHEMA_SHA256,
+        "reference_skills": reference_skills, "wire_schema_sha256": WIRE_SCHEMA_SHA256,
         "validator_rules_version": EXPLORER_VALIDATOR_VERSION,
     }
     return "explorer-inputs:" + hashlib.sha256(
@@ -547,8 +582,16 @@ def build_node_context(ctx: AppContext, state: RunState) -> NodeContext:
     # FilePromptRepository pair; Playbook's execute-phase nodes (unchanged
     # by this step) ignore both regardless of whether they are set.
     llm = prompts = None
+    explorer_reference_skills: list[Skill] = []
     if state.mode == "explorer":
         llm, prompts = _build_explorer_llm(ctx)
+        # BUG-EXPLORER-2: load this RUN's own pinned reference_skill_ids
+        # (resolved once at start_explorer_run, §4.5) as real Skill objects
+        # for the plan node's prompt -- never re-resolved from Settings
+        # here, so a later config change never changes what an in-flight
+        # run's own planner call sees.
+        ref_ids = ((state.options or {}).get("explorer") or {}).get("reference_skill_ids") or []
+        explorer_reference_skills = [load_skill_by_id(ctx, skill_id) for skill_id in ref_ids]
 
     return NodeContext(
         settings=ctx.settings,
@@ -561,6 +604,7 @@ def build_node_context(ctx: AppContext, state: RunState) -> NodeContext:
         model_client=ctx.model_client,
         llm=llm,
         prompts=prompts,
+        explorer_reference_skills=explorer_reference_skills,
     )
 
 
@@ -599,7 +643,7 @@ def _build_explorer_run_fingerprint(ctx: AppContext, state: RunState) -> dict:
         requirements_path=REPO_ROOT / "requirements.txt",
         prompts_dirs=[REPO_ROOT / "orchestrator" / "prompts" / "explorer"],
         reference_files=[], code_revision=None,
-        skill_content_hash=_explorer_inputs_hash(options.get("reference_skill_ids", [])),
+        skill_content_hash=_explorer_inputs_hash(ctx, options.get("reference_skill_ids", [])),
     )
 
 
@@ -1398,13 +1442,22 @@ def start_explorer_run(
     entries = _explorer_source_entries(sources)
     table_fqn_by_name, version_by_name, uploaded_file_hashes = _resolve_explorer_sources(ctx, entries)
 
+    # BUG-EXPLORER-2 (independent review round 2): a caller that leaves
+    # reference_skill_ids unset gets the config-driven default (§4.5),
+    # resolved once here and recorded in options/the fingerprint below --
+    # never re-resolved on a later executor pass, so which reference Skills
+    # this run's planner saw stays reproducible even if the repo's Skill
+    # list changes later.
+    if reference_skill_ids is None:
+        reference_skill_ids = _default_reference_skill_ids(ctx)
+
     fingerprint = compute_fingerprint(
         settings=ctx.settings, source_table_versions=dict(version_by_name),
         uploaded_file_hashes=uploaded_file_hashes, skill_dir=None,
         requirements_path=REPO_ROOT / "requirements.txt",
         prompts_dirs=[REPO_ROOT / "orchestrator" / "prompts" / "explorer"],
         reference_files=[], code_revision=None,
-        skill_content_hash=_explorer_inputs_hash(reference_skill_ids or []),
+        skill_content_hash=_explorer_inputs_hash(ctx, reference_skill_ids or []),
     )
 
     options = {

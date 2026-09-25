@@ -76,6 +76,22 @@ def clear_table_listing_cache() -> None:
 _SYSTEM_CATALOGS = {"system", "samples", "__databricks_internal", "hive_metastore"}
 
 
+def _parse_schema_pairs(entries: tuple[str, ...]) -> set[tuple[str, str]]:
+    """`Settings.source_schemas`/`excluded_schemas` are `catalog.schema`
+    strings (the same shape `DBX_SOURCE_SCHEMAS` already has for
+    scripts/deploy_app.py's grants, CLAUDE.md §7). A malformed entry (no
+    dot, or an empty half) is dropped rather than raised on here --
+    Settings.__post_init__ is not the enforcement point for this value and
+    a malformed entry silently matching nothing is the safe failure mode
+    for a schema FILTER (never widens what is shown; CLAUDE.md NN14)."""
+    pairs: set[tuple[str, str]] = set()
+    for entry in entries:
+        catalog, sep, schema = entry.partition(".")
+        if sep and catalog and schema:
+            pairs.add((catalog, schema))
+    return pairs
+
+
 class UCSourceError(Exception):
     """Raised for anything that would otherwise force a silent guess: an unknown
     binding, a column that cannot be resolved, a query that would exceed the memory
@@ -638,7 +654,19 @@ class UCTableDataSource:
         in the data-search box must not re-walk every catalog/schema, and
         must not walk catalogs that are never audit source data) -- pass
         `catalog` explicitly to reach one of those, or any catalog, without
-        either restriction."""
+        either restriction.
+
+        BUG-EXPLORER-1 (independent review round 2, 2026-09-25): the AUTOMATIC
+        schema enumeration (schema=None, whether or not catalog is pinned) also
+        never walks this platform's own ledger schema (Settings.catalog +
+        Settings.schema), nor any schema in Settings.excluded_schemas -- both
+        are configuration (CLAUDE.md NN16), never a hardcoded name. When
+        Settings.source_schemas is non-empty it is an ALLOW-list instead: only
+        those catalog.schema pairs are ever walked (and, for the default
+        catalog=None enumeration, only their catalogs), the same narrowing
+        scripts/deploy_app.py already grants the App's service principal for.
+        A caller that passes `schema` explicitly still reaches it unfiltered --
+        the same "explicit means deliberate" precedent as `catalog=` above."""
         from databricks.sdk.errors import DatabricksError, PermissionDenied
 
         cache_key = (catalog, schema)
@@ -648,6 +676,11 @@ class UCTableDataSource:
                 cached_at, cached_results = cached
                 if time.monotonic() - cached_at < _TABLE_LISTING_TTL_S:
                     return cached_results
+
+        allow_schemas = _parse_schema_pairs(self.settings.source_schemas)
+        deny_schemas = _parse_schema_pairs(self.settings.excluded_schemas)
+        if self.settings.catalog and self.settings.schema:
+            deny_schemas = deny_schemas | {(self.settings.catalog, self.settings.schema)}
 
         w = self._workspace_client()
 
@@ -659,10 +692,20 @@ class UCTableDataSource:
                 catalogs = [c.name for c in w.catalogs.list() if c.name not in _SYSTEM_CATALOGS]
             except DatabricksError as exc:
                 raise UCSourceError(f"could not list catalogs: {exc}") from exc
+            if allow_schemas:
+                allowed_catalogs = {c for c, _ in allow_schemas}
+                catalogs = [c for c in catalogs if c in allowed_catalogs]
 
         for cat in catalogs:
             try:
-                schemas = [schema] if schema is not None else [s.name for s in w.schemas.list(catalog_name=cat)]
+                if schema is not None:
+                    schemas = [schema]
+                else:
+                    schemas = [s.name for s in w.schemas.list(catalog_name=cat)]
+                    if allow_schemas:
+                        schemas = [s for s in schemas if (cat, s) in allow_schemas]
+                    else:
+                        schemas = [s for s in schemas if (cat, s) not in deny_schemas]
             except PermissionDenied:
                 results.append({"fqn": cat, "restricted": True})
                 continue

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from orchestrator.skills import Skill
@@ -111,6 +111,13 @@ class NodeContext:
     # both fields regardless of whether they are set.
     llm: Any = None
     prompts: Any = None
+    # BUG-EXPLORER-2 (independent review round 2): the 1-2 reference Skills
+    # this run's OWN options pinned (state.options.explorer.reference_skill_
+    # ids, resolved once at start_explorer_run -- CLAUDE.md §4.5), already
+    # loaded as real Skill objects by build_node_context. Empty for a
+    # Playbook run, and for an Explorer run that pinned none. Only the plan
+    # node reads this.
+    explorer_reference_skills: list[Skill] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if self.data_source is not None and not isinstance(self.data_source, _CachingDataSource):

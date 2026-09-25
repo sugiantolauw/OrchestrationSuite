@@ -295,6 +295,42 @@ def test_v_c1_positive():
     assert "V-C1" not in _rules(report)
 
 
+def test_v_c1_positive_with_a_second_multi_valued_currency_shaped_column():
+    """Independent review round 2 (BUG-EXPLORER-2, validator false
+    positive): a second currency_code-classified column that is NOT itself
+    single-valued (e.g. a per-line transaction-FX currency alongside a
+    single-valued reimbursement currency, exactly SKILL-001's real
+    expense_report source) must never block resolution of the one column
+    that IS evidenced."""
+    c = _base_canonical()
+    profile = _base_profile()
+    profile["expense_report"]["columns"].append(
+        _col(
+            "Transaction Currency", "string", semantic_type="currency_code", distinct_count=3,
+            values=[{"value": "AUD", "count": 7}, {"value": "USD", "count": 2}, {"value": "SGD", "count": 1}],
+            suppressed_values=0,
+        )
+    )
+    report = _validate(c, profile=profile)
+    assert "V-C1" not in _rules(report)
+
+
+def test_v_c1_negative_two_single_valued_currency_columns_that_disagree():
+    """Real ambiguity -- two single-valued currency columns naming
+    DIFFERENT currencies -- must still fail V-C1; only a non-evidenced
+    (multi-valued) second candidate is ever ignored."""
+    c = _base_canonical()
+    profile = _base_profile()
+    profile["expense_report"]["columns"].append(
+        _col(
+            "Transaction Currency", "string", semantic_type="currency_code", distinct_count=1,
+            values=[{"value": "USD", "count": 10}], suppressed_values=0,
+        )
+    )
+    report = _validate(c, profile=profile)
+    assert "V-C1" in _rules(report)
+
+
 # ── V-C2 ─────────────────────────────────────────────────────────────────
 
 

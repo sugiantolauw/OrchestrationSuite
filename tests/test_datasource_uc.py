@@ -626,6 +626,135 @@ def test_list_tables_default_enumeration_excludes_system_catalogs():
     assert not any(r.get("fqn") in ("system", "samples") for r in results)
 
 
+# ── BUG-EXPLORER-1 (independent review round 2, 2026-09-25) ────────────────
+
+
+class _WithLedgerAndAppSchemas(_FakeWorkspaceClient):
+    """A single catalog holding the ledger schema (Settings.catalog/.schema),
+    another internal/app schema, and a real business-source schema --
+    exactly the shape that let the Explorer checklist's default (no search
+    typed) list come back 100% internal tables."""
+
+    class _Catalogs:
+        def list(self):
+            return [_FakeNamed("orchestrationsuite")]
+
+    class _Schemas:
+        def list(self, catalog_name):
+            return [_FakeNamed("audit_ledger"), _FakeNamed("app_probe"), _FakeNamed("tne_source")]
+
+    class _Tables:
+        def list(self, catalog_name, schema_name):
+            if schema_name == "audit_ledger":
+                return [_FakeTable("controls", None, ["control_id"])]
+            if schema_name == "app_probe":
+                return [_FakeTable("heartbeat", None, ["ts"])]
+            return [_FakeTable("expense_report", "T&E expense claims", ["Employee ID"])]
+
+
+def test_list_tables_default_enumeration_excludes_the_ledger_schema():
+    settings = Settings(
+        host="https://x.cloud.databricks.com", warehouse_http_path="/sql/1.0/warehouses/abc",
+        catalog="orchestrationsuite", schema="audit_ledger",
+    )
+    ds = UCTableDataSource(settings, {}, workspace_client_factory=_WithLedgerAndAppSchemas)
+
+    results = ds.list_tables()
+
+    schemas_seen = {r.get("schema") for r in results if not r.get("restricted")}
+    assert "audit_ledger" not in schemas_seen
+    assert not any(r.get("fqn", "").startswith("orchestrationsuite.audit_ledger.") for r in results)
+
+
+def test_list_tables_configured_exclusion_list_hides_other_internal_schemas():
+    settings = Settings(
+        host="https://x.cloud.databricks.com", warehouse_http_path="/sql/1.0/warehouses/abc",
+        catalog="orchestrationsuite", schema="audit_ledger",
+        excluded_schemas=("orchestrationsuite.app_probe",),
+    )
+    ds = UCTableDataSource(settings, {}, workspace_client_factory=_WithLedgerAndAppSchemas)
+
+    results = ds.list_tables()
+
+    schemas_seen = {r.get("schema") for r in results if not r.get("restricted")}
+    assert schemas_seen == {"tne_source"}
+
+
+def test_list_tables_source_schemas_allowlist_narrows_to_only_those_schemas():
+    settings = Settings(
+        host="https://x.cloud.databricks.com", warehouse_http_path="/sql/1.0/warehouses/abc",
+        catalog="orchestrationsuite", schema="audit_ledger",
+        source_schemas=("orchestrationsuite.tne_source",),
+    )
+    ds = UCTableDataSource(settings, {}, workspace_client_factory=_WithLedgerAndAppSchemas)
+
+    results = ds.list_tables()
+
+    schemas_seen = {r.get("schema") for r in results if not r.get("restricted")}
+    assert schemas_seen == {"tne_source"}
+    found = {r["fqn"] for r in results if not r.get("restricted")}
+    assert found == {"orchestrationsuite.tne_source.expense_report"}
+
+
+def test_list_tables_source_schemas_allowlist_narrows_which_catalogs_are_walked():
+    class _CountingSchemas(_WithLedgerAndAppSchemas._Schemas):
+        call_count = 0
+
+        def list(self, catalog_name):
+            _CountingSchemas.call_count += 1
+            return super().list(catalog_name)
+
+    class _TwoCatalogWorkspaceClient(_WithLedgerAndAppSchemas):
+        class _Catalogs:
+            def list(self):
+                return [_FakeNamed("orchestrationsuite"), _FakeNamed("other_catalog")]
+
+        _Schemas = _CountingSchemas
+
+    _CountingSchemas.call_count = 0
+    settings = Settings(
+        host="https://x.cloud.databricks.com", warehouse_http_path="/sql/1.0/warehouses/abc",
+        catalog="orchestrationsuite", schema="audit_ledger",
+        source_schemas=("orchestrationsuite.tne_source",),
+    )
+    ds = UCTableDataSource(settings, {}, workspace_client_factory=_TwoCatalogWorkspaceClient)
+
+    ds.list_tables()
+
+    # other_catalog holds no allow-listed schema, so its schemas are never
+    # even listed -- one call for orchestrationsuite only, not two.
+    assert _CountingSchemas.call_count == 1
+
+
+def test_list_tables_explicit_schema_bypasses_ledger_exclusion():
+    """The same "explicit means deliberate" precedent explicit `catalog=`
+    already has: a caller that names the ledger schema by hand still
+    reaches it -- only the AUTOMATIC (schema=None) enumeration filters it
+    out, so this never blocks a legitimate need to read the ledger."""
+    settings = Settings(
+        host="https://x.cloud.databricks.com", warehouse_http_path="/sql/1.0/warehouses/abc",
+        catalog="orchestrationsuite", schema="audit_ledger",
+    )
+    ds = UCTableDataSource(settings, {}, workspace_client_factory=_WithLedgerAndAppSchemas)
+
+    results = ds.list_tables(catalog="orchestrationsuite", schema="audit_ledger")
+
+    assert any(r.get("fqn") == "orchestrationsuite.audit_ledger.controls" for r in results)
+
+
+def test_list_tables_explicit_schema_bypasses_source_schemas_allowlist():
+    settings = Settings(
+        host="https://x.cloud.databricks.com", warehouse_http_path="/sql/1.0/warehouses/abc",
+        catalog="orchestrationsuite", schema="audit_ledger",
+        source_schemas=("orchestrationsuite.tne_source",),
+    )
+    ds = UCTableDataSource(settings, {}, workspace_client_factory=_WithLedgerAndAppSchemas)
+
+    results = ds.list_tables(catalog="orchestrationsuite", schema="app_probe")
+
+    assert any(r.get("fqn") == "orchestrationsuite.app_probe.heartbeat" for r in results)
+
+
 def test_list_tables_explicit_system_catalog_is_still_reachable():
     """`catalog=` bypasses both the default-enumeration skip-list AND the
     cache (see the two tests above) -- a caller that already knows it wants
