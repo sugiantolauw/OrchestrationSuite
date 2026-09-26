@@ -142,6 +142,7 @@ _ALWAYS_FORWARDED_SETTINGS: list[tuple[str, str]] = [
     ("admission_backoff_max_s", "ADMISSION_BACKOFF_MAX_S"),
     ("executor_active_poll_interval_s", "EXECUTOR_ACTIVE_POLL_INTERVAL_S"),
     ("executor_idle_poll_interval_s", "EXECUTOR_IDLE_POLL_INTERVAL_S"),
+    ("startup_warmup", "STARTUP_WARMUP"),
     ("readiness_cache_ttl_s", "READINESS_CACHE_TTL_S"),
     ("llm_timeout_s", "LLM_TIMEOUT_S"),
     ("llm_retry_backoff_s", "LLM_RETRY_BACKOFF_S"),
