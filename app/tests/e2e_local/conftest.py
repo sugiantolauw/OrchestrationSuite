@@ -198,6 +198,14 @@ def _strip_workspace_env(env: dict) -> dict:
         "DATABRICKS_HOST", "DATABRICKS_TOKEN",
         "DBX_CATALOG", "DBX_SCHEMA", "DBX_VOLUME", "DBX_WAREHOUSE_HTTP_PATH",
         "DBX_SOURCE_SCHEMAS", "DBX_APP_NAME",
+        # CLAUDE.md §11 perf follow-up 2026-09-26: this package's whole point
+        # is a real, fast local backend -- the ambient dev .env may well set
+        # STARTUP_WARMUP=true for the deployed App, and this subprocess's env
+        # is `dict(os.environ)` merged with base_env (build_full_env above),
+        # so an unstripped ambient value would leak in and spawn a background
+        # warm-up thread this package neither needs nor wants racing the app
+        # subprocess's own startup.
+        "STARTUP_WARMUP",
     ):
         env.pop(k, None)
     return env

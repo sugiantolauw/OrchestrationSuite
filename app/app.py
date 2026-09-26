@@ -226,6 +226,16 @@ def _start_executor_once() -> None:
             _LOG.exception("App start: readiness check raised")
 
     ctx.executor.start()
+
+    # CLAUDE.md §11 perf follow-up 2026-09-26: one-shot, non-blocking warm-up
+    # of the Delta/UC connection pools, the WorkspaceClient and the skill-
+    # list/catalog-listing caches -- so the first real page load after this
+    # App start does not pay for any of it. Off by default
+    # (Settings.startup_warmup); never a timer or a loop.
+    from orchestrator.warmup import maybe_start_warmup
+
+    maybe_start_warmup(ctx)
+
     _STARTED = True
 
 

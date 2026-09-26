@@ -103,6 +103,15 @@ class Settings:
     # fields above.
     executor_active_poll_interval_s: float = 30.0
     executor_idle_poll_interval_s: float = 0.0
+    # One-shot connection/cache warm-up at App start (CLAUDE.md §11 perf
+    # follow-up 2026-09-26): orchestrator.warmup.maybe_start_warmup runs
+    # exactly once, in a background thread, never on a timer -- the same
+    # idle-cost discipline as executor_idle_poll_interval_s above. Off by
+    # default so pytest and the e2e_local subprocess fixtures never spawn it
+    # unasked (CLAUDE.md §10); the deployed App's own .env sets this true.
+    # Operational knob, not computation -- excluded from the runtime config
+    # hash below, same as the executor/admission fields.
+    startup_warmup: bool = False
     pptx_template_path: str = DEFAULT_PPTX_TEMPLATE_PATH
     # Independent review 2026-09-24 item 1: per-environment source-binding
     # config (orchestrator.source_bindings) -- an exact, pre-declared
@@ -350,6 +359,7 @@ def load_settings(env: dict | None = None) -> Settings:
         admission_backoff_max_s=_parse_float(env.get("ADMISSION_BACKOFF_MAX_S"), 60.0),
         executor_active_poll_interval_s=_parse_float(env.get("EXECUTOR_ACTIVE_POLL_INTERVAL_S"), 30.0),
         executor_idle_poll_interval_s=_parse_float(env.get("EXECUTOR_IDLE_POLL_INTERVAL_S"), 0.0),
+        startup_warmup=_parse_bool(env.get("STARTUP_WARMUP"), False),
         pptx_template_path=env.get("PPTX_TEMPLATE_PATH") or DEFAULT_PPTX_TEMPLATE_PATH,
         source_bindings_path=env.get("SOURCE_BINDINGS") or None,
         readiness_cache_ttl_s=_parse_float(env.get("READINESS_CACHE_TTL_S"), 120.0),
@@ -411,7 +421,7 @@ def load_settings(env: dict | None = None) -> Settings:
 _RUNTIME_HASH_EXCLUDED_FIELDS = frozenset({
     "max_concurrent_runs", "max_connections", "executor", "mlflow_tracking_uri", "mlflow_experiment_path",
     "admission_max_attempts", "admission_backoff_base_s", "admission_backoff_max_s",
-    "executor_active_poll_interval_s", "executor_idle_poll_interval_s",
+    "executor_active_poll_interval_s", "executor_idle_poll_interval_s", "startup_warmup",
     # PPTX template path changes the export's appearance only -- never a
     # number or a finding (CLAUDE.md §4.7's "every number comes from
     # RunState" rule), so two runs configured identically except for this
