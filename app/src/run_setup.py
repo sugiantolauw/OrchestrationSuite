@@ -576,13 +576,44 @@ def _explorer_workflow_children(review: dict) -> list:
         ))
     if review.get("proposal_errors"):
         children.append(html.Div(
-            "; ".join(
-                e.get("message", "") if isinstance(e, dict) else str(e)
-                for e in review["proposal_errors"]
-            ),
+            _proposal_errors_summary(review["proposal_errors"]),
             style={"fontSize": 11.5, "color": "#b85042", "marginTop": 8},
         ))
     return children
+
+
+# BUG-EXPLORER-RAW-ERR-1 (independent review round 5): a validator rule code
+# is never auditor-facing on its own -- this maps each V-* CATEGORY (not the
+# exact rule) to one short, technical-detail-free phrase. The raw rule/
+# message pairs stay available to whoever needs them (RunState.plan.
+# validation.proposal_errors, persisted in Delta, and the plan node's own
+# trace event -- orchestrator.nodes.fieldwork._plan_explorer) rather than
+# rendered here.
+_PROPOSAL_ERROR_CATEGORY_REASON = {
+    "V-S": "the proposal did not follow a required naming or structure rule",
+    "V-C": "the uploaded data does not support what was proposed",
+    "V-T": "a test's parameters did not match this data",
+    "V-F": "a finding's setup did not match its test",
+    "V-N": "a finding's numbers did not line up with its test",
+    "V-H": "a threshold reference could not be resolved",
+    "V-P": "a population definition could not be resolved",
+}
+_PROPOSAL_ERROR_DEFAULT_REASON = "a validation rule was not met"
+
+
+def _proposal_error_reason(rule: str | None) -> str:
+    for prefix, reason in _PROPOSAL_ERROR_CATEGORY_REASON.items():
+        if rule and rule.startswith(prefix):
+            return reason
+    return _PROPOSAL_ERROR_DEFAULT_REASON
+
+
+def _proposal_errors_summary(errors: list) -> str:
+    n = len(errors)
+    first_rule = errors[0].get("rule") if errors and isinstance(errors[0], dict) else None
+    reason = _proposal_error_reason(first_rule)
+    noun = "proposed item" if n == 1 else "proposed items"
+    return f"{n} {noun} could not be used: {reason}."
 
 
 # ─── Callbacks (ported from reference_app/app.py) ───────────────────────────

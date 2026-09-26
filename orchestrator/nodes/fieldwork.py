@@ -522,6 +522,16 @@ def _plan_explorer(ctx: NodeContext, state: RunState) -> RunState:
     n_valid = sum(1 for t in report["tests"].values() if t["valid"])
     n_total = len(report["tests"])
     message = f"Explorer plan proposed ({stage}): {n_valid}/{n_total} test(s) valid"
+    if report.get("proposal_errors"):
+        # BUG-EXPLORER-RAW-ERR-1: the proposal panel (src.run_setup) shows
+        # only a short, technical-detail-free summary of this -- the raw
+        # rule/message pairs go here instead, where an auditor is never
+        # asked to read them but they remain inspectable.
+        raw = "; ".join(
+            f"{e.get('rule')}: {e.get('message')}" if isinstance(e, dict) else str(e)
+            for e in report["proposal_errors"]
+        )
+        message += f" -- proposal_errors: {raw}"
     return dataclasses.replace(
         state, plan=plan_payload, plan_rationale=plan_rationale,
         events=state.events + [_event("plan", message, now)],
