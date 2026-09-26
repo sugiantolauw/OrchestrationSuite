@@ -1906,6 +1906,12 @@ def get_explorer_review(ctx: AppContext, run_id: str) -> dict:
     return {
         "run_id": run_id,
         "run_status": state.status,
+        # BUG-EXPLORER-PLAN-1 (independent review round 5, RUN-B68ACB9ED712):
+        # a node exception (pipeline.py) sets state.status="failed" and
+        # state.status_reason, but nothing here surfaced the reason -- the
+        # workflow-preview panel had no way to show WHY, so a genuinely
+        # failed run rendered as if it were still profiling (NN14).
+        "status_reason": state.status_reason,
         "plan_status": plan.get("status"),
         "llm_unavailable": plan.get("status") == "llm_unavailable",
         "label": plan.get("label"),

@@ -55,6 +55,25 @@ def test_build_reference_skills_json_digests_a_real_repo_skill():
     assert len(seen_primitives) == len(digest["tests"]), "one test per distinct primitive, first in plan order"
 
 
+def test_reference_skill_digest_findings_are_flat_not_nested_in_tests():
+    # BUG-EXPLORER-PLAN-2 (independent review round 5, RUN-99373993B1E0):
+    # the reference example shown to the planner must match
+    # PLAN_PROPOSAL_SCHEMA's own shape -- findings as a flat top-level
+    # array with a test_key back-reference, never nested inside a test
+    # object. A model told to copy this example's FORMAT (planner_system.
+    # md rule 16) otherwise reproduces the nesting and fails validation.
+    skill = load_skill(TNE_SKILL_DIR)
+    skill.validate()
+    digest = build_reference_skill_digest(skill)
+    for t in digest["tests"]:
+        assert "findings" not in t
+    assert digest["findings"], "digest should include at least one finding"
+    test_keys = {t["test_id"] for t in digest["tests"]}
+    for f in digest["findings"]:
+        assert f["test_key"] in test_keys
+        assert "key" in f and "id" not in f
+
+
 def test_reference_skill_digest_capped_at_30000_chars():
     skill = load_skill(TNE_SKILL_DIR)
     skill.validate()

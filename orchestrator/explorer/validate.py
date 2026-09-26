@@ -86,10 +86,26 @@ def _profiled_value_set(colinfo: dict) -> set | None:
 
 
 def _is_profiled_or_zero(value: Any, colinfo: dict) -> bool:
+    """BUG-EXPLORER-PLAN-1 (independent review round 5, RUN-B68ACB9ED712):
+    the wire schema's generic FILTER_VALUE type (wire_schema.py) allows an
+    ARRAY `value` on every filter/condition op, not only "in"/"not_in" --
+    `_validate_filter` only guards the list case for those two ops, so a
+    "gt"/"gte"/"lt"/"lte"/"eq"/"ne" filter (or a metric `where`, or a
+    list_membership allowed_values entry) whose `value` is itself a list
+    reached `value in profiled` unguarded and raised
+    TypeError("unhashable type: 'list'"), failing the whole `plan` node
+    with no reason ever surfaced to the auditor (NN14). An unhashable
+    `value` is never a profiled value -- reported as an ordinary V-F2/V-T4/
+    V-T5 violation on that one filter/test, never a crash."""
     if isinstance(value, (int, float)) and not isinstance(value, bool) and value == 0:
         return True
     profiled = _profiled_value_set(colinfo)
-    return profiled is not None and value in profiled
+    if profiled is None:
+        return False
+    try:
+        return value in profiled
+    except TypeError:
+        return False
 
 
 # ── V-P1/V-P2/V-P3: prose checks ────────────────────────────────────────────

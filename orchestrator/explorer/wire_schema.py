@@ -610,8 +610,42 @@ def walk_string_leaves(schema: dict = PLAN_PROPOSAL_SCHEMA, *, _defs: dict | Non
     return out
 
 
+def normalize_wire_proposal(wire: dict) -> dict:
+    """BUG-EXPLORER-PLAN-2 (independent review round 5, RUN-99373993B1E0):
+    hoists a `findings` array nested inside a `tests[]` item up to the
+    top-level `findings[]` PLAN_PROPOSAL_SCHEMA actually requires, setting
+    each hoisted finding's `test_key` to its owning test's `key` when not
+    already present. This is a tolerant RECOVERY for a proposal a planner
+    call already produced with the wrong (but self-evidently intentional
+    -- every test carried its own findings) nesting; it never invents a
+    finding, only relocates one the model already wrote in full. Returns a
+    NEW dict (`wire` and its nested objects are never mutated); returns
+    `wire` unchanged when no test carries a nested `findings` key so a
+    proposal that never needed recovery is never copied for nothing."""
+    tests = wire.get("tests") if isinstance(wire, dict) else None
+    if not isinstance(tests, list) or not any(isinstance(t, dict) and "findings" in t for t in tests):
+        return wire
+    new_tests = []
+    hoisted: list[dict] = []
+    for t in tests:
+        if isinstance(t, dict) and "findings" in t:
+            t = dict(t)
+            nested = t.pop("findings")
+            if isinstance(nested, list):
+                for f in nested:
+                    if isinstance(f, dict):
+                        f = dict(f)
+                        f.setdefault("test_key", t.get("key"))
+                        hoisted.append(f)
+        new_tests.append(t)
+    out = dict(wire)
+    out["tests"] = new_tests
+    out["findings"] = [*(wire.get("findings") or []), *hoisted]
+    return out
+
+
 __all__ = [
     "PLAN_PROPOSAL_SCHEMA", "WIRE_SCHEMA_SHA256", "PRIMITIVE_PARAM_SCHEMAS",
     "EXPLORER_PARAM_ALLOWLIST", "PROSE_FIELDS", "EXPRESSION_FIELDS",
-    "STRING_FIELD_CLASSIFICATION", "walk_string_leaves",
+    "STRING_FIELD_CLASSIFICATION", "walk_string_leaves", "normalize_wire_proposal",
 ]

@@ -1093,6 +1093,28 @@ def _findings_tab(bundle: dict) -> html.Div:
 # fresh page, or a browser restart) reads the edit back from persistence
 # rather than a snapshot taken before it.
 
+def _normalize_action_status(value: str | None) -> str:
+    """BUG-ACTIONS-EDIT-1 (independent review round 5, RUN-DE56A9DED2DB):
+    `action.get("status")` here is whatever orchestrator.service.
+    list_management_actions returned, which title-cases the raw DB value
+    for the /actions page's own read-only display ("draft" -> "Draft",
+    "under_review" -> "Under Review") -- a formatting orchestrator.service.
+    update_management_action's `_MANAGEMENT_ACTION_STATUSES` check (lower-
+    case, underscored) never accepts. Left uncorrected, a NEVER-edited
+    action's modal pre-selected "Draft" as the dropdown's value (not in its
+    own lowercase options, but dcc.Dropdown never validates that
+    client-side), and clicking Save sent that straight through: the
+    ValueError raised server-side before either the owner or the status
+    ever reached Delta -- and before the local override cache did either,
+    so even the owner field the auditor typed appeared to silently not
+    persist. `.title()`'s own inverse (`.lower()` + spaces back to
+    underscores) exactly reconstructs the canonical value for every status
+    in that set."""
+    if not value:
+        return "draft"
+    return value.lower().replace(" ", "_")
+
+
 def _action_row_view(action: dict, override: dict | None) -> dict:
     override = override or {}
     return {
@@ -1100,7 +1122,7 @@ def _action_row_view(action: dict, override: dict | None) -> dict:
         "finding_id": action.get("finding_id"),
         "title": action.get("finding_title") or action.get("title", ""),
         "risk": action.get("risk", ""),
-        "status": override.get("status") or action.get("status") or "draft",
+        "status": _normalize_action_status(override.get("status") or action.get("status")),
         "owner": override.get("owner") if override.get("owner") is not None else (action.get("owner") or ""),
         "target_date": override.get("target_date") or action.get("target_date") or "",
         "response": override.get("response") if override.get("response") is not None else (action.get("description") or ""),

@@ -32,6 +32,7 @@ import io
 import json
 from decimal import Decimal
 
+import jsonschema
 import pandas as pd
 import xlsxwriter
 
@@ -43,7 +44,7 @@ from orchestrator.explorer.canonical import to_canonical
 from orchestrator.explorer.payload import build_planner_payload
 from orchestrator.explorer.profile import load_repo_pii_flags, profile_source
 from orchestrator.explorer.validate import EXPLORER_VALIDATOR_VERSION, validate_wire_proposal
-from orchestrator.explorer.wire_schema import PLAN_PROPOSAL_SCHEMA, WIRE_SCHEMA_SHA256
+from orchestrator.explorer.wire_schema import PLAN_PROPOSAL_SCHEMA, WIRE_SCHEMA_SHA256, normalize_wire_proposal
 from orchestrator import exposure
 from orchestrator.findings import build_findings
 from orchestrator.frames import build_row_snapshots, frame_parquet_bytes, sha256_bytes
@@ -348,6 +349,36 @@ def _explorer_plan_inputs(*, profile_payload: dict, prompts, reference_skills: l
     }
 
 
+def _recovered_proposal(result) -> dict | None:
+    """BUG-EXPLORER-PLAN-2 (independent review round 5, RUN-99373993B1E0):
+    LLMGateway's own client-side schema check (generic, schema-agnostic --
+    it must stay that way, NN1) rejects a proposal outright and returns
+    `parsed=None` the moment ANY test nests its own `findings[]` (the
+    shape orchestrator.explorer.reference_skills used to show as the
+    worked example -- fixed separately, but a proposal already generated
+    against the old example must still be recoverable). Re-parses the raw
+    response text, hoists nested findings to the top level
+    (wire_schema.normalize_wire_proposal), and re-validates against the
+    SAME PLAN_PROPOSAL_SCHEMA -- never a looser one. Returns the recovered,
+    schema-valid dict, or None when the result was already `ok`, carries
+    no text, isn't valid JSON, or still does not validate after hoisting
+    (a genuinely broken proposal is not papered over)."""
+    if result.status == "ok":
+        return result.parsed
+    if not result.text:
+        return None
+    try:
+        raw = json.loads(result.text)
+    except json.JSONDecodeError:
+        return None
+    normalized = normalize_wire_proposal(raw)
+    try:
+        jsonschema.validate(normalized, PLAN_PROPOSAL_SCHEMA)
+    except jsonschema.ValidationError:
+        return None
+    return normalized
+
+
 def _plan_explorer(ctx: NodeContext, state: RunState) -> RunState:
     """§4.8's pseudocode: r1 = planner call; if unavailable, plan.status =
     'llm_unavailable' and return (no repair, no fallback -- CLAUDE.md §6
@@ -413,7 +444,7 @@ def _plan_explorer(ctx: NodeContext, state: RunState) -> RunState:
             pinned_versions=pinned_versions,
         )
 
-    proposal = r1.parsed if r1.status == "ok" else None
+    proposal = _recovered_proposal(r1)
     stage = "planner"
     if proposal is not None:
         report = _validate(proposal)
@@ -449,8 +480,9 @@ def _plan_explorer(ctx: NodeContext, state: RunState) -> RunState:
             ctx=call_ctx,
         )
         repair_entry = _explorer_llm_call_entry(r2)
-        if r2.status == "ok":
-            proposal = r2.parsed
+        recovered = _recovered_proposal(r2)
+        if recovered is not None:
+            proposal = recovered
             report = _validate(proposal)
             stage = "repair"
         # else: r2 failed (unavailable/invalid_output) -- keep the planner's
