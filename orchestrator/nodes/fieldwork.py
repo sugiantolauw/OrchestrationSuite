@@ -1411,7 +1411,7 @@ def _code_revision_export_note(computed_code_revision: str | None, export_code_r
 def _write_xlsx_workpaper(
     state: RunState, findings: list[dict], metrics: dict[str, dict], flagged_rows: list[dict], now: str,
     ticket_previews: list[dict] | None = None, narration: dict | None = None,
-    code_revision_note: str | None = None,
+    code_revision_note: str | None = None, review_notes: list[dict] | None = None,
 ) -> bytes:
     # P6 WP N11: `findings` here is already the export narration bundle's
     # OWN resolved list (its observation/recommendation/management_questions
@@ -1452,6 +1452,17 @@ def _write_xlsx_workpaper(
     if signoff:
         cover_fields.append(("signed_off_by", signoff.get("approver")))
         cover_fields.append(("signed_off_at", signoff.get("timestamp")))
+        # P7 review workflow (§3.7): additive fields, present only on a
+        # signoff the P7-gated path produced (orchestrator.runs.sign_off's
+        # `prepared_by` key) -- a legacy signoff writes exactly the two rows
+        # above, unchanged.
+        if signoff.get("prepared_by") is not None:
+            cover_fields.append(("prepared_by", signoff.get("prepared_by")))
+            cover_fields.append(("prepared_at", (state.review or {}).get("prepared", {}).get("at")))
+            cover_fields.append(("reviewed_by", signoff.get("reviewed_by")))
+            cover_fields.append(("reviewed_at", (state.review or {}).get("reviewed", {}).get("at")))
+            cover_fields.append(("sod_mode", signoff.get("sod_mode")))
+            cover_fields.append(("role_source", signoff.get("role_source")))
         if signoff.get("self_approved"):
             cover_fields.append(("signoff_note", SELF_APPROVED_LABEL))
     # P6 WP N11 (§9 "run metadata gains the narration generation, the served
@@ -1686,6 +1697,34 @@ def _write_xlsx_workpaper(
         ri_row += 1
     _write_str(ws8, ri_row + 1, 0, footer)
 
+    # P7 review workflow (§3.7): "Review notes" sheet -- body, target, raised
+    # by/role/at, response, cleared by/at. `review_notes` is empty for any
+    # run the P7 workflow never touched (this sheet still writes, header
+    # row only, never omitted).
+    review_notes = review_notes or []
+    ws9 = wb.add_worksheet("Review notes")
+    ws9.write_row(
+        0, 0,
+        ["body", "target", "raised_by", "raised_role", "raised_at", "state", "response",
+         "responded_by", "responded_at", "cleared_by", "cleared_role", "cleared_at"],
+        bold,
+    )
+    for r, note in enumerate(review_notes, start=1):
+        target = note.get("finding_id") or "Whole run"
+        _write_str(ws9, r, 0, note.get("body"))
+        _write_str(ws9, r, 1, target)
+        _write_str(ws9, r, 2, note.get("raised_by"))
+        _write_str(ws9, r, 3, note.get("raised_role"))
+        _write_str(ws9, r, 4, note.get("raised_at"))
+        _write_str(ws9, r, 5, note.get("state"))
+        _write_str(ws9, r, 6, note.get("response"))
+        _write_str(ws9, r, 7, note.get("responded_by"))
+        _write_str(ws9, r, 8, note.get("responded_at"))
+        _write_str(ws9, r, 9, note.get("cleared_by"))
+        _write_str(ws9, r, 10, note.get("cleared_role"))
+        _write_str(ws9, r, 11, note.get("cleared_at"))
+    _write_str(ws9, len(review_notes) + 2, 0, footer)
+
     wb.close()
     return buf.getvalue()
 
@@ -1732,9 +1771,14 @@ def export(ctx: NodeContext, state: RunState) -> RunState:
     narration = _build_export_narration(ctx, state, findings, metrics)
     resolved_findings = narration["findings"]
 
+    # P7 review workflow (docs/specs/P7_mapping_authoring_design.md §3.7):
+    # empty for any run the P7 workflow never touched -- purely additive,
+    # the "Review notes" sheet below writes a header row and nothing else.
+    review_notes = ctx.persistence.list_review_notes(state.run_id)
+
     content = _write_xlsx_workpaper(
         state, resolved_findings, metrics, flagged_rows, now, ticket_previews, narration=narration,
-        code_revision_note=code_revision_note,
+        code_revision_note=code_revision_note, review_notes=review_notes,
     )
     sha256 = hashlib.sha256(content).hexdigest()
     rel_path = f"exports/{state.run_id}/workpaper.xlsx"

@@ -5,7 +5,7 @@ sign-off for now"; §2.4, §9C)."""
 
 from __future__ import annotations
 
-from orchestrator.signoff_policy import SOD_ENFORCED, evaluate_signoff
+from orchestrator.signoff_policy import evaluate_signoff
 
 
 def test_self_approval_detected_when_actor_matches_run_owner():
@@ -18,10 +18,11 @@ def test_non_self_approval_when_actor_differs_from_run_owner():
     assert result == {"self_approved": False, "sod_enforced": False}
 
 
-def test_sod_not_enforced_until_p7():
-    # SoD is never enforced today -- neither branch blocks the sign-off, and
-    # flipping this single constant is what P7 changes (CLAUDE.md §2.4).
-    assert SOD_ENFORCED is False
+def test_sod_not_enforced_on_the_legacy_path():
+    # The legacy (pre-P7) self-sign-off path never blocks a sign-off --
+    # P7's enforced/labelled distinction lives in orchestrator.runs.sign_off's
+    # gated path instead (orchestrator/signoff_policy.py's evaluate_step),
+    # never in this function.
     assert evaluate_signoff(actor="alice", run_owner="alice")["sod_enforced"] is False
     assert evaluate_signoff(actor="bob", run_owner="alice")["sod_enforced"] is False
 

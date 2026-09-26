@@ -315,10 +315,21 @@ def _build_cover(
         f"Generated {now}",
     ]
     signoff = state.signoff or {}
-    if signoff.get("self_approved"):
-        lines.append(f"Signed off by {signoff.get('approver', '—')} — {SELF_APPROVED_LABEL}")
-    elif signoff.get("approver"):
-        lines.append(f"Signed off by {signoff.get('approver')}")
+    if signoff.get("approver"):
+        # P7 review workflow (docs/specs/P7_mapping_authoring_design.md §3.7):
+        # "Prepared by P · Reviewed by R · Signed off by A on T" once a
+        # signoff carries prepared_by (the P7-gated path); a legacy signoff
+        # (no prepared_by) keeps its original one-part line unchanged.
+        if signoff.get("prepared_by") is not None:
+            line = (
+                f"Prepared by {signoff.get('prepared_by')} · Reviewed by {signoff.get('reviewed_by')} · "
+                f"Signed off by {signoff.get('approver')} on {signoff.get('timestamp', '—')}"
+            )
+        else:
+            line = f"Signed off by {signoff.get('approver')}"
+        if signoff.get("self_approved"):
+            line += f" — {SELF_APPROVED_LABEL}"
+        lines.append(line)
     # CLAUDE.md §11 "Paused runs across a code deploy" / independent review
     # 2026-09-24 gap #11: absent for the common case (exported under the
     # SAME code revision `execute` computed this run's numbers under, or no
@@ -807,9 +818,19 @@ def _signoff_line(state: RunState) -> str:
     if not signoff:
         return "Not yet signed off."
     approver = signoff.get("approver", "—")
+    # P7 review workflow (§3.7): "Prepared by P · Reviewed by R · Signed off
+    # by A on T" once a signoff carries prepared_by; a legacy signoff keeps
+    # its original one-part sentence, verbatim.
+    if signoff.get("prepared_by") is not None:
+        line = (
+            f"Prepared by {signoff.get('prepared_by')} · Reviewed by {signoff.get('reviewed_by')} · "
+            f"Signed off by {approver} on {signoff.get('timestamp', '—')}"
+        )
+    else:
+        line = f"Signed off by {approver} on {signoff.get('timestamp', '—')}"
     if signoff.get("self_approved"):
-        return f"Signed off by {approver} on {signoff.get('timestamp', '—')} — {SELF_APPROVED_LABEL}."
-    return f"Signed off by {approver} on {signoff.get('timestamp', '—')}."
+        return f"{line} — {SELF_APPROVED_LABEL}."
+    return f"{line}."
 
 
 def _build_end(prs, state: RunState, now: str):

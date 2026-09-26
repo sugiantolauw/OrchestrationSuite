@@ -1110,3 +1110,119 @@ def test_update_management_action_raises_for_an_unknown_action_id(persistence, u
             f"MA-DOES-NOT-EXIST-{uid}", owner="Alex", status="open", target_date=None,
             response=None, updated_by="reviewer@example.com", now=canonical_ts(0),
         )
+
+
+# ── P7 review workflow (docs/specs/P7_mapping_authoring_design.md §3.4, §3.10) ──
+
+
+def _review_step(run_id, action, *, actor, role, state_version, **overrides):
+    base = dict(
+        step_id=f"STEP-{run_id}-{action}-{state_version}",
+        run_id=run_id, engagement_id="ENG-DEFAULT", action=action, actor=actor, role=role,
+        matched_group=f"audit-{role}s", role_source="workspace_groups", sod_mode="enforced",
+        reason=None, theme_generation=None, narration_generation=None,
+        state_version=state_version, at=canonical_ts(state_version),
+    )
+    base.update(overrides)
+    return base
+
+
+def test_append_review_step_is_idempotent_by_step_id(persistence, uid):
+    run_id = f"RUN-RSTEP-{uid}"
+    row = _review_step(run_id, "prepared", actor="alice", role="preparer", state_version=1)
+    persistence.append_review_step(row)
+    persistence.append_review_step(row)
+
+    steps = persistence.list_review_steps(run_id)
+    assert len(steps) == 1
+    assert steps[0]["action"] == "prepared"
+    assert steps[0]["actor"] == "alice"
+
+
+def test_list_review_steps_ordered_and_scoped_to_run(persistence, uid):
+    run_id = f"RUN-RSTEP2-{uid}"
+    other_run = f"RUN-RSTEP2-OTHER-{uid}"
+    persistence.append_review_step(_review_step(run_id, "prepared", actor="alice", role="preparer", state_version=1))
+    persistence.append_review_step(_review_step(run_id, "reviewed", actor="bob", role="reviewer", state_version=2))
+    persistence.append_review_step(_review_step(other_run, "prepared", actor="carol", role="preparer", state_version=1))
+
+    steps = persistence.list_review_steps(run_id)
+    assert [s["action"] for s in steps] == ["prepared", "reviewed"]
+
+
+def _review_note(run_id, note_id, *, raised_by, raised_role, finding_id=None):
+    return {
+        "note_id": note_id, "engagement_id": "ENG-DEFAULT", "run_id": run_id, "finding_id": finding_id,
+        "raised_by": raised_by, "raised_at": canonical_ts(0), "body": "justify this",
+        "raised_role": raised_role,
+    }
+
+
+def test_add_review_note_starts_open(persistence, uid):
+    run_id = f"RUN-RNOTE-{uid}"
+    note_id = f"NOTE-{uid}"
+    inserted = persistence.add_review_note(_review_note(run_id, note_id, raised_by="bob", raised_role="reviewer"))
+    assert inserted["state"] == "open"
+    assert inserted["response"] is None
+
+    notes = persistence.list_review_notes(run_id)
+    assert len(notes) == 1
+    assert notes[0]["note_id"] == note_id
+    assert notes[0]["state"] == "open"
+
+
+def test_clear_review_note_requires_a_response_first(persistence, uid):
+    run_id = f"RUN-RNOTE2-{uid}"
+    note_id = f"NOTE2-{uid}"
+    persistence.add_review_note(_review_note(run_id, note_id, raised_by="bob", raised_role="reviewer"))
+
+    # clearing before a response is a no-op (CAS rejects: state='open' AND response IS NOT NULL)
+    assert persistence.clear_review_note(note_id, actor="alice", role="preparer", now=canonical_ts(1)) is False
+
+    assert persistence.respond_review_note(
+        note_id, response="because X", actor="alice", role="preparer", now=canonical_ts(2)
+    ) is True
+    assert persistence.clear_review_note(note_id, actor="bob", role="reviewer", now=canonical_ts(3)) is True
+
+    [note] = persistence.list_review_notes(run_id)
+    assert note["state"] == "cleared"
+    assert note["response"] == "because X"
+    assert note["responded_by"] == "alice"
+    assert note["cleared_by"] == "bob"
+    assert note["cleared_role"] == "reviewer"
+
+
+def test_respond_review_note_racing_second_call_returns_false(persistence, uid):
+    run_id = f"RUN-RNOTE3-{uid}"
+    note_id = f"NOTE3-{uid}"
+    persistence.add_review_note(_review_note(run_id, note_id, raised_by="bob", raised_role="reviewer"))
+
+    persistence.respond_review_note(note_id, response="first", actor="alice", role="preparer", now=canonical_ts(1))
+    persistence.clear_review_note(note_id, actor="bob", role="reviewer", now=canonical_ts(2))
+
+    # already cleared -- a second respond is a CAS no-op, not an overwrite
+    assert persistence.respond_review_note(note_id, response="second", actor="alice", role="preparer", now=canonical_ts(3)) is False
+    assert persistence.clear_review_note(note_id, actor="bob", role="reviewer", now=canonical_ts(4)) is False
+
+    [note] = persistence.list_review_notes(run_id)
+    assert note["response"] == "first"
+
+
+def test_reset_findings_review_state_moves_non_approved_findings_to_draft(persistence, uid):
+    from tests.test_persistence_p2 import _finding
+
+    run_id = f"RUN-RRESET-{uid}"
+    skill_id = f"SKILL-{uid}"
+    prepared = _finding(f"{run_id}:T1", rule_id=f"{skill_id}.T1", review_state="prepared")
+    approved = _finding(f"{run_id}:T2", rule_id=f"{skill_id}.T2", review_state="approved")
+    persistence.write_findings(
+        run_id, [prepared, approved], engagement_id="ENG-DEFAULT", skill_id=skill_id,
+        skill_version="1.0.0", now=canonical_ts(0),
+    )
+
+    reset_count = persistence.reset_findings_review_state(run_id, actor="carol", now=canonical_ts(1))
+    assert reset_count == 1
+
+    by_id = {f["finding_id"]: f for f in persistence.list_findings(run_id)}
+    assert by_id[prepared["finding_id"]]["review_state"] == "draft"
+    assert by_id[approved["finding_id"]]["review_state"] == "approved"

@@ -186,6 +186,51 @@ def test_execute_to_export_blocked_without_signoff():
         transition(state, "running", now="t1", phase="export")
 
 
+# ── P7 review workflow gate (docs/specs/P7_mapping_authoring_design.md §3.4) ─
+
+
+def test_execute_to_export_allowed_labelled_without_prepared_reviewed():
+    state = _state(
+        "running", phase="execute",
+        signoff={"approver": "alice", "timestamp": "t0", "sod_mode": "labelled"},
+    )
+    result = transition(state, "running", now="t1", phase="export")
+    assert result.phase == "export"
+
+
+def test_execute_to_export_blocked_enforced_without_prepared_and_reviewed():
+    state = _state(
+        "running", phase="execute",
+        signoff={"approver": "alice", "timestamp": "t0", "sod_mode": "enforced"},
+    )
+    with pytest.raises(InvalidTransition):
+        transition(state, "running", now="t1", phase="export")
+
+
+def test_execute_to_export_blocked_enforced_with_only_prepared_by():
+    state = _state(
+        "running", phase="execute",
+        signoff={
+            "approver": "alice", "timestamp": "t0", "sod_mode": "enforced",
+            "prepared_by": "bob",
+        },
+    )
+    with pytest.raises(InvalidTransition):
+        transition(state, "running", now="t1", phase="export")
+
+
+def test_execute_to_export_allowed_enforced_with_prepared_and_reviewed():
+    state = _state(
+        "running", phase="execute",
+        signoff={
+            "approver": "alice", "timestamp": "t0", "sod_mode": "enforced",
+            "prepared_by": "bob", "reviewed_by": "carol",
+        },
+    )
+    result = transition(state, "running", now="t1", phase="export")
+    assert result.phase == "export"
+
+
 @pytest.mark.parametrize("from_phase,to_phase", [
     ("plan", "export"),
     ("execute", "plan"),

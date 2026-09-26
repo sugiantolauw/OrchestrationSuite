@@ -103,6 +103,9 @@ class FakeAppContext:
     # (there is no underlying table to write to), so an edit is kept here
     # and merged back in at read time instead.
     action_overrides: dict = field(default_factory=dict)
+    # P7 review workflow (docs/specs/P7_mapping_authoring_design.md §3): a
+    # persisted stand-in for the real `review_notes` table -- {run_id: [note, ...]}.
+    review_notes: dict = field(default_factory=dict)
 
 
 def build_app_context(env=None) -> FakeAppContext:
@@ -479,19 +482,108 @@ def confirm_plan(ctx, run_id, actor) -> None:
 
 
 def sign_off(ctx, run_id, actor) -> None:
-    from orchestrator.signoff_policy import evaluate_signoff
+    from orchestrator.signoff_policy import compute_sod_waived, evaluate_signoff
 
     run = ctx.runs[run_id]
-    policy = evaluate_signoff(actor=actor, run_owner=run["run_owner"])
+    review = run.get("review") or {}
+    if review.get("stage") == "approval":
+        # P7-gated fake path: mirrors orchestrator.runs.sign_off's shape
+        # (prepared_by/reviewed_by/sod_mode/role_source/sod_waived) so UI
+        # tests exercising the P7 workflow through the fake backend see the
+        # same signoff keys the real backend would produce.
+        prepared_by = (review.get("prepared") or {}).get("actor")
+        reviewed_by = (review.get("reviewed") or {}).get("actor")
+        actors = {k: v for k, v in (("preparer", prepared_by), ("reviewer", reviewed_by), ("approver", actor)) if v}
+        sod_waived = compute_sod_waived(actors)
+        run["signoff"] = {
+            "approver": actor,
+            "timestamp": "2026-09-23T00:00:00",
+            "self_approved": bool(sod_waived),
+            "sod_enforced": True,
+            "sod_mode": "enforced",
+            "prepared_by": prepared_by,
+            "reviewed_by": reviewed_by,
+            "role_source": "config",
+            "sod_waived": sod_waived,
+            "open_notes_at_signoff": 0,
+        }
+    else:
+        policy = evaluate_signoff(actor=actor, run_owner=run["run_owner"])
+        run["signoff"] = {
+            "approver": actor,
+            "timestamp": "2026-09-23T00:00:00",
+            "self_approved": policy["self_approved"],
+            "sod_enforced": policy["sod_enforced"],
+        }
     run["status"] = "completed"
     run["status_label"] = "Completed"
-    run["signoff"] = {
-        "approver": actor,
-        "timestamp": "2026-09-23T00:00:00",
-        "self_approved": policy["self_approved"],
-        "sod_enforced": policy["sod_enforced"],
-    }
     run["state_version"] += 1
+
+
+# ── P7 review workflow (docs/specs/P7_mapping_authoring_design.md §3) ───────
+
+_FAKE_NOW = "2026-09-24T00:00:00"
+
+
+def prepare_findings(ctx, run_id, actor) -> None:
+    run = ctx.runs[run_id]
+    review = dict(run.get("review") or {})
+    review["stage"] = "review"
+    review["prepared"] = {"actor": actor, "at": _FAKE_NOW, "role_source": "config"}
+    review.setdefault("returns", [])
+    run["review"] = review
+    run["state_version"] += 1
+
+
+def mark_reviewed(ctx, run_id, actor) -> None:
+    run = ctx.runs[run_id]
+    review = dict(run.get("review") or {})
+    review["stage"] = "approval"
+    review["reviewed"] = {"actor": actor, "at": _FAKE_NOW, "role_source": "config"}
+    run["review"] = review
+    run["state_version"] += 1
+
+
+def return_to_preparer(ctx, run_id, actor, reason) -> None:
+    run = ctx.runs[run_id]
+    review = dict(run.get("review") or {})
+    review["stage"] = "preparation"
+    review["returns"] = list(review.get("returns", [])) + [{"actor": actor, "at": _FAKE_NOW, "reason": reason}]
+    run["review"] = review
+    run["state_version"] += 1
+
+
+def raise_review_note(ctx, run_id, actor, body, finding_id) -> dict:
+    notes = ctx.review_notes.setdefault(run_id, [])
+    note = {
+        "note_id": f"NOTE-{run_id}-{len(notes) + 1}", "run_id": run_id, "finding_id": finding_id,
+        "raised_by": actor, "raised_role": "reviewer", "raised_at": _FAKE_NOW,
+        "body": body, "state": "open", "response": None, "responded_by": None,
+        "responded_at": None, "cleared_by": None, "cleared_role": None, "cleared_at": None,
+    }
+    notes.append(note)
+    return note
+
+
+def respond_to_review_note(ctx, run_id, note_id, actor, response) -> dict:
+    note = next(n for n in ctx.review_notes.get(run_id, []) if n["note_id"] == note_id)
+    note["response"] = response
+    note["responded_by"] = actor
+    note["responded_at"] = _FAKE_NOW
+    return note
+
+
+def clear_review_note(ctx, run_id, note_id, actor) -> dict:
+    note = next(n for n in ctx.review_notes.get(run_id, []) if n["note_id"] == note_id)
+    note["state"] = "cleared"
+    note["cleared_by"] = actor
+    note["cleared_role"] = note.get("raised_role")
+    note["cleared_at"] = _FAKE_NOW
+    return note
+
+
+def get_review_notes(ctx, run_id) -> list:
+    return list(ctx.review_notes.get(run_id, []))
 
 
 def resume_run(ctx, run_id, actor) -> None:

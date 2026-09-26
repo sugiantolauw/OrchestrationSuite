@@ -999,6 +999,13 @@ class DeltaPersistence:
         # §2.4). Without this it stayed NULL on every completed run forever
         # (found live: P2/P3 gate review item 9).
         approved_by = (state.signoff or {}).get("approver")
+        # prepared_by/prepared_at/reviewed_by/reviewed_at (P7 review workflow,
+        # §3.4): derived from state.review the same way approved_by is
+        # derived from state.signoff above -- see persistence_local's
+        # counterpart for the full rationale.
+        review = state.review or {}
+        prepared = review.get("prepared") or {}
+        reviewed = review.get("reviewed") or {}
         set_clause = ", ".join(f"{c} = :{c}" for c in _RUN_STATE_SUMMARY_COLUMNS)
         params = {c: getattr(state, c) for c in _RUN_STATE_SUMMARY_COLUMNS}
         params.update(
@@ -1006,6 +1013,10 @@ class DeltaPersistence:
                 "audit_period_start": audit_start,
                 "audit_period_end": audit_end,
                 "approved_by": approved_by,
+                "prepared_by": prepared.get("actor"),
+                "prepared_at": prepared.get("at"),
+                "reviewed_by": reviewed.get("actor"),
+                "reviewed_at": reviewed.get("at"),
                 "new_state_version": state.state_version,
                 "run_id": state.run_id,
             }
@@ -1014,6 +1025,8 @@ class DeltaPersistence:
             conn,
             f"UPDATE {self._table('runs')} SET {set_clause}, audit_period_start = :audit_period_start, "
             "audit_period_end = :audit_period_end, approved_by = :approved_by, "
+            "prepared_by = :prepared_by, prepared_at = :prepared_at, "
+            "reviewed_by = :reviewed_by, reviewed_at = :reviewed_at, "
             "state_version = :new_state_version "
             "WHERE run_id = :run_id AND state_version < :new_state_version",
             params,
@@ -1513,6 +1526,107 @@ class DeltaPersistence:
             updated["review_state"] = to_state
             updated["updated_at"] = now
         return _finding_dict_from_row(updated)
+
+    # ── P7 review workflow (docs/specs/P7_mapping_authoring_design.md §3.4) ─
+
+    def append_review_step(self, row: dict) -> None:
+        with self._cursor_ctx() as conn:
+            self._execute(
+                conn,
+                f"MERGE INTO {self._table('review_steps')} t "
+                "USING (SELECT :step_id AS step_id) s ON t.step_id = s.step_id "
+                "WHEN NOT MATCHED THEN INSERT (step_id, run_id, engagement_id, action, actor, role, "
+                "matched_group, role_source, sod_mode, reason, theme_generation, narration_generation, "
+                "state_version, at) "
+                "VALUES (:step_id, :run_id, :engagement_id, :action, :actor, :role, :matched_group, "
+                ":role_source, :sod_mode, :reason, :theme_generation, :narration_generation, "
+                ":state_version, :at)",
+                {
+                    "step_id": row["step_id"], "run_id": row["run_id"],
+                    "engagement_id": row.get("engagement_id"), "action": row["action"],
+                    "actor": row["actor"], "role": row["role"], "matched_group": row.get("matched_group"),
+                    "role_source": row["role_source"], "sod_mode": row["sod_mode"],
+                    "reason": row.get("reason"), "theme_generation": row.get("theme_generation"),
+                    "narration_generation": row.get("narration_generation"),
+                    "state_version": row["state_version"], "at": row["at"],
+                },
+            )
+
+    def list_review_steps(self, run_id: str) -> list[dict]:
+        with self._cursor_ctx() as conn:
+            cur = self._execute(
+                conn,
+                f"SELECT * FROM {self._table('review_steps')} WHERE run_id = :run_id ORDER BY at",
+                {"run_id": run_id},
+            )
+            return _fetchall_dicts(cur)
+
+    def add_review_note(self, row: dict) -> dict:
+        with self._cursor_ctx() as conn:
+            self._execute(
+                conn,
+                f"INSERT INTO {self._table('review_notes')} (note_id, engagement_id, run_id, "
+                "finding_id, raised_by, raised_at, body, state, raised_role, cleared_by, cleared_at, "
+                "response, responded_by, responded_at, cleared_role) "
+                "VALUES (:note_id, :engagement_id, :run_id, :finding_id, :raised_by, :raised_at, "
+                ":body, 'open', :raised_role, NULL, NULL, NULL, NULL, NULL, NULL)",
+                {
+                    "note_id": row["note_id"], "engagement_id": row.get("engagement_id"),
+                    "run_id": row["run_id"], "finding_id": row.get("finding_id"),
+                    "raised_by": row["raised_by"], "raised_at": row["raised_at"], "body": row["body"],
+                    "raised_role": row.get("raised_role"),
+                },
+            )
+        return {
+            "note_id": row["note_id"], "engagement_id": row.get("engagement_id"), "run_id": row["run_id"],
+            "finding_id": row.get("finding_id"), "raised_by": row["raised_by"], "raised_at": row["raised_at"],
+            "body": row["body"], "state": "open", "raised_role": row.get("raised_role"),
+            "cleared_by": None, "cleared_at": None, "response": None, "responded_by": None,
+            "responded_at": None, "cleared_role": None,
+        }
+
+    def respond_review_note(
+        self, note_id: str, *, response: str, actor: str, role: str, now: str
+    ) -> bool:
+        with self._cursor_ctx() as conn:
+            cur = self._execute(
+                conn,
+                f"UPDATE {self._table('review_notes')} SET response = :response, "
+                "responded_by = :actor, responded_at = :now "
+                "WHERE note_id = :note_id AND state = 'open'",
+                {"response": response, "actor": actor, "now": now, "note_id": note_id},
+            )
+            return _num_affected_rows(cur) > 0
+
+    def clear_review_note(self, note_id: str, *, actor: str, role: str, now: str) -> bool:
+        with self._cursor_ctx() as conn:
+            cur = self._execute(
+                conn,
+                f"UPDATE {self._table('review_notes')} SET state = 'cleared', cleared_by = :actor, "
+                "cleared_at = :now, cleared_role = :role "
+                "WHERE note_id = :note_id AND state = 'open' AND response IS NOT NULL",
+                {"actor": actor, "now": now, "role": role, "note_id": note_id},
+            )
+            return _num_affected_rows(cur) > 0
+
+    def list_review_notes(self, run_id: str) -> list[dict]:
+        with self._cursor_ctx() as conn:
+            cur = self._execute(
+                conn,
+                f"SELECT * FROM {self._table('review_notes')} WHERE run_id = :run_id ORDER BY raised_at",
+                {"run_id": run_id},
+            )
+            return _fetchall_dicts(cur)
+
+    def reset_findings_review_state(self, run_id: str, *, actor: str, now: str) -> int:
+        with self._cursor_ctx() as conn:
+            cur = self._execute(
+                conn,
+                f"UPDATE {self._table('findings')} SET review_state = 'draft', updated_at = :now "
+                "WHERE run_id = :run_id AND review_state != 'approved'",
+                {"now": now, "run_id": run_id},
+            )
+            return _num_affected_rows(cur)
 
     # ── node attempts ────────────────────────────────────────────────────────
 
