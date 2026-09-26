@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import flask
 import fake_service
 from src import workspace_tne
 from src.platform import adapters
+
+_probe_app = flask.Flask(__name__)
 
 
 def _completed_run(skill_id="SKILL-001"):
@@ -15,6 +18,63 @@ def _completed_run(skill_id="SKILL-001"):
     )
     adapters.sign_off(run_id, "auditor@example.com")
     return run_id
+
+
+def test_action_row_view_normalizes_a_never_edited_action_status_to_canonical():
+    # BUG-ACTIONS-EDIT-1 (independent review round 5, RUN-DE56A9DED2DB):
+    # orchestrator.service.list_management_actions title-cases a never-
+    # edited action's raw "draft" status to "Draft" for the /actions page's
+    # own display -- _action_row_view must not hand that straight to the
+    # #tne-action-status dropdown's "value" (its options are lowercase),
+    # or a save that never touches the status dropdown sends "Draft" to
+    # update_management_action, which rejects it, and the WHOLE save --
+    # owner included -- never reaches Delta.
+    action = {"action_id": "MA-1", "status": "Draft", "owner": None}
+    view = workspace_tne._action_row_view(action, override=None)
+    assert view["status"] == "draft"
+
+    action = {"action_id": "MA-2", "status": "Under Review", "owner": None}
+    view = workspace_tne._action_row_view(action, override=None)
+    assert view["status"] == "under_review"
+
+
+class _FakeApp:
+    def __init__(self):
+        self.callbacks: dict[str, callable] = {}
+
+    def callback(self, *_args, **_kwargs):
+        def decorator(fn):
+            self.callbacks[fn.__name__] = fn
+            return fn
+
+        return decorator
+
+
+def test_save_action_persists_owner_when_status_dropdown_was_never_touched(monkeypatch):
+    """BUG-ACTIONS-EDIT-1 end to end through the real _save_action callback
+    (not just _action_row_view in isolation): the dropdown value the modal
+    would have shown on open, saved unmodified, must reach Delta as a real
+    owner edit -- not raise ValueError("unknown management action status")
+    server-side before the owner ever persists."""
+    run_id = _completed_run()
+    bundle = workspace_tne._load_bundle(run_id)
+    action_id = bundle["actions"][0]["action_id"]
+
+    # The modal's own status Output on open (register_callbacks' _open_
+    # action_modal) feeds the dropdown exactly this value: _action_row_
+    # view's own "status" for a never-edited action.
+    view = workspace_tne._action_row_view(bundle["actions"][0], override=None)
+    dropdown_value = view["status"]
+
+    app = _FakeApp()
+    workspace_tne.register_callbacks(app)
+    save = app.callbacks["_save_action"]
+    with _probe_app.test_request_context("/", headers={"X-Forwarded-Email": "reviewer@example.com"}):
+        save(1, {"action_id": action_id}, "New Owner", dropdown_value, None, None, {})
+
+    fresh = workspace_tne._load_bundle(run_id)
+    fresh_action = next(a for a in fresh["actions"] if a["action_id"] == action_id)
+    assert fresh_action["owner"] == "New Owner"
 
 
 def test_exposure_summary_says_not_available_when_all_none():

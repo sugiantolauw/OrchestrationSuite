@@ -273,6 +273,51 @@ def test_editing_a_management_action_persists_across_reload(running_app, watched
     watcher.assert_clean()
 
 
+def test_editing_only_the_owner_persists_without_touching_status(running_app, watched_page):
+    """BUG-ACTIONS-EDIT-1 (independent review round 5, RUN-DE56A9DED2DB): a
+    NEVER-edited action's modal opens with the status dropdown already
+    showing "Draft" (orchestrator.service.list_management_actions' own
+    display-cased default for a never-edited row) -- the prior test above
+    always re-selects "Agreed" before saving, which happens to mask this
+    bug entirely (a freshly-selected dropdown value IS one of its own
+    lowercase options). Editing ONLY the owner and saving without touching
+    the status dropdown at all is the actual round-5 repro: the modal's
+    "Draft" is not one of #tne-action-status' own option VALUES
+    ("draft"/"open"/...), so saving it unedited used to send that raw
+    display string straight to update_management_action, which rejected it
+    -- failing the whole save silently before either the owner or the
+    status ever reached Delta."""
+    page, watcher = watched_page
+    base_url = running_app["base_url"]
+    run_id = running_app["run_ids"]["completed"]
+
+    goto(page, base_url, f"/workspace/tne?run_id={run_id}")
+    page.get_by_role("tab", name="Findings & Actions").click()
+    page.get_by_role("tab", name="Management Actions").click()
+    page.wait_for_selector("#tne-mgmt-tracker-body tr")
+
+    page.locator("#tne-mgmt-tracker-body button", has_text="Edit").first.click()
+    page.locator("#tne-action-owner").wait_for(state="visible", timeout=10_000)
+
+    new_owner = f"E2E Owner Only {int(time.time())}"
+    owner_input = page.locator("#tne-action-owner")
+    owner_input.fill("")
+    owner_input.fill(new_owner)
+    # Deliberately never touches #tne-action-status.
+    page.locator("#tne-action-save").click()
+    page.wait_for_timeout(800)
+
+    page.reload(wait_until="networkidle")
+    page.get_by_role("tab", name="Findings & Actions").click()
+    page.get_by_role("tab", name="Management Actions").click()
+    page.wait_for_selector("#tne-mgmt-tracker-body tr")
+
+    assert page.get_by_text(new_owner).count() >= 1, (
+        f"edited owner {new_owner!r} did not survive a page reload"
+    )
+    watcher.assert_clean()
+
+
 # ── Start audit analysis navigates quickly ──────────────────────────────
 
 def test_start_audit_analysis_navigates_to_run_page_quickly(running_app, watched_page):
