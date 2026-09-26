@@ -489,7 +489,7 @@ _GOLDEN_PROMPT_SHA256: dict[str, str] = {
     # "key"/"top finding" for any finding that is not one of those run_high_finding_N_title
     # entries -- see orchestrator.narration.validate's N-S6 for the matching deterministic
     # check.
-    "export_summary": "80f5d91ef7da16f6fcb7f4892c964c1dad95c04c50c6778aea3411f03d872b79",
+    "export_summary": "3a09420fbd7c434188d53a7cdd961e3e0e91ae74267eb20b84615a112314ec8b",
     "export_caption": "2daab21292416c8a9c919876ce622ed59e1415568202ad5e059e8db019123698",
 }
 
