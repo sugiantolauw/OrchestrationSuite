@@ -90,6 +90,35 @@ def test_wrong_role_refused_with_group_names_in_message(local_persistence, tmp_p
     assert "audit-reviewers" in exc.value.reason
 
 
+def test_refused_trace_events_keyed_by_actor_not_just_state_version(local_persistence, tmp_path, clock):
+    # BUG-P2B-1 (independent review, RUN-69A978937B2E): a refusal never
+    # advances RunState, so two different actors refused back-to-back are
+    # refused at the SAME state_version -- the trace event id must still
+    # differ between them, or the second silently no-ops into the first's
+    # row (append_trace_event dedups by event_id).
+    h, ctx_app, state = harness_at_awaiting_signoff(local_persistence, tmp_path, clock)
+    run_id = state.run_id
+    ctx = _config_ctx(ctx_app, tmp_path, {"alice": ["preparer"], "bob": ["preparer"]})
+    service.prepare_findings(ctx, run_id, "alice")
+
+    with pytest.raises(ReviewActionRefused):
+        service.mark_reviewed(ctx, run_id, "alice")  # alice is only a preparer
+    with pytest.raises(ReviewActionRefused):
+        service.mark_reviewed(ctx, run_id, "bob")  # bob is only a preparer too, same state_version
+
+    refusals = [e for e in h.persistence.list_trace_events(run_id) if e["event_type"] == "review_action_refused"]
+    assert sorted(e["actor"] for e in refusals) == ["alice", "bob"]
+
+    # An identical retry by the same actor (same action, same state_version)
+    # stays idempotent -- no third row.
+    with pytest.raises(ReviewActionRefused):
+        service.mark_reviewed(ctx, run_id, "alice")
+    refusals_after_retry = [
+        e for e in h.persistence.list_trace_events(run_id) if e["event_type"] == "review_action_refused"
+    ]
+    assert len(refusals_after_retry) == 2
+
+
 def test_sod_enforced_refuses_second_role_for_same_actor(local_persistence, tmp_path, clock):
     h, ctx_app, state = harness_at_awaiting_signoff(local_persistence, tmp_path, clock)
     run_id = state.run_id
