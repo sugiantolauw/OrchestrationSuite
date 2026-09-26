@@ -1685,18 +1685,10 @@ One chat completion against each endpoint, recording which parameters pass throu
   `cffi` and `blinker` with `--ignore-installed` (Debian copies have no RECORD file), installs
   `requirements.txt`, and exports the gitignored `.env` into the session.
 
-### Recorded results — 2026-09-23
+### Recorded results — first workspace (2026-09-23, abandoned)
 
-| Check | Result |
-|---|---|
-| Identity / network | OK — SDK authenticates; no proxy denials |
-| Unity Catalog | Metadata OK (catalogs `samples`, `system`, `test_workspace`; schema `test_workspace.audit_ledger` created). **Storage FAILS**: credential `test_workspace` (role `…-catalog-role`) cannot be assumed — Delta writes impossible |
-| SQL warehouse | `Starter Warehouse` is **Pro, not serverless**. Launch FAILS: `WORKSPACE_CONFIGURATION_ERROR`, `sts:AssumeRole` AccessDenied on the workspace role |
-| Databricks Apps | API reachable, 0 apps. Deploy **untested** — uploading source to workspace files fails with `Cannot access AWS bucket` |
-| Model Serving | OK — `databricks-claude-sonnet-5`, `databricks-gpt-oss-120b` present (parameter matrix not yet run) |
-
-Root cause for all three failures: the workspace's AWS IAM roles no longer trust Databricks.
-That workspace was abandoned.
+Storage, the SQL warehouse and deploy all failed because the workspace's AWS IAM roles no longer
+trusted Databricks, so it was abandoned. The full check table is in git history.
 
 ### Recorded results — 2026-09-23, current workspace (Databricks-managed storage)
 
@@ -1805,10 +1797,8 @@ user's request:
 
 Never restart the App on a build that lacks the idle-polling fix.
 
-**Development-workspace spend to date** (list price, `system.billing.usage` × `list_prices`, posted
-through 2026-09-24 08:00 UTC): **about $280**. That is SQL warehouse $266 (including the $218
-incident), Apps $12, and storage, predictive optimisation and networking under $3 together. Model
-serving was under $0.01. Running costs to budget for:
+**Development-workspace spend** was about $280 to 2026-09-24 08:00 UTC, $218 of it the incident above.
+Running costs to budget for:
 - the App costs about $0.58 an hour while it is running, even when idle;
 - the warehouse costs about 20 minutes of compute per burst of activity (measured stop latency).
 
@@ -2087,19 +2077,3 @@ The self-approval text appears only where the prototype already shows who signed
   tracking, document evidence ingestion with citations and annotation, prior-year workpaper reuse,
   and workpaper generation; a separate subsystem, scoped on its own. The review workflow
   (preparer → reviewer → approver, review notes) stays in P7. Statistical sampling stays deferred.
-
----
-
-## 12. What to do first
-
-1. Run §11. Stop and report if anything fails.
-2. Read the files in §0, in full.
-3. Confirm you understand §0.2 — why the prototype is shaped the way it is, that `computation.py`
-   is the best available behavioural reference (not an unquestionable oracle), its known semantic
-   defects, and which behaviours must not survive into the build. State it back in your own words.
-4. Produce a **one-page plan for P1A only** (the immutable run ledger): `RunState` field-by-field
-   justification, the run fingerprint (`run_fingerprints` table), the explicit state machine with
-   optimistic concurrency (CAS on `state_version`), Delta DDL for `runs`, `run_state`,
-   `run_fingerprints`, `node_attempts`, `trace_events`, persistence contract, reaper, test
-   approach (including failure-injection test for CAS + idempotent MERGE), risks.
-5. Stop. Do not start P1B until P1A is reviewed.
