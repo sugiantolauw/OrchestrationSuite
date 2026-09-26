@@ -48,8 +48,25 @@ def _advance_findings_to_approved(persistence, run_id: str, *, actor: str, now: 
     )
 
 
-def _trace_event_id(run_id: str, event_type: str, state_version_after: int | None) -> str:
-    return hashlib.sha256(f"{run_id}:{event_type}:{state_version_after}".encode("utf-8")).hexdigest()[:32]
+def _trace_event_id(run_id: str, event_type: str, state_version_after: int | None, *, extra: str | None = None) -> str:
+    # BUG-P2B-1 (independent review, RUN-69A978937B2E): keying on (run_id, event_type,
+    # state_version) alone is only unique when the event is emitted from a state that a
+    # successful CAS save_state just advanced -- true for run_created/plan_confirmed/
+    # signed_off/resumed/narration_regenerate_requested/review_prepared/review_reviewed/
+    # review_returned, since CAS guarantees at most one transition wins per version. It is
+    # NOT true for events emitted from the state as merely *loaded* (no save_state call in
+    # between): review_action_refused (a refusal never advances RunState) and the note
+    # actions (raising/responding to/clearing a note is a write to its own table, not to
+    # RunState). Two different actors hitting one of those at the same state_version produce
+    # the same hash and the second silently no-ops into append_trace_event's dedup-by-
+    # event_id -- `extra` (actor+action for a refusal, the note's own note_id for a note
+    # action) disambiguates them while staying deterministic: an identical retry (same
+    # actor, same action, same state_version, same note_id) still hashes the same and stays
+    # a no-op, exactly as intended.
+    parts = [run_id, event_type, str(state_version_after)]
+    if extra is not None:
+        parts.append(extra)
+    return hashlib.sha256(":".join(parts).encode("utf-8")).hexdigest()[:32]
 
 
 # Trace page stage vocabulary for lifecycle (non-node) events (CLAUDE.md §9C non-blocking
@@ -71,10 +88,10 @@ _LIFECYCLE_STAGE_LABELS: dict[str, str] = {
 }
 
 
-def _emit(persistence, state: RunState, *, event_type: str, actor: str, message: str, now: str) -> None:
+def _emit(persistence, state: RunState, *, event_type: str, actor: str, message: str, now: str, event_id_extra: str | None = None) -> None:
     persistence.append_trace_event(
         {
-            "event_id": _trace_event_id(state.run_id, event_type, state.state_version),
+            "event_id": _trace_event_id(state.run_id, event_type, state.state_version, extra=event_id_extra),
             "run_id": state.run_id,
             "engagement_id": state.engagement_id,
             "event_type": event_type,
@@ -223,13 +240,13 @@ def _resolve_role_or_refuse(role_resolver, persistence, state: RunState, action:
     except RoleLookupFailed:
         reason = "Could not verify group membership — try again."
         _emit(persistence, state, event_type="review_action_refused", actor=actor,
-              message=f"{action} refused: {reason}", now=now)
+              message=f"{action} refused: {reason}", now=now, event_id_extra=f"{actor}:{action}")
         raise ReviewActionRefused(state.run_id, action, reason)
 
 
 def _refuse(persistence, state: RunState, action: str, actor: str, reason: str, now: str) -> None:
     _emit(persistence, state, event_type="review_action_refused", actor=actor,
-          message=f"{action} refused: {reason}", now=now)
+          message=f"{action} refused: {reason}", now=now, event_id_extra=f"{actor}:{action}")
     raise ReviewActionRefused(state.run_id, action, reason)
 
 
@@ -426,7 +443,7 @@ def raise_review_note(
     })
     target = f"finding {finding_id}" if finding_id else "the run"
     _emit(persistence, state, event_type="review_note_raised", actor=actor,
-          message=f"Note raised by {actor} on {target}", now=now)
+          message=f"Note raised by {actor} on {target}", now=now, event_id_extra=note_id)
     return note
 
 
@@ -447,7 +464,7 @@ def respond_to_review_note(
     if not ok:
         _refuse(persistence, state, "note_responded", actor, "This note is no longer open.", now)
     _emit(persistence, state, event_type="review_note_responded", actor=actor,
-          message=f"Note responded by {actor}", now=now)
+          message=f"Note responded by {actor}", now=now, event_id_extra=f"{note_id}:{actor}")
     return next(n for n in persistence.list_review_notes(run_id) if n["note_id"] == note_id)
 
 
@@ -474,7 +491,7 @@ def clear_a_review_note(
     if not ok:
         _refuse(persistence, state, "note_cleared", actor, "Respond to this note before clearing it.", now)
     _emit(persistence, state, event_type="review_note_cleared", actor=actor,
-          message=f"Note cleared by {actor}", now=now)
+          message=f"Note cleared by {actor}", now=now, event_id_extra=f"{note_id}:{actor}")
     return next(n for n in persistence.list_review_notes(run_id) if n["note_id"] == note_id)
 
 
