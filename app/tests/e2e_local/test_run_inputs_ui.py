@@ -14,9 +14,11 @@ import shutil
 import socket
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
+from collections import deque
 from pathlib import Path
 
 import pytest
@@ -44,6 +46,25 @@ def _wait_for_http_200(url: str, timeout: float) -> None:
             last_err = e
         time.sleep(0.2)
     raise RuntimeError(f"App did not respond 200 at {url} within {timeout}s (last error: {last_err})")
+
+
+def _drain_output(proc: subprocess.Popen, maxlen: int = 4000) -> deque:
+    """See conftest.py's own `_drain_output` -- an unread `subprocess.PIPE`
+    fills its OS pipe buffer once Werkzeug's per-request logging accumulates
+    enough lines, and the child then blocks on its next write, wedging the
+    whole app (every thread that also tries to log blocks on the same
+    handler lock). Draining continuously prevents that."""
+    lines: deque[str] = deque(maxlen=maxlen)
+
+    def _pump() -> None:
+        try:
+            for line in proc.stdout:
+                lines.append(line)
+        except (ValueError, OSError):
+            pass
+
+    threading.Thread(target=_pump, daemon=True, name="e2e-local-log-drain").start()
+    return lines
 
 
 def _strip_workspace_env(env: dict) -> dict:
@@ -146,17 +167,19 @@ def mapped_run_app(tmp_path_factory):
         cwd=str(REPO_ROOT), env=env,
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
     )
+    log_lines = _drain_output(proc)
+    proc.e2e_log_lines = log_lines
     base_url = f"http://127.0.0.1:{port}"
     try:
         _wait_for_http_200(base_url + "/ready", timeout=30.0)
     except Exception:
         proc.terminate()
         try:
-            out, _ = proc.communicate(timeout=10)
+            proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
             proc.kill()
-            out, _ = proc.communicate(timeout=10)
-        raise RuntimeError(f"app/app.py failed to start on {base_url}:\n{out}")
+            proc.wait(timeout=10)
+        raise RuntimeError(f"app/app.py failed to start on {base_url}:\n{''.join(log_lines)}")
 
     yield {"base_url": base_url, "run_id": run_id, "proc": proc}
 

@@ -22,9 +22,11 @@ import os
 import socket
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
+from collections import deque
 from pathlib import Path
 
 # A local copy, not `from conftest import ...` -- see test_runs_ui.py's own
@@ -44,13 +46,35 @@ def goto(page, base_url: str, path: str, wait_until: str = "networkidle"):
 def _poll_until_reload(page, base_url: str, path: str, condition, *, timeout_s: float = 60.0, interval_s: float = 2.0) -> None:
     """Re-navigates to `path` every `interval_s` until `condition()` is true
     -- see the "Approver: sign off" comment above for why this test does
-    not simply trust the page's own dcc.Interval poll here."""
+    not simply trust the page's own dcc.Interval poll here.
+
+    Root-cause fix (2026-09-26, e2e_local merge-regression investigation):
+    this used `wait_until="load"`, not this module's own `goto()` default of
+    "networkidle". "load" fires once the initial HTML document and its
+    directly-referenced scripts/styles have loaded -- it does NOT wait for
+    Dash's own client-side XHR to `_dash-update-component` that actually
+    populates `run-page-body` (the `run-poll` Interval's n_intervals=0
+    callback, fired by Dash's JS after "load"). `condition()` itself
+    (`page.locator(...).count()`) is a non-waiting snapshot, so every
+    iteration raced that XHR: check the DOM the instant "load" fires, before
+    the callback response has landed and re-rendered. That race was later
+    only exposed, not created, by this workpaper -- the P7 review page
+    renders three extra panels (narration review, AI-proposed findings,
+    review notes), each an extra read/serialisation the callback must do
+    before responding, pushing it reliably past the "load" event where the
+    lighter pre-P7 page's callback often wasn't. The result: every one of
+    the 150 reload iterations in the 300s budget sampled too early, and the
+    loop timed out even though the run had reached `completed` within
+    ~10s of sign-off (confirmed against the run's own persisted RunState).
+    "networkidle" waits for the page's in-flight network requests --
+    including that XHR -- to settle before returning, so the check that
+    follows sees the callback's actual response."""
     deadline = time.time() + timeout_s
     while time.time() < deadline:
         if condition():
             return
         time.sleep(interval_s)
-        goto(page, base_url, path, wait_until="load")
+        goto(page, base_url, path, wait_until="networkidle")
     if not condition():
         raise AssertionError(f"condition not met within {timeout_s}s polling {path}")
 
@@ -86,6 +110,25 @@ def _strip_workspace_env(env: dict) -> dict:
     return env
 
 
+def _drain_output(proc: subprocess.Popen, maxlen: int = 4000) -> deque:
+    """See conftest.py's own `_drain_output` -- an unread `subprocess.PIPE`
+    fills its OS pipe buffer once Werkzeug's per-request logging accumulates
+    enough lines, and the child then blocks on its next write, wedging the
+    whole app (every thread that also tries to log blocks on the same
+    handler lock). Draining continuously prevents that."""
+    lines: deque[str] = deque(maxlen=maxlen)
+
+    def _pump() -> None:
+        try:
+            for line in proc.stdout:
+                lines.append(line)
+        except (ValueError, OSError):
+            pass
+
+    threading.Thread(target=_pump, daemon=True, name="e2e-local-log-drain").start()
+    return lines
+
+
 def _launch_app_subprocess(base_env: dict) -> tuple[subprocess.Popen, str]:
     port = _free_port()
     full_env = dict(os.environ)
@@ -97,17 +140,19 @@ def _launch_app_subprocess(base_env: dict) -> tuple[subprocess.Popen, str]:
         cwd=str(REPO_ROOT), env=full_env,
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
     )
+    log_lines = _drain_output(proc)
+    proc.e2e_log_lines = log_lines
     base_url = f"http://127.0.0.1:{port}"
     try:
         _wait_for_http_200(base_url + "/ready", timeout=30.0)
     except Exception:
         proc.terminate()
         try:
-            out, _ = proc.communicate(timeout=10)
+            proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
             proc.kill()
-            out, _ = proc.communicate(timeout=10)
-        raise RuntimeError(f"app/app.py failed to start on {base_url}:\n{out}")
+            proc.wait(timeout=10)
+        raise RuntimeError(f"app/app.py failed to start on {base_url}:\n{''.join(log_lines)}")
     return proc, base_url
 
 
@@ -256,5 +301,13 @@ def test_review_stage_survives_an_app_restart(running_app, identity_pages, brows
         text = reviewer.content()
         assert "survive a restart" in text
         assert "Prepared by e2e-preparer@example.invalid" in text
+    except Exception:
+        # The guard for this restarted process's OWN subprocess (conftest.py's
+        # `_dump_server_log_on_failure` only covers `running_app`'s process,
+        # not this test's second one) -- print its drained log tail so a hang
+        # or crash here is diagnosable too, not just a bare timeout.
+        tail = "".join(list(proc.e2e_log_lines)[-200:])
+        print(f"\n----- restarted app subprocess log tail -----\n{tail}----- end -----\n")
+        raise
     finally:
         _stop_app_subprocess(proc)

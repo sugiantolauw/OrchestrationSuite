@@ -333,10 +333,23 @@ def test_unchecking_show_proposed_approach_auto_confirms_the_plan(running_app, w
     # did not take effect, it would stop at awaiting_confirmation and show
     # "Confirm plan" instead (CLAUDE.md §2.4: playbook auto-confirm skips
     # the confirmation gate entirely, never pausing there even briefly).
-    gate = page.locator("#run-signoff-open-btn, #run-confirm-plan-btn").first
+    #
+    # Root-cause fix (2026-09-26, e2e_local merge-regression investigation):
+    # the P7 review workflow (docs/specs/P7_mapping_authoring_design.md
+    # §3.8 UI-R1/R2) replaced the single "Sign off findings" button on a
+    # fresh awaiting_signoff run with a stage-gated one -- every run now
+    # enters that workflow at the 'preparation' stage (CLAUDE.md §11 "Runs
+    # waiting at sign-off when this ships enter the workflow at
+    # preparation"), whose action button is "Mark as prepared"
+    # (#run-mark-prepared-btn), not "Sign off findings". This is the
+    # intended, documented product behaviour, not a defect -- this
+    # assertion only cared whether the run skipped awaiting_confirmation,
+    # so the gate locator is widened to the button that stage actually
+    # shows, rather than one that no longer appears for any run.
+    gate = page.locator("#run-mark-prepared-btn, #run-confirm-plan-btn").first
     gate.wait_for(state="visible", timeout=20_000)
     assert page.locator("#run-confirm-plan-btn").count() == 0, (
         "run stopped at awaiting_confirmation -- auto_confirm_plan did not take effect"
     )
-    assert page.locator("#run-signoff-open-btn").count() == 1
+    assert page.locator("#run-mark-prepared-btn").count() == 1
     watcher.assert_clean()
