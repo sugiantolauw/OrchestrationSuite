@@ -1226,3 +1226,56 @@ def test_reset_findings_review_state_moves_non_approved_findings_to_draft(persis
     by_id = {f["finding_id"]: f for f in persistence.list_findings(run_id)}
     assert by_id[prepared["finding_id"]]["review_state"] == "draft"
     assert by_id[approved["finding_id"]]["review_state"] == "approved"
+
+
+def test_advance_findings_review_state_moves_every_matching_finding_in_one_batch(persistence, uid):
+    """BUG-R5-2 (independent review 2026-09-26): a completed, fully
+    signed-off run showed findings stuck at draft/prepared/reviewed --
+    review_state should have moved together at each stage. Reproduces the
+    reported evidence directly: findings seeded in three DIFFERENT starting
+    states (mirroring a run where prior per-row updates only landed for
+    some findings), then sign-off's own single batched call must bring
+    every one of them not already approved to 'approved' in one pass --
+    never leaving one behind because another was further along."""
+    from tests.test_persistence_p2 import _finding
+
+    run_id = f"RUN-RADVANCE-{uid}"
+    skill_id = f"SKILL-{uid}"
+    draft = _finding(f"{run_id}:T1", rule_id=f"{skill_id}.T1", review_state="draft")
+    prepared = _finding(f"{run_id}:T2", rule_id=f"{skill_id}.T2", review_state="prepared")
+    reviewed = _finding(f"{run_id}:T3", rule_id=f"{skill_id}.T3", review_state="reviewed")
+    already_approved = _finding(f"{run_id}:T4", rule_id=f"{skill_id}.T4", review_state="approved")
+    persistence.write_findings(
+        run_id, [draft, prepared, reviewed, already_approved], engagement_id="ENG-DEFAULT", skill_id=skill_id,
+        skill_version="1.0.0", now=canonical_ts(0),
+    )
+
+    advanced = persistence.advance_findings_review_state(
+        run_id, from_states=("draft", "prepared", "reviewed"), to_state="approved", actor="carol", now=canonical_ts(1),
+    )
+    assert advanced == 3
+
+    by_id = {f["finding_id"]: f for f in persistence.list_findings(run_id)}
+    assert all(by_id[f["finding_id"]]["review_state"] == "approved" for f in (draft, prepared, reviewed, already_approved))
+
+
+def test_advance_findings_review_state_only_moves_the_named_from_states(persistence, uid):
+    from tests.test_persistence_p2 import _finding
+
+    run_id = f"RUN-RADVANCE2-{uid}"
+    skill_id = f"SKILL-{uid}"
+    draft = _finding(f"{run_id}:T1", rule_id=f"{skill_id}.T1", review_state="draft")
+    prepared = _finding(f"{run_id}:T2", rule_id=f"{skill_id}.T2", review_state="prepared")
+    persistence.write_findings(
+        run_id, [draft, prepared], engagement_id="ENG-DEFAULT", skill_id=skill_id,
+        skill_version="1.0.0", now=canonical_ts(0),
+    )
+
+    advanced = persistence.advance_findings_review_state(
+        run_id, from_states=("draft",), to_state="prepared", actor="carol", now=canonical_ts(1),
+    )
+    assert advanced == 1
+
+    by_id = {f["finding_id"]: f for f in persistence.list_findings(run_id)}
+    assert by_id[draft["finding_id"]]["review_state"] == "prepared"
+    assert by_id[prepared["finding_id"]]["review_state"] == "prepared"

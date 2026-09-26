@@ -1628,6 +1628,25 @@ class DeltaPersistence:
             )
             return _num_affected_rows(cur)
 
+    def advance_findings_review_state(
+        self, run_id: str, *, from_states: tuple[str, ...], to_state: str, actor: str, now: str,
+    ) -> int:
+        """BUG-R5-2 -- see persistence_local's own docstring for the root
+        cause this replaces (a per-finding UPDATE loop, one round trip per
+        row, any one of which not landing leaves that finding stuck).
+        `IN (:s0, :s1, ...)` rather than a Python-built literal list, so
+        `from_states` is bound as parameters like every other query here."""
+        state_params = {f"s{i}": s for i, s in enumerate(from_states)}
+        placeholders = ", ".join(f":{k}" for k in state_params)
+        with self._cursor_ctx() as conn:
+            cur = self._execute(
+                conn,
+                f"UPDATE {self._table('findings')} SET review_state = :to_state, updated_at = :now "
+                f"WHERE run_id = :run_id AND review_state IN ({placeholders})",
+                {"to_state": to_state, "now": now, "run_id": run_id, **state_params},
+            )
+            return _num_affected_rows(cur)
+
     # ── node attempts ────────────────────────────────────────────────────────
 
     def begin_node_attempt(

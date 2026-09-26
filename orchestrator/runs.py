@@ -35,16 +35,17 @@ def _advance_findings_to_approved(persistence, run_id: str, *, actor: str, now: 
     """Independent-review audit gap (CLAUDE.md §11, this WP's brief): sign-off
     is the control that says what leaves the system (§2.4) -- a finding a
     human signed off on must not still read 'draft' in the XLSX/PPTX export
-    and on `/workspace/tne`. `set_finding_review_state` only ever advances one
-    step (persistence_local._REVIEW_STATE_ORDER), so a finding already past
-    'draft' (P7-era preparer/reviewer steps, once they exist) is simply
-    walked the rest of the way rather than re-driven from the start."""
-    for finding in persistence.list_findings(run_id):
-        current = finding.get("review_state") or "draft"
-        if current not in _REVIEW_STATE_SEQUENCE:
-            continue
-        for step in _REVIEW_STATE_SEQUENCE[_REVIEW_STATE_SEQUENCE.index(current) + 1 :]:
-            persistence.set_finding_review_state(finding["finding_id"], to_state=step, actor=actor, now=now)
+    and on `/workspace/tne`. BUG-R5-2 (independent review 2026-09-26): this
+    used to walk `list_findings` in Python and call `set_finding_review_
+    state` once per finding, per step -- N separate round trips for one
+    logical "sign off this run" action, any one of which not landing left
+    that finding stuck below 'approved' forever, silently. One batched
+    `advance_findings_review_state` call moves every finding not already
+    'approved' there directly, atomically, regardless of which of
+    draft/prepared/reviewed it currently sits at."""
+    persistence.advance_findings_review_state(
+        run_id, from_states=_REVIEW_STATE_SEQUENCE[:-1], to_state="approved", actor=actor, now=now,
+    )
 
 
 def _trace_event_id(run_id: str, event_type: str, state_version_after: int | None) -> str:
@@ -292,9 +293,10 @@ def prepare(persistence, run_id: str, *, actor: str, now: str, role_resolver, se
     # same finding forward (CLAUDE.md §9C failure-injection discipline).
     saved = persistence.save_state(new_state)
 
-    for finding in persistence.list_findings(run_id):
-        if (finding.get("review_state") or "draft") == "draft":
-            persistence.set_finding_review_state(finding["finding_id"], to_state="prepared", actor=actor, now=now)
+    # BUG-R5-2: one batched UPDATE, not a per-finding round trip -- see
+    # _advance_findings_to_approved's own docstring for the failure shape
+    # this replaces.
+    persistence.advance_findings_review_state(run_id, from_states=("draft",), to_state="prepared", actor=actor, now=now)
 
     persistence.append_review_step({
         "step_id": _step_id(run_id, "prepared", state.state_version),
@@ -331,9 +333,10 @@ def mark_reviewed(persistence, run_id: str, *, actor: str, now: str, role_resolv
     # CAS FIRST -- see prepare()'s own comment above.
     saved = persistence.save_state(new_state)
 
-    for finding in persistence.list_findings(run_id):
-        if (finding.get("review_state") or "draft") == "prepared":
-            persistence.set_finding_review_state(finding["finding_id"], to_state="reviewed", actor=actor, now=now)
+    # BUG-R5-2: one batched UPDATE, not a per-finding round trip -- see
+    # _advance_findings_to_approved's own docstring for the failure shape
+    # this replaces.
+    persistence.advance_findings_review_state(run_id, from_states=("prepared",), to_state="reviewed", actor=actor, now=now)
 
     persistence.append_review_step({
         "step_id": _step_id(run_id, "reviewed", state.state_version),
@@ -565,11 +568,7 @@ def sign_off(
     saved = persistence.save_state(new_state)
 
     if p7_active:
-        for finding in persistence.list_findings(run_id):
-            current = finding.get("review_state") or "draft"
-            if current in _REVIEW_STATE_SEQUENCE:
-                for step in _REVIEW_STATE_SEQUENCE[_REVIEW_STATE_SEQUENCE.index(current) + 1 :]:
-                    persistence.set_finding_review_state(finding["finding_id"], to_state=step, actor=actor, now=now)
+        _advance_findings_to_approved(persistence, run_id, actor=actor, now=now)
         persistence.append_review_step({
             "step_id": _step_id(run_id, "approved", state.state_version),
             "run_id": run_id, "engagement_id": state.engagement_id, "action": "approved",
