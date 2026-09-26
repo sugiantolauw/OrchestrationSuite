@@ -123,7 +123,16 @@ def test_ensure_group_raises_a_clear_error_for_an_unknown_user():
     assert raised
 
 
-def test_main_reports_missing_group_configuration(capsys):
+def test_main_reports_missing_group_configuration(monkeypatch, capsys):
+    # Hermetic: the session may export real REVIEW_*_GROUPS, and this path must never reach a workspace.
+    for name in ("REVIEW_PREPARER_GROUPS", "REVIEW_REVIEWER_GROUPS", "REVIEW_APPROVER_GROUPS"):
+        monkeypatch.delenv(name, raising=False)
+    import databricks.sdk
+
+    def _no_workspace():
+        raise AssertionError("test must not construct a real WorkspaceClient")
+
+    monkeypatch.setattr(databricks.sdk, "WorkspaceClient", _no_workspace)
     rc = ensure_review_groups.main(["--member", "alice@example.com"])
     assert rc == 1
     out = capsys.readouterr().out
