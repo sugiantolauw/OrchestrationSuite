@@ -110,6 +110,47 @@ def test_plan_to_execute_allowed_for_playbook_auto_confirm():
     assert result.phase == "execute"
 
 
+def test_plan_to_execute_blocked_for_playbook_auto_confirm_with_run_inputs():
+    # Independent review 2026-09-25 item 1 ("run inputs" -- docs/specs/
+    # P7_mapping_authoring_design.md §1.3 "Mandatory plan confirmation"): a
+    # run with a declared column mapping makes confirmation mandatory even
+    # in Playbook with auto_confirm_plan set.
+    state = _state(
+        "running", phase="plan", plan_confirmed=False, mode="playbook",
+        options={"auto_confirm_plan": True, "run_inputs": {"mappings": {"expense_report": {"a": "b"}}}},
+    )
+    with pytest.raises(InvalidTransition):
+        transition(state, "running", now="t1", phase="execute")
+
+
+def test_plan_to_execute_blocked_for_playbook_auto_confirm_with_not_supplied():
+    state = _state(
+        "running", phase="plan", plan_confirmed=False, mode="playbook",
+        options={"auto_confirm_plan": True, "run_inputs": {"not_supplied": {"booking_detail": {"reason": "x"}}}},
+    )
+    with pytest.raises(InvalidTransition):
+        transition(state, "running", now="t1", phase="execute")
+
+
+def test_plan_to_execute_allowed_for_playbook_auto_confirm_with_empty_run_inputs():
+    # An empty run_inputs dict (present but nothing declared) never trips the gate.
+    state = _state(
+        "running", phase="plan", plan_confirmed=False, mode="playbook",
+        options={"auto_confirm_plan": True, "run_inputs": {"mappings": {}, "not_supplied": {}, "parameters": {}}},
+    )
+    result = transition(state, "running", now="t1", phase="execute")
+    assert result.phase == "execute"
+
+
+def test_plan_to_execute_allowed_for_playbook_with_run_inputs_when_explicitly_confirmed():
+    state = _state(
+        "running", phase="plan", plan_confirmed=True, mode="playbook",
+        options={"auto_confirm_plan": True, "run_inputs": {"mappings": {"expense_report": {"a": "b"}}}},
+    )
+    result = transition(state, "running", now="t1", phase="execute")
+    assert result.phase == "execute"
+
+
 def test_plan_to_execute_blocked_without_confirmation_or_auto_confirm():
     state = _state("running", phase="plan", plan_confirmed=False, mode="playbook", options={})
     with pytest.raises(InvalidTransition):

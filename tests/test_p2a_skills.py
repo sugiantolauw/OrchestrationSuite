@@ -80,6 +80,14 @@ def _base_findings() -> dict:
     }
 
 
+def _base_risk_control() -> dict:
+    return {
+        "controls": [
+            {"control_id": "CTL-1", "risk_id": "RSK-1", "category": "test", "title": "test", "tests": ["T1"]},
+        ]
+    }
+
+
 def _skill(**overrides) -> Skill:
     kwargs = dict(
         skill_dir=Path("."),
@@ -88,6 +96,7 @@ def _skill(**overrides) -> Skill:
         plan=_base_plan(),
         findings=_base_findings(),
         thresholds=_base_thresholds(),
+        risk_control=_base_risk_control(),
     )
     kwargs.update(overrides)
     return Skill(**kwargs)

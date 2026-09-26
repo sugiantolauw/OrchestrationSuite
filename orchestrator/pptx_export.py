@@ -767,6 +767,21 @@ def _build_methodology(prs, state: RunState, metrics: dict, skill, catalogue_row
     content = [
         ("Data sources", f"{len(state.data_assets)} bound source(s) at pinned table version / file hash. "
                           f"The full source-version and file-hash provenance is recorded with this run."),
+    ]
+    # Independent review 2026-09-25 item 1 ("run inputs" -- docs/specs/
+    # P7_mapping_authoring_design.md §1.3): one line, absent for the common
+    # case of a run with no declared mapping/parameter/not_supplied source.
+    run_inputs = (state.options or {}).get("run_inputs") or {}
+    n_mappings = len(run_inputs.get("mappings") or {})
+    n_parameters = len(run_inputs.get("parameters") or {})
+    n_not_supplied = len(run_inputs.get("not_supplied") or {})
+    if n_mappings or n_parameters or n_not_supplied:
+        content.append((
+            "Run inputs",
+            f"Project-specific inputs applied: {n_mappings} column mapping(s), {n_parameters} "
+            f"parameter(s), {n_not_supplied} source(s) not supplied (see workpaper).",
+        ))
+    content += [
         ("Population reconciliation", recon_line),
         ("Threshold provenance", threshold_line),
         ("Test coverage", f"{len(catalogue_rows)} catalogue test(s). {not_testable_line}"),

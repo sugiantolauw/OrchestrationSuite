@@ -81,13 +81,14 @@ def test_engine_end_to_end_on_mini_skill(tmp_path: Path, mini_skill):
 
 def test_engine_never_calls_an_llm_signature():
     # execute_skill's only inputs are a skill, a data source, an audit period,
-    # run_context and an optional pinned_versions override -- no model client
-    # parameter exists to call (NN2).
+    # run_context, an optional pinned_versions override and an optional
+    # not_supplied set (independent review 2026-09-25 item 1, "run inputs")
+    # -- no model client parameter exists to call (NN2).
     import inspect
 
     sig = inspect.signature(execute_skill)
     assert set(sig.parameters) == {
-        "skill", "data_source", "audit_period", "run_context", "pinned_versions",
+        "skill", "data_source", "audit_period", "run_context", "pinned_versions", "not_supplied",
     }
 
 

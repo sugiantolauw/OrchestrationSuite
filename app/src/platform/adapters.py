@@ -114,6 +114,13 @@ def suggest_bindings(skill_id: str, *, skill: dict | None = None) -> dict:
     return service.suggest_bindings(get_context(), skill_id, skill=skill)
 
 
+def not_supplied_sources(skill_id: str) -> dict:
+    """{source_name: reason} for this Skill's SOURCE_BINDINGS
+    kind=not_supplied entries (independent review 2026-09-25 item 1, "run
+    inputs") -- run_setup._auto_bind's own docstring."""
+    return service.not_supplied_sources_for_skill(get_context(), skill_id)
+
+
 def search_governed_data(query: str, limit: int | None = None) -> list[dict]:
     """Real Unity Catalog / local-source discovery (orchestrator.service.
     list_data_asset_cards), filtered by `query` against the fully-qualified

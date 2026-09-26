@@ -113,6 +113,12 @@ class Skill:
     custom_derivations: dict[str, Callable] = field(default_factory=dict)
     workspace_fn: Callable | None = None
     content_hash: str | None = None
+    # Independent review 2026-09-24 item 1 ("run inputs"): {test_id: {source
+    # names}}, computed once at load_skill() (always populated, whether or
+    # not validate() is ever called) so execute_skill can turn a test whose
+    # source was not supplied for this run into not_testable.
+    test_sources: dict[str, set] = field(default_factory=dict)
+    risk_control: dict = field(default_factory=dict)
 
     @property
     def metric_descriptions(self) -> dict[str, str]:
@@ -161,6 +167,11 @@ def load_skill(skill_dir: str | Path) -> Skill:
     plan = _load_yaml_validated(skill_dir / "plan.yaml", _SCHEMAS["plan"])
     findings = _load_yaml_validated(skill_dir / "findings.yaml", _SCHEMAS["findings"])
     thresholds = _load_yaml_validated(skill_dir / "thresholds.yaml", _SCHEMAS["thresholds"])
+    risk_control_path = skill_dir / "risk_control.yaml"
+    try:
+        risk_control = yaml.safe_load(risk_control_path.read_text()) or {}
+    except yaml.YAMLError as exc:
+        raise SkillValidationError([f"risk_control.yaml: could not parse YAML: {exc}"]) from exc
 
     references = _load_references(skill_dir / "reference")
     prompts = _load_prompts(skill_dir / "prompts")
@@ -185,6 +196,8 @@ def load_skill(skill_dir: str | Path) -> Skill:
         custom_derivations=custom_derivations,
         workspace_fn=workspace_fn,
         content_hash=skill_content_hash(skill_dir),
+        test_sources=compute_test_sources(plan),
+        risk_control=risk_control,
     )
 
 
@@ -241,6 +254,72 @@ def load_skill_from_ledger(row: dict) -> Skill:
     return skill
 
 
+def _test_flag_names(test: dict) -> list[str]:
+    """Every RF_* column one plan.yaml test entry writes to flagged_rows --
+    the top-level `flag` plus any `params` key equal to "flag" or starting
+    with "flag_" (some primitives write more than one flag, e.g.
+    split_detection's `flag_same_day`/`flag_window` -- CLAUDE.md P2/P3 gate
+    review item 5). A not_testable test's flags are its own declared
+    (plural) list. Factored out of `plan_test_flags` (below) so
+    `orchestrator.engine.execute_skill` can compute the same set for a test
+    that becomes not_testable at RUN TIME (independent review 2026-09-24
+    item 1, "run inputs" -- a source not supplied for this run), without
+    duplicating the flag-collection rule."""
+    if "not_testable" in test:
+        return list(test["not_testable"].get("flags", []))
+    flags: list[str] = []
+    seen: set[str] = set()
+    top_level = test.get("flag")
+    if top_level:
+        flags.append(top_level)
+        seen.add(top_level)
+    for key, value in (test.get("params") or {}).items():
+        if not isinstance(value, str) or not value:
+            continue
+        if key == "flag" or key.startswith("flag_"):
+            if value not in seen:
+                flags.append(value)
+                seen.add(value)
+    return flags
+
+
+def _test_required_sources(test: dict, populations: dict) -> set[str]:
+    """Independent review 2026-09-24 item 1 ("run inputs"): the contract
+    source(s) one plan.yaml test genuinely reads, derived at Skill load so
+    `orchestrator.engine.execute_skill` can turn a test whose source was not
+    supplied for this run into `not_testable` rather than crashing. A
+    test's dependency is the populations named in its params
+    (population/left_population/right_population), then each population's
+    own declared source -- a test whose primitive is custom and does not
+    use those param names must declare `requires_sources` explicitly,
+    because load cannot see inside code (CLAUDE.md §1.3). A test already
+    declared `not_testable` at authoring time has no run-time dependency of
+    its own: it never runs regardless of what sources this run supplies."""
+    if "not_testable" in test:
+        return set()
+    sources: set[str] = set(test.get("requires_sources") or [])
+    params = test.get("params") or {}
+    for pop_key in ("population", "left_population", "right_population"):
+        pop_name = params.get(pop_key)
+        pop_cfg = populations.get(pop_name) if pop_name else None
+        if pop_cfg and pop_cfg.get("source"):
+            sources.add(pop_cfg["source"])
+    return sources
+
+
+def compute_test_sources(plan: dict) -> dict[str, set[str]]:
+    """`{test_id: {contract source names this test reads}}` for every test
+    plan.yaml declares. Computed once at Skill load (`load_skill`), so it is
+    available to `execute_skill` even when a caller never explicitly calls
+    `validate_skill` on this Skill object."""
+    populations = plan.get("populations", {})
+    return {
+        t["test_id"]: _test_required_sources(t, populations)
+        for t in plan.get("tests", [])
+        if "test_id" in t
+    }
+
+
 def plan_test_flags(plan_tests: list[dict]) -> list[dict]:
     """Flattens plan.yaml's `tests` into {test_id, flag, primitive} rows --
     one row per RF_* flag a plan test can actually write to flagged_rows.
@@ -263,25 +342,9 @@ def plan_test_flags(plan_tests: list[dict]) -> list[dict]:
     entries: list[dict] = []
     for t in plan_tests:
         test_id = t["test_id"]
-        if "not_testable" in t:
-            for flag in t["not_testable"].get("flags", []):
-                entries.append({"test_id": test_id, "flag": flag, "primitive": None})
-            continue
-        flags: list[str] = []
-        seen: set[str] = set()
-        top_level = t.get("flag")
-        if top_level:
-            flags.append(top_level)
-            seen.add(top_level)
-        for key, value in (t.get("params") or {}).items():
-            if not isinstance(value, str) or not value:
-                continue
-            if key == "flag" or key.startswith("flag_"):
-                if value not in seen:
-                    flags.append(value)
-                    seen.add(value)
-        for flag in flags:
-            entries.append({"test_id": test_id, "flag": flag, "primitive": t.get("primitive")})
+        primitive = None if "not_testable" in t else t.get("primitive")
+        for flag in _test_flag_names(t):
+            entries.append({"test_id": test_id, "flag": flag, "primitive": primitive})
     return entries
 
 
@@ -428,11 +491,30 @@ def validate_skill(skill: Skill) -> None:
                     f"frame_tags.{tag_name}.from.{label}: unknown population {pop_name!r}"
                 )
 
+    # Referential check (independent review 2026-09-24 item 2 §2.1): every
+    # plan.yaml test's control_id/risk_id must be a real risk_control.yaml
+    # control, with the matching risk_id -- and (below, after this loop)
+    # every control's own `tests` list must name a real plan.yaml test_id.
+    # Applies to every test, including a `not_testable` one: the plan.schema
+    # requires control_id/risk_id/assertion on both shapes.
+    rc_controls = {c.get("control_id"): c for c in skill.risk_control.get("controls", [])}
+
     for i, test in enumerate(tests):
         test_id = test.get("test_id", f"tests[{i}]")
         if test_id in seen_test_ids:
             violations.append(f"tests: duplicate test_id {test_id!r}")
         seen_test_ids.add(test_id)
+
+        control_id = test.get("control_id")
+        risk_id = test.get("risk_id")
+        ctrl = rc_controls.get(control_id)
+        if ctrl is None:
+            violations.append(f"{test_id}: control_id {control_id!r} is not a control in risk_control.yaml")
+        elif ctrl.get("risk_id") != risk_id:
+            violations.append(
+                f"{test_id}: risk_id {risk_id!r} does not match risk_control.yaml control "
+                f"{control_id!r}'s own risk_id {ctrl.get('risk_id')!r}"
+            )
 
         if "not_testable" in test:
             continue
@@ -489,6 +571,14 @@ def validate_skill(skill: Skill) -> None:
             # config -- it declares them via produces_metrics so findings.yaml can
             # still be validated against real, produced metric names.
             known_metric_names |= set(custom_entry.get("produces_metrics", []))
+
+    for ctrl in skill.risk_control.get("controls", []):
+        for t in ctrl.get("tests", []):
+            if t not in seen_test_ids:
+                violations.append(
+                    f"risk_control.yaml: control {ctrl.get('control_id')!r} names test {t!r}, "
+                    f"which is not a test_id in plan.yaml"
+                )
 
     for tid, spec in thresholds.items():
         provenance = spec.get("provenance", {})

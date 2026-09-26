@@ -402,6 +402,12 @@ def _auto_bind(skill_id: str) -> tuple[dict[str, str], list[str]]:
     skill = adapters.get_skill(skill_id) or {}
     source_names = [s.get("source") for s in (skill.get("sources") or [])]
     suggested = adapters.suggest_bindings(skill_id, skill=skill) or {}
+    # Independent review 2026-09-25 item 1 ("run inputs" -- docs/specs/
+    # P7_mapping_authoring_design.md §1.3): a source SOURCE_BINDINGS declares
+    # kind=not_supplied needs no physical binding at all -- treated as bound
+    # here (never missing), with no value in `bindings` for it either;
+    # start_audit_run resolves it the same way from the same config.
+    not_supplied = adapters.not_supplied_sources(skill_id)
 
     current_owner = _request_owner()
     uploads_by_stem: dict[str, dict] = {}
@@ -418,6 +424,8 @@ def _auto_bind(skill_id: str) -> tuple[dict[str, str], list[str]]:
     bindings: dict[str, str] = {}
     missing: list[str] = []
     for name in source_names:
+        if name in not_supplied:
+            continue
         upload_row = uploads_by_stem.get(name)
         governed = suggested.get(name)
         upload_is_recent = upload_row is not None and _is_recent_upload(upload_row.get("uploaded_at"))

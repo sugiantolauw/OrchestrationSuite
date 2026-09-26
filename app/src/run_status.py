@@ -104,6 +104,31 @@ def _signoff_text(run: dict) -> str:
     return text
 
 
+def _run_inputs_lines(run_inputs: dict | None) -> list[str]:
+    """UI-M1 (D-P7-2, docs/specs/P7_mapping_authoring_design.md §1.4): one
+    line per declared column mapping, parameter and not_supplied source, in
+    the exact shapes named there -- so a mandatory plan confirmation shows
+    the auditor what they are confirming, never an invisible mapping."""
+    run_inputs = run_inputs or {}
+    lines: list[str] = []
+    for source, columns in sorted((run_inputs.get("mappings") or {}).items()):
+        pairs = ", ".join(f"{physical!r} used as {contract}" for contract, physical in sorted(columns.items()))
+        lines.append(f"{source}: column {pairs}")
+    for name, param in sorted((run_inputs.get("parameters") or {}).items()):
+        provenance = param.get("provenance") or {}
+        filename = param.get("path", "").rsplit("/", 1)[-1]
+        sha_prefix = (param.get("sha256") or "")[:8]
+        lines.append(
+            f"{name}: {filename} (sha256 {sha_prefix}…, owner {provenance.get('owner')}, "
+            f"as of {provenance.get('as_of')})"
+        )
+    for source, entry in sorted((run_inputs.get("not_supplied") or {}).items()):
+        affected = ", ".join(entry.get("affected_tests") or [])
+        suffix = f" — {affected} not testable" if affected else ""
+        lines.append(f"{source} not supplied ({entry.get('reason')}){suffix}")
+    return lines
+
+
 def _error_panel(exc: Exception) -> html.Div:
     return html.Div([
         html.H3("Action blocked", style={"margin": "0 0 6px", "color": "#b85042"}),
@@ -362,12 +387,27 @@ def _render_body(run: dict | None, run_id: str, narration: dict | None = None) -
     blocks = [header, _progress_view(run)]
 
     if status == "awaiting_confirmation":
-        blocks.append(html.Div([
+        confirm_children = [
             html.H3("Proposed plan is ready for review", style={"margin": "0 0 6px"}),
             html.P("Confirm the plan to continue to execution.", className="sub"),
+        ]
+        run_inputs_lines = _run_inputs_lines(run.get("options", {}).get("run_inputs"))
+        if run_inputs_lines:
+            # UI-M1 (D-P7-2, docs/specs/P7_mapping_authoring_design.md
+            # §1.4): a mandatory confirmation of an invisible mapping is not
+            # a control -- every declared column mapping, parameter and
+            # not_supplied source is listed below the existing "sub"
+            # sentence, so the auditor confirms what they can see.
+            confirm_children.append(html.P(
+                "This run uses project-specific inputs, so the plan must be confirmed.",
+                className="sub",
+            ))
+            confirm_children.append(html.Ul([html.Li(line) for line in run_inputs_lines]))
+        confirm_children.append(
             html.Button("Confirm plan", id="run-confirm-plan-btn", className="btn-generate",
                         style={"width": "auto", "padding": "10px 24px"}),
-        ], className="panel", style={"marginTop": 16}))
+        )
+        blocks.append(html.Div(confirm_children, className="panel", style={"marginTop": 16}))
 
     elif status == "awaiting_signoff":
         findings = run.get("findings", [])

@@ -23,6 +23,7 @@ sources:
     format: csv
     file: register.csv
     header_trim: true
+    optional: true
     columns:
       Employee ID:
         type: integer
@@ -34,3 +35,10 @@ sources:
         type: string
         nullable: false
         trim_values: true
+
+parameters:
+  population_of_interest:
+    references: [employee_ids]
+    kind: id_list
+    item_type: integer
+    group: population_of_interest

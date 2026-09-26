@@ -1034,3 +1034,44 @@ def test_degraded_xlsx_narrative_sheet_fallback_text_equals_deterministic_text(d
         assert row["status"] == "fallback_unavailable"
         assert row["label"] == LABEL_LLM_UNAVAILABLE
         assert row["text"] == f["observation"]
+
+
+# ── Run inputs methodology line (independent review 2026-09-25 item 1,
+#    docs/specs/P7_mapping_authoring_design.md §1.3) ────────────────────────
+
+def _methodology_text(prs) -> list[str]:
+    for slide in prs.slides:
+        titles = [s.text_frame.text for s in slide.shapes if s.has_text_frame]
+        if "Methodology & Limitations" in titles:
+            return [s.text_frame.text for s in slide.shapes if s.has_text_frame]
+    raise AssertionError("no Methodology & Limitations slide found")
+
+
+def test_methodology_slide_has_no_run_inputs_line_by_default(real_deck):
+    texts = _methodology_text(real_deck["prs"])
+    assert not any("Project-specific inputs applied" in t for t in texts)
+
+
+def test_methodology_line_text_matches_the_run_inputs_dict(real_deck):
+    from orchestrator.pptx_export import _build_methodology
+    import dataclasses
+    from pptx import Presentation as _Presentation
+    from orchestrator.skills import load_skill
+
+    state = real_deck["state"]
+    run_inputs = {
+        "mappings": {"expense_report": {"Employee ID": "Emp No"}},
+        "not_supplied": {"booking_detail": {"reason": "no data", "affected_tests": ["T3.1b"]}},
+        "parameters": {},
+    }
+    state_with_inputs = dataclasses.replace(state, options={**state.options, "run_inputs": run_inputs})
+
+    prs = _Presentation(str(DEFAULT_PPTX_TEMPLATE_PATH))
+    skill = load_skill(SKILL_DIR)
+    catalogue_rows = load_catalogue_rows(SKILL_DIR)
+    metrics = real_deck["metrics"]
+    _build_methodology(prs, state_with_inputs, metrics, skill, catalogue_rows, "2026-01-01T00:00:00Z")
+
+    texts = [s.text_frame.text for s in prs.slides[0].shapes if s.has_text_frame]
+    joined = "\n".join(texts)
+    assert "Project-specific inputs applied: 1 column mapping(s), 0 parameter(s), 1 source(s) not supplied" in joined

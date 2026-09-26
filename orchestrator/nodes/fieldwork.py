@@ -100,6 +100,13 @@ def discover(ctx: NodeContext, state: RunState) -> RunState:
     for source, binding in bindings.items():
         if source not in contract_sources:
             continue
+        if binding.get("not_supplied"):
+            # Independent review 2026-09-25 item 1: an unsupplied source has
+            # no physical binding to re-resolve -- its reason was already
+            # validated at run creation (orchestrator.run_inputs.
+            # resolve_run_inputs), and its dependent tests become
+            # not_testable in execute_skill.
+            continue
         try:
             current_version = ctx.data_source.resolve_version(source)
         except Exception as exc:  # noqa: BLE001 - surfaced as a named contract violation
@@ -163,9 +170,16 @@ def profile(ctx: NodeContext, state: RunState) -> RunState:
 
     contract_sources = ctx.skill.contract.get("sources", {})
     bindings = {b["source"]: b["version"] for b in state.data_assets}
+    run_inputs = (state.options or {}).get("run_inputs") or {}
+    not_supplied = {s: v["reason"] for s, v in (run_inputs.get("not_supplied") or {}).items()}
 
     profile_result: dict[str, dict] = {}
     for source, source_cfg in contract_sources.items():
+        if source in not_supplied:
+            # Independent review 2026-09-25 item 1: listed with its reason,
+            # never as a fabricated 0-row profile (CLAUDE.md NN14).
+            profile_result[source] = {"not_supplied": not_supplied[source]}
+            continue
         version = bindings[source]
         df = ctx.data_source.read_population(source, version=version)
         columns_cfg = source_cfg.get("columns", {})
@@ -178,7 +192,7 @@ def profile(ctx: NodeContext, state: RunState) -> RunState:
         }
 
     now = ctx.clock()
-    total_rows = sum(p["row_count"] for p in profile_result.values())
+    total_rows = sum(p.get("row_count") or 0 for p in profile_result.values())
     message = f"{len(profile_result)} source(s) profiled, {total_rows} row(s) total"
     return dataclasses.replace(
         state, profile_result=profile_result, events=state.events + [_event("profile", message, now)]
@@ -512,13 +526,18 @@ def execute(ctx: NodeContext, state: RunState) -> RunState:
     source) straight through as execute_skill's pinned_versions -- a source
     that changes between run creation and this node running does not change
     what gets read (CLAUDE.md §4.1 TOCTOU ordering)."""
-    pinned_versions = {b["source"]: b["version"] for b in state.data_assets}
+    run_inputs = (state.options or {}).get("run_inputs") or {}
+    not_supplied = {s: v["reason"] for s, v in (run_inputs.get("not_supplied") or {}).items()}
+    pinned_versions = {
+        b["source"]: b["version"] for b in state.data_assets if b["source"] not in not_supplied
+    }
     result = execute_skill(
         ctx.skill,
         data_source=ctx.data_source,
         audit_period=state.audit_period,
         run_context={"run_id": state.run_id},
         pinned_versions=pinned_versions,
+        not_supplied=not_supplied,
     )
 
     metric_test_id: dict[str, str] = {}
@@ -617,6 +636,14 @@ def execute(ctx: NodeContext, state: RunState) -> RunState:
         if max_date_match is False:
             differences.append(f"{source}: engine_max_date={engine_max_date} independent_max_date={independent['max_date']}")
 
+    # Independent review 2026-09-25 item 1 ("run inputs"): a not_supplied
+    # source is listed here with its reason -- never as an absent row, and
+    # never as 0 rows (CLAUDE.md §11 "'—' replaces a fabricated '$0'"): every
+    # numeric key is simply absent, so the XLSX Reconciliation sheet's
+    # existing "—" convention renders it correctly with no further change.
+    for source, reason in not_supplied.items():
+        reconciliation[source] = {"not_supplied": reason}
+
     # Item 8 (CLAUDE.md §5 G6 caveat, P2/P3 gate review): the source-level
     # check above only catches a whole SOURCE'S row count drifting from an
     # independent count -- it says nothing about a single TESTED population
@@ -630,7 +657,7 @@ def execute(ctx: NodeContext, state: RunState) -> RunState:
     # non-unique-keyed merge, anything -- happened without being accounted
     # for, and the run fails outright rather than reporting a population
     # whose own numbers do not add up.
-    independent_rows_by_source = {src: rec["independent_rows"] for src, rec in reconciliation.items()}
+    independent_rows_by_source = {src: rec.get("independent_rows") for src, rec in reconciliation.items()}
     for pop_name, pop in sorted(result.populations.items()):
         pop_source = (populations_cfg.get(pop_name) or {}).get("source")
         independent = independent_rows_by_source.get(pop_source)
@@ -1437,6 +1464,20 @@ def _write_xlsx_workpaper(
     cover_fields.append(("narration_served_model_versions", ", ".join(served_model_versions) or "—"))
     accepted_ai_count = sum(1 for f in findings if f.get("origin") == "ai_proposed")
     cover_fields.append(("ai_proposed_findings_accepted", accepted_ai_count))
+    # Independent review 2026-09-25 item 1 ("run inputs" §1.3 "plus a
+    # run_inputs flag on the cover"): absent for the common case of a run
+    # with none declared, same "never a fabricated row" discipline as above.
+    run_inputs_for_cover = (state.options or {}).get("run_inputs") or {}
+    n_mappings = len(run_inputs_for_cover.get("mappings") or {})
+    n_parameters = len(run_inputs_for_cover.get("parameters") or {})
+    n_not_supplied = len(run_inputs_for_cover.get("not_supplied") or {})
+    if n_mappings or n_parameters or n_not_supplied:
+        cover_fields.append((
+            "run_inputs",
+            f"Project-specific inputs applied: {n_mappings} column mapping(s), "
+            f"{n_parameters} parameter(s), {n_not_supplied} source(s) not supplied "
+            f"(see the Run inputs sheet)",
+        ))
     for r, (label, value) in enumerate(cover_fields, start=1):
         _write_str(cover, r, 0, label, bold)
         _write_str(cover, r, 1, value)
@@ -1611,6 +1652,39 @@ def _write_xlsx_workpaper(
         _write_str(ws7, r, 5, row["text"])
         _write_str(ws7, r, 6, row["numbers_from"])
     _write_str(ws7, len(narrative_rows) + 2, 0, footer)
+
+    # Independent review 2026-09-25 item 1 ("run inputs" -- docs/specs/
+    # P7_mapping_authoring_design.md §1.3): one row per declared column
+    # mapping, parameter and not_supplied source. The sheet exists (headers
+    # only) even for a run with none, so a reader never has to distinguish
+    # "no sheet" from "empty run".
+    run_inputs = (state.options or {}).get("run_inputs") or {}
+    ws8 = wb.add_worksheet("Run inputs")
+    ws8.write_row(0, 0, ["kind", "source_or_parameter", "detail"], bold)
+    ri_row = 1
+    for source, columns in sorted((run_inputs.get("mappings") or {}).items()):
+        for contract_col, physical_col in sorted(columns.items()):
+            _write_str(ws8, ri_row, 0, "mapping")
+            _write_str(ws8, ri_row, 1, source)
+            _write_str(ws8, ri_row, 2, f"{contract_col!r} used as {physical_col!r}")
+            ri_row += 1
+    for name, param in sorted((run_inputs.get("parameters") or {}).items()):
+        provenance = param.get("provenance") or {}
+        _write_str(ws8, ri_row, 0, "parameter")
+        _write_str(ws8, ri_row, 1, name)
+        _write_str(
+            ws8, ri_row, 2,
+            f"{param.get('path')} (sha256 {param.get('sha256')}, owner {provenance.get('owner')}, "
+            f"as of {provenance.get('as_of')})",
+        )
+        ri_row += 1
+    for source, entry in sorted((run_inputs.get("not_supplied") or {}).items()):
+        affected = ", ".join(entry.get("affected_tests") or [])
+        _write_str(ws8, ri_row, 0, "not_supplied")
+        _write_str(ws8, ri_row, 1, source)
+        _write_str(ws8, ri_row, 2, f"{entry.get('reason')} — affected tests: {affected or 'none'}")
+        ri_row += 1
+    _write_str(ws8, ri_row + 1, 0, footer)
 
     wb.close()
     return buf.getvalue()
