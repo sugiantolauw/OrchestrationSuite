@@ -149,9 +149,24 @@ def _is_flag_like(two_value_set: set[str] | None) -> bool:
     return any(two_value_set == s for s in _FLAG_VALUE_SETS)
 
 
+def _is_amount_like(lname: str, col_type: str, has_negative: bool) -> bool:
+    # Bug fix (live, planted 26-row fixture: a distinct `Amount` on every
+    # row made the profiler call it an "identifier"). Uniqueness alone is
+    # not evidence of identity for a numeric column -- real expense
+    # amounts are commonly unique too. A float dtype, an amount-like
+    # column name, or a negative value are each on their own evidence that
+    # the column is a measure, not an id.
+    if col_type == "number":
+        return True
+    if any(t in lname for t in _AMOUNT_TOKENS):
+        return True
+    return has_negative
+
+
 def classify_semantic_type(
     *, name: str, col_type: str, distinct_count: int, row_count: int, unique: bool,
     is_currency_code: bool, max_distinct: int, two_value_set: set[str] | None = None,
+    has_negative: bool = False,
 ) -> str:
     """§4.3 "Semantic type rules, first match wins"."""
     lname = name.lower()
@@ -162,6 +177,8 @@ def classify_semantic_type(
     if col_type == "boolean" or (distinct_count == 2 and _is_flag_like(two_value_set)):
         return "flag"
     if unique:
+        if col_type in ("integer", "number") and _is_amount_like(lname, col_type, has_negative):
+            return "amount"
         return "identifier"
     if col_type in ("integer", "number") and any(t in lname for t in _AMOUNT_TOKENS):
         return "amount"
@@ -254,10 +271,12 @@ def pandas_profile_columns(
         if distinct_count == 2 and col_type != "boolean":
             two_value_set = {str(v).strip().lower() for v in non_null.unique()}
 
+        has_negative = bool(col_type in ("integer", "number") and len(non_null) and (non_null < 0).any())
+
         semantic_type = classify_semantic_type(
             name=name, col_type=col_type, distinct_count=distinct_count, row_count=row_count,
             unique=unique, is_currency_code=is_currency, max_distinct=max_distinct,
-            two_value_set=two_value_set,
+            two_value_set=two_value_set, has_negative=has_negative,
         )
 
         col: dict = {
