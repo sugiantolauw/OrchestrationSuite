@@ -420,6 +420,35 @@ def test_build_profile_payload_placeholder_uses_a_slug_never_the_raw_column_name
     assert all(name == name.lower() for name in table if name.startswith("nulls_"))
 
 
+def test_build_profile_payload_slug_disambiguation_is_independent_of_dict_order():
+    """BUG-R5-1 (independent review 2026-09-26): a column name repeated
+    across sources (here "Vendor" in both `expense_report` and
+    `attendee_validity`) is disambiguated with a numbered suffix on
+    whichever one is seen SECOND. That used to depend on
+    `sources_by_name.items()`/`null_counts.items()` iteration order --
+    ordinary dict insertion order, not a property of the data -- so the
+    SAME `profile_result` content produced a DIFFERENT table depending on
+    how it happened to be ordered (e.g. before vs. after a persistence
+    round-trip), and a model paragraph citing the name assigned at
+    generation time failed N-G3 when re-validated against a table built
+    from the reordered dict. The assignment must be a pure function of the
+    (source, column) pairs themselves, so it is identical for both
+    orderings below."""
+    forward = {
+        "expense_report": {"row_count": 10, "null_counts": {"Vendor": 10, "City/Location": 5}},
+        "attendee_validity": {"row_count": 5, "null_counts": {"Vendor": 3}},
+    }
+    reversed_ = {
+        "attendee_validity": {"row_count": 5, "null_counts": {"Vendor": 3}},
+        "expense_report": {"row_count": 10, "null_counts": {"Vendor": 10, "City/Location": 5}},
+    }
+    _, table_forward = build_profile_payload(_State(profile_result=forward))
+    _, table_reversed = build_profile_payload(_State(profile_result=reversed_))
+    assert set(table_forward) == set(table_reversed)
+    assert "nulls_expense_report_vendor_2" in table_forward
+    assert "nulls_attendee_validity_vendor" in table_forward
+
+
 # ── PII plumbing ─────────────────────────────────────────────────────────
 
 

@@ -66,7 +66,7 @@ from orchestrator.narration.payloads import (
     finding_key,
     identifiers_for_findings,
 )
-from orchestrator.narration.placeholders import PlaceholderEntry, render, scan_placeholders
+from orchestrator.narration.placeholders import NarrationConfigError, PlaceholderEntry, render, scan_placeholders
 from orchestrator.narration.schemas import (
     chart_captions_schema,
     exec_summary_schema,
@@ -355,14 +355,34 @@ def _persist(
         return nid
     if origin in ("model", "model_repaired"):
         texts = list_text if list_text is not None else [text]
-        for t in texts:
-            render(t, table)  # defensive: validate_prose must guarantee this succeeds (CLAUDE.md NN14)
-        used = _used_placeholder_names(texts, table)
-        sources = [
-            {"placeholder": f"{{{table[n].cls}:{n}}}", "source_field": table[n].source_field, "unit": table[n].unit}
-            for n in sorted(used)
-        ]
-        template_text = _canonical_json(list_text) if list_text is not None else text
+        try:
+            for t in texts:
+                render(t, table)  # defensive: validate_prose must guarantee this succeeds (CLAUDE.md NN14)
+        except NarrationConfigError as exc:
+            # BUG-R5-1 backstop (independent review 2026-09-26): `validate_fn`
+            # validated these texts against this exact `table` moments ago,
+            # so this should never fire -- but if it ever does (a future
+            # instance of the same "table drifted between validation and
+            # persist" shape this bug's own root fix closed for the profile
+            # narrative), CLAUDE.md NN14 and the WP's own rule ("any item
+            # that fails after repair must become the labelled fallback,
+            # never stored as model text") both apply here too. Falling
+            # through to the fallback branch below is what makes that true:
+            # never store an unfilled `{class:name}` placeholder, and never
+            # crash the run over it.
+            origin = "fallback_invalid"
+            violations_payload = (violations_payload or []) + [
+                {"rule_id": "N-G3", "field": field, "excerpt": str(exc)[:80]}
+            ]
+            sources = []
+            template_text = None
+        else:
+            used = _used_placeholder_names(texts, table)
+            sources = [
+                {"placeholder": f"{{{table[n].cls}:{n}}}", "source_field": table[n].source_field, "unit": table[n].unit}
+                for n in sorted(used)
+            ]
+            template_text = _canonical_json(list_text) if list_text is not None else text
     else:
         sources = []
         template_text = None

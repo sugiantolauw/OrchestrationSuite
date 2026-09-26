@@ -663,11 +663,30 @@ def build_profile_payload(state) -> tuple[dict, dict[str, PlaceholderEntry]]:
             source_field=f"profile_result.{source}.row_count", meaning=f"row count of source {source}",
         )
 
+    # BUG-R5-1 (independent review 2026-09-26): `_slugify`'s disambiguation
+    # suffix (the same column name appearing in two sources, e.g. "Vendor"
+    # in both expense_report and attendee_validity) depended on the ORDER
+    # `sources_by_name.items()`/`null_counts.items()` happened to iterate --
+    # dict insertion order, not a property of the data. That order is not
+    # guaranteed stable between the in-process dict `profile()` built and
+    # the SAME `profile_result` after a round-trip through persistence (the
+    # "stored table must match the one generation validated against"
+    # invariant orchestrator.narration.resolve's render_error comment
+    # already names as this bug's shape) -- the same run's Vendor column in
+    # expense_report resolved to `nulls_expense_report_vendor` at generation
+    # time and to `nulls_expense_report_vendor_2` when the run's final state
+    # was reloaded, so a model paragraph citing the first name failed N-G3
+    # against the second. Slugifying in a FIXED (source, column) order makes
+    # the assigned name a pure function of the profiled columns themselves,
+    # identical however `sources_by_name`/`null_counts` happen to iterate.
     used_slugs: set[str] = set()
     null_candidates: list[tuple[int, str, str, str]] = []
+    all_pairs: list[tuple[str, str, int]] = []
     for source, info in sources_by_name.items():
         for column, count in (info.get("null_counts") or {}).items():
-            null_candidates.append((count, source, column, _slugify(column, used_slugs)))
+            all_pairs.append((source, column, count))
+    for source, column, count in sorted(all_pairs, key=lambda row: (row[0], row[1])):
+        null_candidates.append((count, source, column, _slugify(column, used_slugs)))
     null_candidates.sort(key=lambda row: (-row[0], row[1], row[2]))
 
     for count, source, column, slug in null_candidates[:20]:
