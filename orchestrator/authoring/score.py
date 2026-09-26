@@ -19,8 +19,8 @@ from pathlib import Path
 from typing import Any, Callable
 
 import pandas as pd
-import yaml
 
+from orchestrator.authoring.fixtures import load_plants_validated
 from orchestrator.contract import LocalFileDataSource
 from orchestrator.engine import ExecutionResult, execute_skill
 from orchestrator.skills import load_skill
@@ -111,7 +111,7 @@ def score_fixtures(
     skill_dir = Path(skill_dir)
     skill = load_skill(skill_dir)
     skill.validate()
-    plants = yaml.safe_load(Path(plants_path).read_text())
+    plants = load_plants_validated(plants_path)
     natural_id_column = plants["natural_id_column"]
     period = tuple(audit_period) if audit_period else tuple(plants["audit_period"])
 

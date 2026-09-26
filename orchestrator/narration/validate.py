@@ -326,17 +326,48 @@ def _human_edit_number_matches(token: str, plain_values: set[str], pct_values: s
     return normalized in plain_values
 
 
-def _check_human_edit_numbers(text: str, table: Mapping[str, PlaceholderEntry]) -> list[Violation]:
+def _check_human_edit_numbers(
+    text: str, table: Mapping[str, PlaceholderEntry], allowed_identifiers: frozenset[str] = frozenset(),
+) -> list[Violation]:
     """§14 Answers Q3: a human edit may type a literal number, but it must
     equal -- as the SAME displayed value, formatting variants aside
     (`_human_edit_lookup`/`_human_edit_number_matches`) -- the rendering
     `orchestrator.findings.format_metric_value` produces for some metric
     this item cites. A mismatch names the exact substring the auditor typed
     (a structured `Violation`, rule id N-H1), so the edit UI can point at
-    what needs fixing rather than just refusing silently."""
+    what needs fixing rather than just refusing silently.
+
+    BUG-P2-2 (independent review 2026-09-26): N-D1 (model origin) exempts a
+    digit that is part of an ALLOWED IDENTIFIER (a cited finding's own
+    test/control/risk id, e.g. "CTL-TNE-13") by tokenising with `_TOKEN_RE`,
+    which treats a hyphen as part of the token -- "CTL-TNE-13" is one token,
+    matched whole against `allowed_identifiers`. `_NUMBER_TOKEN_RE`'s own
+    boundary does NOT exclude a hyphen, so "13" inside that SAME identifier
+    reads as a bare, unmatched typed number here, even though it was never
+    typed as a quantity and was already valid, allowed model prose. Every
+    number a human edit ever sees came from ALREADY-VALIDATED text (model
+    prose, or a prior edit), so ANY identifier allowed at generation must be
+    exempt from N-H1 too -- otherwise editing a field that legitimately
+    names a control/risk/test id refuses even a purely additive change that
+    never touches that id. Skip a number match that falls entirely inside a
+    `_TOKEN_RE` token equal to one of `allowed_identifiers`, the SAME
+    identifier source `_check_model_digits` already uses, never a second,
+    independently-maintained set (CLAUDE.md's own "one source of truth")."""
     plain_values, pct_values = _human_edit_lookup(table)
+    identifier_spans = [
+        (m.start(), m.end()) for m in _TOKEN_RE.finditer(text) if m.group(0) in allowed_identifiers
+    ]
     violations: list[Violation] = []
     for m in _NUMBER_TOKEN_RE.finditer(text):
+        # Containment on the number match's START only, not its end:
+        # `_NUMBER_TOKEN_RE`'s own `[\d,]*` greedily swallows a comma right
+        # after the digits even when it is ordinary sentence punctuation
+        # ("CTL-TNE-13, 8 bookings" matches "13," -- the comma is not part
+        # of the id token `_TOKEN_RE` found), so the number match can run
+        # one character past where the identifier ends. The digit run
+        # itself still BEGINS inside the identifier, which is what matters.
+        if any(start <= m.start() < end for start, end in identifier_spans):
+            continue
         token = m.group(0)
         if _human_edit_number_matches(token, plain_values, pct_values):
             continue
@@ -431,7 +462,7 @@ def validate_prose(
     if origin == "model":
         violations.extend(_check_model_digits(stripped, allowed_ids))
     else:
-        violations.extend(_check_human_edit_numbers(stripped, table))
+        violations.extend(_check_human_edit_numbers(stripped, table, allowed_ids))
 
     for hit in find_number_words(stripped):
         violations.append(
@@ -683,17 +714,23 @@ def validate_human_edit(
     table: Mapping[str, PlaceholderEntry],
     *,
     field: str,
+    allowed_identifiers: Iterable[str] = (),
     require_coverage: bool = False,
     required_placeholders: Iterable[str] | None = None,
 ) -> ValidationResult:
     """Convenience wrapper: `validate_prose(..., origin="human_edit")`
     (§14 Answers Q3). See that docstring and `_check_human_edit_numbers`
-    for what changes relative to model output."""
+    for what changes relative to model output. `allowed_identifiers` (BUG-
+    P2-2) must be the SAME set generation validated this item's prose
+    against (`orchestrator.service._narrative_allowed_identifiers`) -- an
+    empty default is the pre-existing, narrower behaviour for a caller with
+    no identifiers to offer, never a silent "everything allowed"."""
     return validate_prose(
         text,
         table,
         field=field,
         origin="human_edit",
+        allowed_identifiers=allowed_identifiers,
         require_coverage=require_coverage,
         required_placeholders=required_placeholders,
     )

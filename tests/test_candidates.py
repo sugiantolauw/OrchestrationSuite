@@ -324,6 +324,83 @@ def test_validate_response_accepts_well_formed_prose():
     assert ok, violations
 
 
+# ── C-6/C-7 (BUG-R5-3, independent review 2026-09-26): a candidate combining
+# a zero-valued exception metric with an unrelated non-zero one from the
+# same test, or metrics from two different tests, is rejected -- reproducing
+# RUN-8A1EDA1D86C5's "0 rows ... conflict, involving 1 employees" candidate
+# (daily_over_employees_dom=1, t61d_dom_city_currency_conflict_rows=0, same
+# test_id) ─────────────────────────────────────────────────────────────────
+
+
+def _two_metric_table(metrics: dict[str, dict]) -> dict[str, PlaceholderEntry]:
+    return {
+        name: PlaceholderEntry(name=name, unit=row["unit"], value=row["value"], meaning="a test metric")
+        for name, row in metrics.items()
+    }
+
+
+def test_validate_response_rejects_a_zero_valued_exception_metric_next_to_a_real_one():
+    metrics = {
+        **_METRICS,
+        "conflict_rows": {"value": 0, "unit": "count", "test_id": "T2"},
+        "over_limit_employees": {"value": 1, "unit": "count", "test_id": "T2"},
+    }
+    table = _two_metric_table(metrics)
+    parsed = {
+        "candidates": [
+            {
+                **_VALID_ITEM,
+                "metrics_cited": ["conflict_rows", "over_limit_employees"],
+                "observation": "This identifies {count:conflict_rows} conflict(s) involving "
+                "{count:over_limit_employees} employee(s).",
+            }
+        ]
+    }
+    ok, violations = _validate_response(parsed, table, metrics, {})
+    assert not ok
+    assert any(v["rule_id"] == "C-6" for v in violations)
+
+
+def test_validate_response_rejects_metrics_from_two_different_tests():
+    table = _two_metric_table(
+        {"missing_amount": _METRICS["missing_amount"], "hv_amount": _METRICS["hv_amount"]}
+    )
+    parsed = {
+        "candidates": [
+            {
+                **_VALID_ITEM,
+                "metrics_cited": ["missing_amount", "hv_amount"],
+                "observation": "This identifies {money:missing_amount} and {money:hv_amount} at risk.",
+            }
+        ]
+    }
+    ok, violations = _validate_response(parsed, table, _METRICS, {})
+    assert not ok
+    assert any(v["rule_id"] == "C-7" for v in violations)
+
+
+def test_validate_response_allows_a_zero_context_metric_alongside_a_real_one():
+    # A population-size denominator legitimately citable even if the count
+    # it counts happens to be zero -- never flagged as C-6.
+    metrics = {
+        "missing_count": _METRICS["missing_count"],
+        "missing_pct": {"value": 0.0, "unit": "%", "test_id": "T2"},
+    }
+    table = _two_metric_table(metrics)
+    kind_by_name = {"missing_pct": "pct_of_population"}
+    parsed = {
+        "candidates": [
+            {
+                **_VALID_ITEM,
+                "metrics_cited": ["missing_count", "missing_pct"],
+                "observation": "This identifies {count:missing_count} claim(s), {pct:missing_pct} of the population.",
+            }
+        ]
+    }
+    ok, violations = _validate_response(parsed, table, metrics, {}, kind_by_name, {})
+    assert ok, violations
+
+
 # ── integration: narrate() with the candidate step wired in ────────────────
 
 

@@ -11,7 +11,12 @@ these are this run's actual High-severity findings -- what failed, not a generic
 EVERY one of them in the lead paragraph using its own {value:run_high_finding_N_title} placeholder,
 each with its own key figure (for example the share of a population affected) cited from the
 matching item in PAYLOAD.top_findings[].placeholders -- never invent one, and never use a
-placeholder listed for a different finding. If PAYLOAD.placeholders gives you no
+placeholder listed for a different finding. Every key figure's placeholder must be one that
+literally appears, character for character, in that finding's own PAYLOAD.top_findings[]
+.placeholders entry. There is no run_high_finding_N_share or other placeholder built by analogy
+with run_high_finding_N_title -- each High-severity finding's own key figure has a DIFFERENT name
+(for example {pct:att_missing_pct} for one finding, {money:duplicate_amount} for another), never a
+matching numbered pattern across findings. If PAYLOAD.placeholders gives you no
 run_high_finding_N_title at all, this run has no High-severity finding -- lead instead with
 PAYLOAD.top_findings[0], this run's most severe or most systemic result, the same way, citing a
 striking figure from its own placeholders. Do not merely restate the finding count and the headline

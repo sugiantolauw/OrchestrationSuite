@@ -1091,6 +1091,32 @@ class LocalPersistence:
             )
             return cur.rowcount
 
+    def advance_findings_review_state(
+        self, run_id: str, *, from_states: tuple[str, ...], to_state: str, actor: str, now: str,
+    ) -> int:
+        """BUG-R5-2 (independent review 2026-09-26): `prepare`/`mark_reviewed`/
+        `sign_off` used to walk `list_findings(run_id)` in Python and call
+        `set_finding_review_state` once per finding, in a loop -- N separate
+        round-trip UPDATE statements for one logical "move this run's
+        findings forward" action. A finding whose own UPDATE never lands
+        (dropped, or simply never issued if a caller's loop stops short)
+        keeps whatever review_state it already had, forever, silently --
+        exactly the mixed prepared/reviewed/approved state on one completed,
+        fully signed-off run that this fixes. One statement, one round trip:
+        every one of this run's findings currently in `from_states` moves to
+        `to_state` atomically, or none do. Mirrors `reset_findings_review_
+        state`'s own bypass of `set_finding_review_state`'s forward-only
+        single-step check -- deliberate here too, since the caller already
+        knows the single legal `to_state` for the whole batch."""
+        placeholders = ", ".join("?" for _ in from_states)
+        with self._writer() as conn:
+            cur = conn.execute(
+                f"UPDATE findings SET review_state = ?, updated_at = ? "
+                f"WHERE run_id = ? AND review_state IN ({placeholders})",
+                (to_state, now, run_id, *from_states),
+            )
+            return cur.rowcount
+
     # ── node attempts ────────────────────────────────────────────────────────
 
     def begin_node_attempt(

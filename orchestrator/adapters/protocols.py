@@ -390,6 +390,19 @@ class PersistenceAdapter(Protocol):
     def list_review_notes(self, run_id: str) -> list[dict]:
         ...
 
+    def advance_findings_review_state(
+        self, run_id: str, *, from_states: tuple[str, ...], to_state: str, actor: str, now: str,
+    ) -> int:
+        """BUG-R5-2 (independent review 2026-09-26): one batched `UPDATE ...
+        WHERE run_id = ? AND review_state IN (from_states)` moving every
+        matching finding straight to `to_state`, replacing a per-finding
+        loop over `set_finding_review_state` -- `prepare`/`mark_reviewed`/
+        `sign_off` each know the single legal `to_state` for their whole
+        batch, so this bypasses `set_finding_review_state`'s forward-only
+        single-step check the same way `reset_findings_review_state` already
+        does. Returns the number of findings advanced."""
+        ...
+
     def reset_findings_review_state(self, run_id: str, *, actor: str, now: str) -> int:
         """§3.3 "Return to preparer": the ONLY backwards move in the
         review_state lifecycle (draft/prepared/reviewed/approved) --

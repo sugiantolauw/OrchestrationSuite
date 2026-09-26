@@ -66,7 +66,7 @@ from orchestrator.narration.payloads import (
     finding_key,
     identifiers_for_findings,
 )
-from orchestrator.narration.placeholders import PlaceholderEntry, render, scan_placeholders
+from orchestrator.narration.placeholders import NarrationConfigError, PlaceholderEntry, render, scan_placeholders
 from orchestrator.narration.schemas import (
     chart_captions_schema,
     exec_summary_schema,
@@ -81,6 +81,7 @@ from orchestrator.narration.validate import required_exec_summary_placeholders, 
 __all__ = [
     "RunnerContext",
     "NarrationOutcome",
+    "VALIDATOR_FIELD_FOR",
     "narrative_id",
     "narrate_profile",
     "narrate_finding",
@@ -90,6 +91,37 @@ __all__ = [
     "narrate_exec_summary",
     "narrate_captions",
 ]
+
+# `narratives.field` (§6.1: "observation|recommendation|management_questions|
+# title|summary|root_cause|review_observations|rationale|remediation|
+# exec_summary|caption|profile") -> the validator's own field taxonomy
+# (`orchestrator.narration.lexicon.FIELD_LENGTH_CAPS`/`OBSERVATION_TYPE_
+# FIELDS`/`TITLE_FIELDS`/`RATIONALE_FIELD`). BUG-P2-3 (independent review
+# 2026-09-26, live test 2.4, "'question' is 332 chars, over the 250-char
+# cap" stored as model output): moved here from `orchestrator.service` (one
+# source of truth, never a second copy) so `_persist`'s own backstop below
+# can look up the SAME field a `narrate_*` function's own `validate_fn`
+# validated a given (target_kind, field) pair against, for EVERY narration
+# task and field -- not only the "profile" one BUG-R5-1 fixed.
+VALIDATOR_FIELD_FOR: dict[tuple[str, str], str] = {
+    ("finding", "observation"): "observation",
+    ("finding", "recommendation"): "recommendation",
+    ("finding", "management_questions"): "question",
+    ("finding", "rationale"): "rationale",
+    ("finding", "remediation"): "recommendation",
+    ("candidate", "observation"): "observation",
+    ("candidate", "recommendation"): "recommendation",
+    ("candidate", "management_questions"): "question",
+    ("candidate", "title"): "candidate_title",
+    ("candidate", "rationale"): "rationale",
+    ("theme", "title"): "theme_title",
+    ("theme", "summary"): "theme_summary",
+    ("theme", "root_cause"): "root_cause",
+    ("theme", "review_observations"): "review_observation",
+    ("run", "exec_summary"): "exec_paragraph",
+    ("chart", "caption"): "caption",
+    ("profile", "profile"): "profile_paragraph",
+}
 
 
 def _canonical_json(value: Any) -> str:
@@ -339,6 +371,7 @@ def _persist(
     rc: RunnerContext, *, target_kind: str, target_id: str, field: str, origin: str,
     table: dict[str, PlaceholderEntry], text: str | None = None, list_text: list[str] | None = None,
     call_ids: list[str], served_model_version: str | None, violations_payload: list[dict] | None,
+    allowed_identifiers: Iterable[str] = (),
 ) -> str:
     now = rc.clock()
     nid = narrative_id(rc.run_id, target_kind, target_id, field)
@@ -355,14 +388,63 @@ def _persist(
         return nid
     if origin in ("model", "model_repaired"):
         texts = list_text if list_text is not None else [text]
-        for t in texts:
-            render(t, table)  # defensive: validate_prose must guarantee this succeeds (CLAUDE.md NN14)
-        used = _used_placeholder_names(texts, table)
-        sources = [
-            {"placeholder": f"{{{table[n].cls}:{n}}}", "source_field": table[n].source_field, "unit": table[n].unit}
-            for n in sorted(used)
-        ]
-        template_text = _canonical_json(list_text) if list_text is not None else text
+        backstop_violations: list[dict] = []
+        validator_field = VALIDATOR_FIELD_FOR.get((target_kind, field))
+        try:
+            for t in texts:
+                render(t, table)  # defensive: validate_prose must guarantee this succeeds (CLAUDE.md NN14)
+                # BUG-P2-3 backstop (independent review 2026-09-26, live test
+                # 2.4: a "question" field stored at 332 characters, over the
+                # 250-character cap): `render()` alone only catches an
+                # unresolvable placeholder (BUG-R5-1's shape) -- it says
+                # nothing about the LENGTH cap, vague/universal-quantifier
+                # language, or any other field-scoped rule `validate_fn`
+                # already checked moments ago. Re-running the SAME
+                # `validate_prose` check here, for EVERY narration task and
+                # field (`VALIDATOR_FIELD_FOR` covers every (target_kind,
+                # field) pair any `narrate_*` function persists), is what
+                # makes the item-1/BUG-R5-1 guarantee -- "any item that fails
+                # after repair must become the labelled fallback, never
+                # stored as model text" -- actually hold for every rule, not
+                # only N-G3, and for every field, not only the profile
+                # paragraph that bug happened to surface on.
+                if validator_field is not None:
+                    result = validate_prose(t, table, field=validator_field, origin="model", allowed_identifiers=allowed_identifiers)
+                    backstop_violations += [
+                        {"rule_id": v.rule_id, "field": validator_field, "excerpt": (v.text or v.message)[:80]}
+                        for v in result.violations
+                    ]
+        except NarrationConfigError as exc:
+            # BUG-R5-1 backstop (independent review 2026-09-26): `validate_fn`
+            # validated these texts against this exact `table` moments ago,
+            # so this should never fire -- but if it ever does (a future
+            # instance of the same "table drifted between validation and
+            # persist" shape this bug's own root fix closed for the profile
+            # narrative), CLAUDE.md NN14 and the WP's own rule ("any item
+            # that fails after repair must become the labelled fallback,
+            # never stored as model text") both apply here too. Falling
+            # through to the fallback branch below is what makes that true:
+            # never store an unfilled `{class:name}` placeholder, and never
+            # crash the run over it.
+            origin = "fallback_invalid"
+            violations_payload = (violations_payload or []) + [
+                {"rule_id": "N-G3", "field": field, "excerpt": str(exc)[:80]}
+            ]
+            sources = []
+            template_text = None
+        else:
+            if backstop_violations:
+                origin = "fallback_invalid"
+                violations_payload = (violations_payload or []) + backstop_violations
+                sources = []
+                template_text = None
+            else:
+                used = _used_placeholder_names(texts, table)
+                sources = [
+                    {"placeholder": f"{{{table[n].cls}:{n}}}", "source_field": table[n].source_field, "unit": table[n].unit}
+                    for n in sorted(used)
+                ]
+                template_text = _canonical_json(list_text) if list_text is not None else text
     else:
         sources = []
         template_text = None
@@ -442,17 +524,18 @@ def narrate_finding(
     observation_id = _persist(
         rc, target_kind="finding", target_id=finding_id, field="observation", origin=outcome.origin, table=table,
         text=parsed.get("observation"), call_ids=outcome.call_ids, served_model_version=outcome.served_model_version,
-        violations_payload=outcome.violations_payload,
+        violations_payload=outcome.violations_payload, allowed_identifiers=allowed,
     )
     _persist(
         rc, target_kind="finding", target_id=finding_id, field="recommendation", origin=outcome.origin, table=table,
         text=parsed.get("recommendation"), call_ids=outcome.call_ids, served_model_version=outcome.served_model_version,
-        violations_payload=outcome.violations_payload,
+        violations_payload=outcome.violations_payload, allowed_identifiers=allowed,
     )
     _persist(
         rc, target_kind="finding", target_id=finding_id, field="management_questions", origin=outcome.origin,
         table=table, list_text=parsed.get("management_questions"), call_ids=outcome.call_ids,
         served_model_version=outcome.served_model_version, violations_payload=outcome.violations_payload,
+        allowed_identifiers=allowed,
     )
     return observation_id
 
@@ -503,24 +586,24 @@ def narrate_synthesis(rc: RunnerContext, findings: list[dict], *, skill) -> tupl
         _persist(
             rc, target_kind="theme", target_id=theme_id, field="title", origin=origin, table=theme_table,
             text=theme.get("title", ""), call_ids=outcome.call_ids, served_model_version=served_model_version,
-            violations_payload=None,
+            violations_payload=None, allowed_identifiers=allowed,
         )
         _persist(
             rc, target_kind="theme", target_id=theme_id, field="summary", origin=origin, table=theme_table,
             text=theme.get("summary", ""), call_ids=outcome.call_ids, served_model_version=served_model_version,
-            violations_payload=None,
+            violations_payload=None, allowed_identifiers=allowed,
         )
         _persist(
             rc, target_kind="theme", target_id=theme_id, field="root_cause", origin=origin, table=theme_table,
             text=theme.get("root_cause_hypothesis", ""), call_ids=outcome.call_ids,
-            served_model_version=served_model_version, violations_payload=None,
+            served_model_version=served_model_version, violations_payload=None, allowed_identifiers=allowed,
         )
         review_observations = theme.get("review_observations", [])
         if review_observations:
             _persist(
                 rc, target_kind="theme", target_id=theme_id, field="review_observations", origin=origin,
                 table=theme_table, list_text=review_observations, call_ids=outcome.call_ids,
-                served_model_version=served_model_version, violations_payload=None,
+                served_model_version=served_model_version, violations_payload=None, allowed_identifiers=allowed,
             )
         return {"theme_id": theme_id, "generation": rc.generation, "ordinal": ordinal, "finding_ids": finding_ids}
 

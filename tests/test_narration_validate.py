@@ -830,6 +830,48 @@ def test_n_h1_negative_percent_truncated_from_a_fraction_is_refused():
 
 
 # ---------------------------------------------------------------------------
+# BUG-P2-2 (independent review 2026-09-26): a digit embedded in an ALLOWED
+# IDENTIFIER (a hyphenated control/risk id, e.g. "CTL-TNE-13") is exempt
+# from N-D1 for model-origin prose (_check_model_digits tokenises with
+# _TOKEN_RE, which includes the hyphen, so "CTL-TNE-13" is one token
+# checked whole against allowed_identifiers) -- but `_NUMBER_TOKEN_RE`'s own
+# boundary does not exclude a hyphen, so the SAME "13" read as a bare typed
+# number for a human edit with no such exemption, refusing even a purely
+# additive edit that never touched it.
+# ---------------------------------------------------------------------------
+ID_TABLE = {"no_preapproval_employees": PlaceholderEntry("no_preapproval_employees", "count", 8)}
+ID_TEXT = "Per control CTL-TNE-13, 8 bookings lack pre-approval."
+
+
+def test_n_h1_exempts_a_number_embedded_in_an_allowed_identifier():
+    r = validate_human_edit(ID_TEXT, ID_TABLE, field="observation", allowed_identifiers={"CTL-TNE-13"})
+    assert "N-H1" not in _rule_ids(r)
+    assert r.valid is True
+
+
+def test_n_h1_without_allowed_identifiers_still_flags_the_identifiers_own_digits():
+    # The pre-existing, narrower behaviour for a caller with nothing to
+    # offer -- never a silent "everything allowed" default.
+    r = validate_human_edit(ID_TEXT, ID_TABLE, field="observation")
+    mismatches = [v for v in r.violations if v.rule_id == "N-H1"]
+    assert any(m.text.startswith("13") for m in mismatches)
+
+
+def test_n_h1_a_purely_additive_edit_next_to_an_allowed_identifier_is_accepted():
+    additive = ID_TEXT + " A brand new sentence with no numbers here."
+    r = validate_human_edit(additive, ID_TABLE, field="observation", allowed_identifiers={"CTL-TNE-13"})
+    assert r.valid, r.violations
+
+
+def test_n_h1_still_refuses_a_changed_non_cited_number_next_to_an_allowed_identifier():
+    changed = ID_TEXT.replace("8 bookings", "9 bookings")
+    r = validate_human_edit(changed, ID_TABLE, field="observation", allowed_identifiers={"CTL-TNE-13"})
+    mismatches = [v for v in r.violations if v.rule_id == "N-H1"]
+    assert len(mismatches) == 1
+    assert mismatches[0].text == "9"
+
+
+# ---------------------------------------------------------------------------
 # N-C1, exec_summary only (round-5 narration-content review, item 2): a live
 # round-4 exec summary (RUN-05B9661A8D1A) correctly cited the finding count
 # and the exposure headline, but never said the amount-at-risk headline is
