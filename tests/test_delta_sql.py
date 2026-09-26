@@ -1285,3 +1285,49 @@ def test_close_closes_pool_and_lease_connection_and_is_idempotent():
 
     p.close()  # idempotent: nothing left to close, no error
     assert len(closed) == 2
+
+
+def test_update_management_action_normalizes_empty_target_date_before_binding():
+    """BUG-ACTIONS-EDIT-OWNER-1 (independent review round 5, RUN-DE56A9DED2DB):
+    live editing only an action's owner through /workspace/tne left owner
+    unset in Delta. Root cause: the callback's target_date State comes back
+    "" rather than None when the auditor never touches the date field, and
+    target_date is DATE on this dialect (STRING/TEXT on LocalPersistence's
+    sqlite, which tolerates ""). Binding an empty-string DATE param raises
+    Delta's own CAST_INVALID_INPUT and fails the WHOLE UPDATE -- owner
+    included -- not just target_date. This FakeConnection reproduces that
+    dialect behaviour (raises if target_date is ever bound as "") and
+    proves DeltaPersistence.update_management_action never sends "" for
+    target_date, even when called with target_date="" directly."""
+
+    class CastStrictError(Exception):
+        pass
+
+    def _update_handler(sql_text, params):
+        if params.get("target_date") == "":
+            raise CastStrictError(
+                "[CAST_INVALID_INPUT] The value '' of the type \"STRING\" cannot be "
+                "cast to \"DATE\" because it is malformed."
+            )
+        return ([], [])
+
+    handlers = {
+        "SELECT ma.*": lambda sql_text, params: (
+            ["action_id", "owner", "status", "target_date", "description", "updated_by"],
+            [("MA-1", None, "draft", None, None, None)],
+        ),
+        "UPDATE cat1.sch1.management_actions": _update_handler,
+    }
+    conn = FakeConnection(handlers)
+    p = DeltaPersistence(_settings(), connection_factory=lambda: conn)
+
+    updated = p.update_management_action(
+        "MA-1", owner="Alex Chen", status="agreed", target_date="",
+        response="ack", updated_by="reviewer@example.com", now=canonical_ts(1),
+    )
+    assert updated["owner"] == "Alex Chen"
+
+    update_calls = [c for c in conn.calls if c[0].startswith("UPDATE cat1.sch1.management_actions")]
+    assert len(update_calls) == 1
+    _, params = update_calls[0]
+    assert params["target_date"] is None

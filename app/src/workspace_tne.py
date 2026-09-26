@@ -2215,7 +2215,17 @@ def register_callbacks(app) -> None:
         action_id = selected["action_id"]
         owner = (owner or "").strip()
         status = status or "draft"
-        target_date = target_date or ""
+        # BUG-ACTIONS-EDIT-OWNER-1 (independent review round 5, RUN-DE56A9DED2DB):
+        # dcc.DatePickerSingle's "date" State comes back None when the
+        # auditor leaves the date untouched -- "" here would round-trip
+        # straight into update_management_action's target_date column,
+        # which is typed DATE on Delta (STRING/TEXT on the sqlite backend,
+        # so this never surfaced locally). Delta rejects an empty-string
+        # DATE cast outright (CAST_INVALID_INPUT), so the whole UPDATE
+        # never ran -- not just target_date, every field in that edit,
+        # including the owner the auditor actually changed. None is the
+        # correct "no date set" value on both backends.
+        target_date = target_date or None
         response = (response or "").strip()
         # Independent review 2026-09-24 gap #3: writes through to Delta /
         # LocalPersistence (orchestrator.service.update_management_action)

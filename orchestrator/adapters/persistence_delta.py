@@ -2198,6 +2198,15 @@ class DeltaPersistence:
         self, action_id: str, *, owner: str | None, status: str, target_date: str | None,
         response: str | None, updated_by: str, now: str,
     ) -> dict:
+        # BUG-ACTIONS-EDIT-OWNER-1: target_date is DATE on this dialect
+        # (STRING/TEXT on LocalPersistence's sqlite, which never rejects an
+        # empty string). Binding "" here raises Delta's own
+        # CAST_INVALID_INPUT and fails the entire UPDATE -- owner and every
+        # other field in the same edit included, not just target_date.
+        # orchestrator.service.update_management_action already normalizes
+        # this before it reaches here; kept here too so this dialect is
+        # correct on its own, independent of the caller.
+        target_date = target_date or None
         with self._cursor_ctx() as conn:
             cur = self._execute(
                 conn,
