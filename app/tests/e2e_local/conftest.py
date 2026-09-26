@@ -24,9 +24,11 @@ import shutil
 import socket
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
+from collections import deque
 from pathlib import Path
 
 import pytest
@@ -225,12 +227,49 @@ def build_full_env(base_env: dict) -> dict:
     return full_env
 
 
+def _drain_output(proc: subprocess.Popen, maxlen: int = 4000) -> deque:
+    """Merge-regression root cause (2026-09-26, e2e_local hang after the
+    mapping + review-workflow merges): `proc.stdout` is a `subprocess.PIPE`
+    that nothing ever read while the app subprocess ran. Werkzeug logs every
+    HTTP request it serves (on by default, never silenced here), and
+    `running_app` is a single long-lived subprocess shared by the whole
+    package -- three browser contexts each polling `/run/<id>` on a 3s
+    `dcc.Interval`, plus this package's own poll-by-reload helpers, easily
+    produce enough log lines over a multi-minute test run to fill the OS
+    pipe buffer (64KB on Linux). Once that buffer is full, the child's next
+    write to stdout/stderr BLOCKS -- and because CPython's `logging`/stream
+    machinery serializes writers through the handler's own lock, one thread
+    blocked mid-write freezes every other thread in the app that also tries
+    to log a line, wedging request handling entirely with no exception and
+    no crash. That is what a bare `Page.goto: Timeout 20000ms exceeded`
+    was actually reporting: not a slow request, a fully wedged server.
+    Draining the pipe continuously on a background thread means it can
+    never fill, so the app can never wedge itself just by logging."""
+    lines: deque[str] = deque(maxlen=maxlen)
+
+    def _pump() -> None:
+        try:
+            for line in proc.stdout:
+                lines.append(line)
+        except (ValueError, OSError):
+            pass
+
+    threading.Thread(target=_pump, daemon=True, name="e2e-local-log-drain").start()
+    return lines
+
+
 def _launch_app_subprocess(full_env: dict) -> tuple[subprocess.Popen, str]:
     """Factored out of running_app below so test_review_ui.py's App-restart
     check (§3.10's Browser test row) can launch and kill its OWN app.py
     process without disturbing the package-scoped `running_app` every other
     e2e_local test shares. `full_env` must already be `build_full_env`'s
-    output -- this does not merge or strip again."""
+    output -- this does not merge or strip again.
+
+    The returned `proc` carries its drained log lines as `proc.e2e_log_lines`
+    (see `_drain_output`) -- `_dump_server_log_on_failure` below reads this
+    to print the server's own output when a test in this package fails,
+    rather than a caller having to read `proc.stdout` itself (already fully
+    consumed by the drain thread)."""
     port = _free_port()
     full_env = dict(full_env)
     full_env["PORT"] = str(port)
@@ -240,17 +279,19 @@ def _launch_app_subprocess(full_env: dict) -> tuple[subprocess.Popen, str]:
         cwd=str(REPO_ROOT), env=full_env,
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
     )
+    log_lines = _drain_output(proc)
+    proc.e2e_log_lines = log_lines
     base_url = f"http://127.0.0.1:{port}"
     try:
         _wait_for_http_200(base_url + "/ready", timeout=30.0)
     except Exception:
         proc.terminate()
         try:
-            out, _ = proc.communicate(timeout=10)
+            proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
             proc.kill()
-            out, _ = proc.communicate(timeout=10)
-        raise RuntimeError(f"app/app.py failed to start on {base_url}:\n{out}")
+            proc.wait(timeout=10)
+        raise RuntimeError(f"app/app.py failed to start on {base_url}:\n{''.join(log_lines)}")
     return proc, base_url
 
 
@@ -443,7 +484,56 @@ def running_app(tmp_path_factory):
     yield {
         "base_url": base_url, "run_ids": run_ids,
         "skills_dir": skills_dir, "data_dir": data_dir, "db_path": db_path,
-        "base_env": base_env, "env": full_env,
+        "base_env": base_env, "env": full_env, "proc": proc,
     }
 
     _stop_app_subprocess(proc)
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    """Standard pytest recipe for reading a test's own outcome from a
+    fixture's teardown (`request.node.rep_call` below) -- needed by
+    `_dump_server_log_on_failure` since a fixture cannot otherwise tell
+    whether the test it wrapped passed or failed."""
+    outcome = yield
+    rep = outcome.get_result()
+    setattr(item, "rep_" + rep.when, rep)
+
+
+@pytest.fixture(autouse=True)
+def _dump_server_log_on_failure(request):
+    """The guard for the hang this package's own git history hit
+    (`_drain_output`'s docstring): whatever a test in this package fails
+    with -- a goto timeout, an assertion, anything -- print every app
+    subprocess's own drained log tail alongside the failure, so a genuine
+    server-side hang or crash is visible immediately (an exception, a
+    request that never returned, nothing happening at all) instead of only
+    a bare `Page.goto: Timeout 20000ms exceeded` with no server-side
+    context to diagnose it from.
+
+    Scans every fixture value the failing test used for a dict carrying a
+    `proc` with `e2e_log_lines` (`_drain_output`'s marker) -- covers
+    `running_app` here and test_run_inputs_ui.py's own module-scoped
+    `mapped_run_app`, both, without either needing to be named explicitly.
+    A test that launches a SECOND subprocess mid-test (test_review_ui.py's
+    app-restart test) is not a fixture value, so it prints its own
+    process's log where it launches one, for the same reason."""
+    yield
+    rep = getattr(request.node, "rep_call", None)
+    if rep is None or not rep.failed:
+        return
+    for name, value in request.node.funcargs.items():
+        if not isinstance(value, dict):
+            continue
+        proc = value.get("proc")
+        log_lines = getattr(proc, "e2e_log_lines", None) if proc is not None else None
+        if not log_lines:
+            continue
+        alive = proc.poll() is None
+        tail = "".join(list(log_lines)[-200:])
+        print(
+            f"\n----- {name!r} server log tail (subprocess alive={alive}) -----\n"
+            f"{tail}"
+            f"----- end {name!r} server log tail -----\n"
+        )
