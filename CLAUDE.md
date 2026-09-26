@@ -1998,6 +1998,12 @@ The user chose to add three build-here items before acceptance testing, so that 
 - Old self-approved runs keep their labels. Runs waiting at sign-off when this ships enter the workflow at preparation.
 - Only the preparer edits model text and decides AI-proposed findings. Reviewers and approvers raise notes or return the run.
 
+**Role lookup uses the signed-in user's own token (user decision, 2026-09-26).** Found live: the App's service principal cannot read group membership (SCIM member lists need admin), so `workspace_groups` role resolution refused every review action.
+- The App enables Databricks Apps user authorization with the single read-only scope `iam.current-user:read`.
+- The role resolver asks "which groups is the signed-in user in?" with the forwarded user token (`current_user.me()`). The token is used for nothing else: runs, data and Delta writes still go through the App's service principal.
+- If the forwarded token is missing, or user authorization isn't enabled, the review action is refused with a clear message. It never falls back to a guess.
+- Admin rights for the App's identity were rejected as too broad. The corporate workspace must allow Apps user authorization; this goes on the porting checklist.
+
 ### Paused runs across a code deploy (user decision, 2026-09-24)
 
 A run pins the code revision it started on. When new code is deployed:
