@@ -1789,8 +1789,13 @@ The deployed App's executor polled Delta about 3,000 times an hour, even with no
 kept the serverless SQL warehouse awake from 02:00 to 22:00 UTC on 2026-09-23, using about 230 DBU
 (about $218 at list price). The App and the warehouse were stopped. The fixes, applied at the
 user's request:
-- No warehouse polling while idle. The executor wakes on in-process signals, plus a slow safety
-  sweep; it polls every 30–60 s only while runs are active. UI intervals run only for active runs.
+- No warehouse polling while idle. The executor wakes on in-process signals (a run started or
+  resumed from the UI) and admits queued runs at App start; it polls every 30–60 s only while runs
+  are active. UI intervals run only for active runs.
+  - **There is no idle safety sweep** (`EXECUTOR_IDLE_POLL_INTERVAL_S=0`; user decision,
+    2026-09-26). A run queued from outside the App's own process is picked up at the next App
+    start, or while the App is busy with other runs.
+  - Scheduled or externally triggered work belongs on Jobs (§2.3, §4.10), not in an idle App.
 - A test on idle query volume.
 - Warehouse auto-stop set to 1 minute. The bootstrap in the porting kit sets the same.
 - A post-deploy check that the warehouse actually auto-stops while the App is idle.
