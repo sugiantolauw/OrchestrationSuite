@@ -187,6 +187,78 @@ def _metric_kind_by_name(plan_tests: list[dict]) -> dict[str, str]:
     return out
 
 
+# BUG-R5-3 (independent review 2026-09-26): a candidate cited
+# `t61d_dom_city_currency_conflict_rows` (value 0 -- zero conflicts) next to
+# `daily_over_employees_dom` (value 1, a real per-diem exceedance), from the
+# SAME test_id (T6.1d_dom), and the model's prose read "0 rows ... conflict,
+# involving 1 employees" -- a category error: the conflict-rows metric is a
+# standalone data-quality readout over the WHOLE population
+# (`skills/tne_exco/custom.py:country_from_city_or_currency`, computed
+# before `threshold_exceedance` ever filters to exceeding rows), not part of
+# that primitive's own exceedance metric set, even though it is declared
+# under the same test_id for reporting convenience. `population_size`/
+# `pct_of_population` metrics are the one legitimate exception: a
+# denominator or a rate is routinely cited alongside a count without itself
+# needing to be non-zero (CLAUDE.md's own findings.yaml pattern, "{count} of
+# {pct}% of {total}").
+_CONTEXT_METRIC_KINDS = frozenset({"pct_of_population"})
+_CONTEXT_METRIC_KEYS = frozenset({"population_size"})
+
+
+def _metric_key_by_name(plan_tests: list[dict]) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for test in plan_tests:
+        if "not_testable" in test:
+            continue
+        for name, spec in ((test.get("params") or {}).get("metrics") or {}).items():
+            out[name] = spec.get("key") or name
+    return out
+
+
+def _is_context_metric(name: str, kind_by_name: dict[str, str], key_by_name: dict[str, str]) -> bool:
+    return kind_by_name.get(name) in _CONTEXT_METRIC_KINDS or key_by_name.get(name) in _CONTEXT_METRIC_KEYS
+
+
+def _candidate_metric_set_violations(
+    cited: list[str], all_metrics_table: dict[str, PlaceholderEntry], metrics: dict[str, dict],
+    kind_by_name: dict[str, str], key_by_name: dict[str, str],
+) -> list[dict]:
+    """Two deterministic, Python-only checks over a proposed candidate's OWN
+    `metrics_cited` -- run as part of prose validation (§3.3-3.4's own
+    validate/repair/fallback loop), so a violation here is recorded and
+    repaired exactly like any other candidate validation failure, never a
+    silent drop the way C-1..C-5 (data gates, below) are:
+
+    - at least one cited "exception" metric (any metric that is not a
+      recognised context/denominator one, `_is_context_metric`) must be
+      non-zero, AND every such exception metric cited must be non-zero --
+      a zero-valued exception metric riding along next to an unrelated
+      non-zero one is exactly the shape that produced "0 rows ... conflict,
+      involving 1 employees";
+    - every cited metric's own `test_id` (`run_metrics` provenance) must
+      agree -- metrics genuinely belonging to two different tests are two
+      different matters, never one candidate."""
+    violations: list[dict] = []
+    exception_names = [
+        n for n in cited if n in all_metrics_table and not _is_context_metric(n, kind_by_name, key_by_name)
+    ]
+    zero_names = sorted(n for n in exception_names if (all_metrics_table[n].value or 0) == 0)
+    if not exception_names:
+        violations.append(
+            {"rule_id": "C-6", "field": "metrics_cited", "excerpt": "cites no exception metric"[:80]}
+        )
+    elif zero_names:
+        violations.append(
+            {"rule_id": "C-6", "field": "metrics_cited", "excerpt": f"zero-valued exception metric(s) {zero_names}"[:80]}
+        )
+    test_ids = sorted({metrics[n]["test_id"] for n in cited if n in metrics and metrics[n].get("test_id")})
+    if len(test_ids) > 1:
+        violations.append(
+            {"rule_id": "C-7", "field": "metrics_cited", "excerpt": f"metrics from more than one test {test_ids}"[:80]}
+        )
+    return violations
+
+
 # ── prose validation (C-6): the ONE thing that can trigger a repair round --
 # every other rule below is a Python-only drop, applied after a valid
 # response comes back (§5.1) ────────────────────────────────────────────────
@@ -230,13 +302,16 @@ def allowed_identifiers_for_cited_metrics(
 
 def _validate_response(
     parsed: dict, all_metrics_table: dict[str, PlaceholderEntry], metrics: dict[str, dict],
-    test_ident: dict[str, dict],
+    test_ident: dict[str, dict], kind_by_name: dict[str, str] | None = None, key_by_name: dict[str, str] | None = None,
 ) -> tuple[bool, list[dict]]:
+    kind_by_name = kind_by_name or {}
+    key_by_name = key_by_name or {}
     violations: list[dict] = []
     for item in parsed.get("candidates", []):
         cited = [n for n in (item.get("metrics_cited") or []) if isinstance(n, str)]
         table = {n: all_metrics_table[n] for n in cited if n in all_metrics_table}
         allowed = allowed_identifiers_for_cited_metrics(cited, metrics, test_ident)
+        violations += _candidate_metric_set_violations(cited, all_metrics_table, metrics, kind_by_name, key_by_name)
         violations += _field(item.get("title", ""), table, field="candidate_title", allowed_identifiers=allowed)
         violations += _field(
             item.get("observation", ""), table, field="observation", allowed_identifiers=allowed,
@@ -382,9 +457,11 @@ def narrate_candidates(
             test_ident[tid] = {"control_id": test.get("control_id"), "risk_id": test.get("risk_id")}
 
     schema = finding_candidates_schema(metric_names, max_candidates)
+    metric_kind_by_name = _metric_kind_by_name(plan_tests)
+    metric_key_by_name = _metric_key_by_name(plan_tests)
 
     def validate_fn(parsed: dict) -> tuple[bool, list[dict]]:
-        return _validate_response(parsed, all_metrics_table, metrics, test_ident)
+        return _validate_response(parsed, all_metrics_table, metrics, test_ident, metric_kind_by_name, metric_key_by_name)
 
     outcome = runner._generate_item(
         rc, task="find_candidates", payload=payload, schema=schema,
@@ -405,7 +482,6 @@ def narrate_candidates(
     amount_metric_names: set[str] = set()
     for names in amount_metrics_by_test.values():
         amount_metric_names |= names
-    metric_kind_by_name = _metric_kind_by_name(plan_tests)
 
     test_line_values_by_test: dict[str, list[dict]] = {}
     for row in rc.persistence.list_test_line_values(rc.run_id):
