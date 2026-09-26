@@ -94,8 +94,14 @@ def test_infer_column_type_mixed_string_and_numeric_stays_string():
               is_currency_code=False, max_distinct=30, two_value_set={"y", "n"}), "flag"),
         (dict(name="Employee ID", col_type="integer", distinct_count=10, row_count=10, unique=True,
               is_currency_code=False, max_distinct=30), "identifier"),
+        (dict(name="Booking Reference", col_type="string", distinct_count=10, row_count=10, unique=True,
+              is_currency_code=False, max_distinct=30), "identifier"),  # non-numeric unique -> unchanged
         (dict(name="Expense Amount", col_type="number", distinct_count=10, row_count=10, unique=True,
-              is_currency_code=False, max_distinct=30), "identifier"),  # unique wins over amount
+              is_currency_code=False, max_distinct=30), "amount"),  # float dtype -> measure even unique
+        (dict(name="Claim ID", col_type="integer", distinct_count=10, row_count=10, unique=True,
+              is_currency_code=False, max_distinct=30), "identifier"),  # id-like name, no amount evidence
+        (dict(name="Total", col_type="integer", distinct_count=10, row_count=10, unique=True,
+              is_currency_code=False, max_distinct=30), "amount"),  # amount-like name overrides uniqueness
         (dict(name="Total Cost", col_type="number", distinct_count=8, row_count=10, unique=False,
               is_currency_code=False, max_distinct=5), "amount"),
         (dict(name="Category", col_type="string", distinct_count=3, row_count=10, unique=False,
