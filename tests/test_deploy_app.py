@@ -392,6 +392,115 @@ def test_runtime_settings_env_vars_never_includes_a_token_or_secret():
     assert "dapi-super-secret-value" not in out.values()
 
 
+# ── Independent review 2026-09-25 item 3: REVIEW_* settings are forwarded to
+# the deployed App, and REVIEW_ROLE_SOURCE=workspace_groups is checked
+# against the real workspace at deploy time. ────────────────────────────────
+
+
+def test_runtime_settings_env_vars_forwards_review_settings():
+    settings = _settings(
+        review_sod_mode="labelled", review_role_source="workspace_groups",
+        review_preparer_groups=("audit-preparers",), review_reviewer_groups=("audit-reviewers",),
+        review_approver_groups=("audit-approvers",),
+    )
+    out = deploy_app._runtime_settings_env_vars(settings, {})
+    assert out["REVIEW_SOD_MODE"] == "labelled"
+    assert out["REVIEW_ROLE_SOURCE"] == "workspace_groups"
+    assert out["REVIEW_PREPARER_GROUPS"] == "audit-preparers"
+    assert out["REVIEW_REVIEWER_GROUPS"] == "audit-reviewers"
+    assert out["REVIEW_APPROVER_GROUPS"] == "audit-approvers"
+
+
+def test_runtime_settings_env_vars_forwards_review_settings_using_code_defaults_when_unset():
+    """An unset REVIEW_* in this deploying process's own .env still forwards
+    the same code-level default the deployed App would otherwise compute for
+    itself (matching audit_timezone/narration_enabled's own reasoning) --
+    never omitted, and an empty group tuple forwards as the empty string,
+    never invented here."""
+    out = deploy_app._runtime_settings_env_vars(_settings(), {})
+    assert out["REVIEW_SOD_MODE"] == "enforced"
+    assert out["REVIEW_ROLE_SOURCE"] == "workspace_groups"
+    assert out["REVIEW_PREPARER_GROUPS"] == ""
+    assert out["REVIEW_REVIEWER_GROUPS"] == ""
+    assert out["REVIEW_APPROVER_GROUPS"] == ""
+
+
+def test_runtime_settings_env_vars_omits_review_role_assignments_when_unset():
+    assert "REVIEW_ROLE_ASSIGNMENTS" not in deploy_app._runtime_settings_env_vars(_settings(), {})
+
+
+def test_runtime_settings_env_vars_forwards_review_role_assignments_when_set():
+    settings = _settings(review_role_assignments_path="/gitignored/review_roles.yaml")
+    out = deploy_app._runtime_settings_env_vars(settings, {})
+    assert out["REVIEW_ROLE_ASSIGNMENTS"] == "/gitignored/review_roles.yaml"
+
+
+class _FakeGroup:
+    def __init__(self, display_name, group_id="grp-1"):
+        self.display_name = display_name
+        self.id = group_id
+
+
+class _FakeGroupsAPI:
+    def __init__(self, group_names):
+        self._groups = [_FakeGroup(name, f"grp-{i}") for i, name in enumerate(group_names)]
+
+    def list(self):
+        return list(self._groups)
+
+
+class _FakeWorkspaceClientForGroups:
+    def __init__(self, group_names):
+        self.groups = _FakeGroupsAPI(group_names)
+
+
+def _review_settings(**overrides):
+    base = dict(
+        review_role_source="workspace_groups",
+        review_preparer_groups=("audit-preparers",), review_reviewer_groups=("audit-reviewers",),
+        review_approver_groups=("audit-approvers",),
+    )
+    base.update(overrides)
+    return _settings(**base)
+
+
+def test_check_review_groups_exist_passes_when_every_group_is_present():
+    w = _FakeWorkspaceClientForGroups(["audit-preparers", "audit-reviewers", "audit-approvers", "some-other-group"])
+    assert deploy_app._check_review_groups_exist(w, _review_settings()) == []
+
+
+def test_check_review_groups_exist_reports_every_missing_group():
+    w = _FakeWorkspaceClientForGroups(["audit-preparers"])
+    problems = deploy_app._check_review_groups_exist(w, _review_settings())
+    assert any("audit-reviewers" in p for p in problems)
+    assert any("audit-approvers" in p for p in problems)
+    assert not any("audit-preparers" in p for p in problems)
+
+
+def test_check_review_groups_exist_skips_the_check_for_config_role_source():
+    w = _FakeWorkspaceClientForGroups([])
+    settings = _review_settings(review_role_source="config")
+    assert deploy_app._check_review_groups_exist(w, settings) == []
+
+
+def test_check_review_groups_exist_skips_the_check_when_no_groups_are_configured():
+    w = _FakeWorkspaceClientForGroups([])
+    settings = _settings(
+        review_role_source="workspace_groups",
+        review_preparer_groups=(), review_reviewer_groups=(), review_approver_groups=(),
+    )
+    assert deploy_app._check_review_groups_exist(w, settings) == []
+
+
+def test_check_review_groups_exist_never_calls_groups_create():
+    """"don't create them in the script" -- the deploy-time check only
+    reads; scripts/ensure_review_groups.py is the separate, explicitly-run
+    step that creates a missing group."""
+    w = _FakeWorkspaceClientForGroups(["audit-preparers"])
+    assert not hasattr(w.groups, "create")
+    deploy_app._check_review_groups_exist(w, _review_settings())
+
+
 def test_main_dry_run_fails_loudly_when_narration_enabled_without_endpoints(monkeypatch):
     import pytest
 

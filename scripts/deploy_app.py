@@ -167,6 +167,20 @@ _ALWAYS_FORWARDED_SETTINGS: list[tuple[str, str]] = [
     ("explorer_category_min_count", "EXPLORER_CATEGORY_MIN_COUNT"),
     ("explorer_max_columns", "EXPLORER_MAX_COLUMNS"),
     ("explorer_max_prompt_chars", "EXPLORER_MAX_PROMPT_CHARS"),
+    # P7 review workflow (docs/specs/P7_mapping_authoring_design.md §3.6):
+    # unforwarded until now (independent review 2026-09-25 item 3) meant the
+    # deployed App fell back to code's own defaults (REVIEW_SOD_MODE=
+    # enforced, REVIEW_ROLE_SOURCE=workspace_groups, every group unset) no
+    # matter what this deploying process's .env configured -- in "enforced"
+    # mode with no groups set, build_role_resolver's own ConfigError refuses
+    # the first review action any auditor ever attempts. Always forwarded,
+    # like audit_timezone/narration_enabled above: a genuinely empty group
+    # tuple forwards as the empty string, never invented here.
+    ("review_sod_mode", "REVIEW_SOD_MODE"),
+    ("review_role_source", "REVIEW_ROLE_SOURCE"),
+    ("review_preparer_groups", "REVIEW_PREPARER_GROUPS"),
+    ("review_reviewer_groups", "REVIEW_REVIEWER_GROUPS"),
+    ("review_approver_groups", "REVIEW_APPROVER_GROUPS"),
 ]
 
 # (attr, env var name) -- forwarded only when this deploying process's own
@@ -189,6 +203,12 @@ _IF_SET_FORWARDED_SETTINGS: list[tuple[str, str]] = [
     ("llm_price_per_mtok_json", "LLM_PRICE_PER_MTOK_JSON"),
     ("explorer_reference_skill_ids", "EXPLORER_REFERENCE_SKILL_IDS"),
     ("pii_tag_names", "PII_TAG_NAMES"),
+    # A local filesystem path (§3.5 "config" role source, local backend/e2e
+    # tests only), same reasoning as source_bindings_path above -- only
+    # meaningful to forward if it also exists inside the deployed bundle,
+    # which this script cannot verify. Unset (the dev/corporate default,
+    # REVIEW_ROLE_SOURCE=workspace_groups) correctly leaves it out entirely.
+    ("review_role_assignments_path", "REVIEW_ROLE_ASSIGNMENTS"),
 ]
 
 # Read directly via os.environ by the running App (never routed through
@@ -265,6 +285,39 @@ def _check_feature_requirements(settings) -> list[str]:
             "is never called unless narration is also enabled (.env.example)."
         )
     return problems
+
+
+def _check_review_groups_exist(w, settings) -> list[str]:
+    """Independent review 2026-09-25 item 3: with REVIEW_ROLE_SOURCE=
+    workspace_groups, every review action resolves its actor's role via a
+    live SCIM lookup against the configured group NAMES
+    (orchestrator.identity.WorkspaceGroupsRoleResolver) -- a misspelled or
+    not-yet-created group name never fails loudly there, it just matches no
+    group, so every auditor's every review action (Mark as prepared / Mark
+    as reviewed / Sign off findings) is refused after the deploy with no
+    warning at deploy time. Checked here, once, against the real workspace's
+    groups, before the App is actually redeployed. Never creates a missing
+    group itself -- scripts/ensure_review_groups.py does that, deliberately
+    a separate, explicitly-run step (dev workspace only), never implicit in
+    a deploy. Returns [] when REVIEW_ROLE_SOURCE is "config" (nothing here
+    to check) or no groups are configured at all (an existing, separate
+    _check_feature_requirements-shaped gate belongs to enforced-mode-with-
+    no-groups, not to this function)."""
+    if settings.review_role_source != "workspace_groups":
+        return []
+    configured = {
+        *settings.review_preparer_groups, *settings.review_reviewer_groups, *settings.review_approver_groups,
+    }
+    if not configured:
+        return []
+    existing = {g.display_name for g in w.groups.list() if getattr(g, "display_name", None)}
+    missing = sorted(configured - existing)
+    return [
+        f"REVIEW_ROLE_SOURCE=workspace_groups but the group {name!r} does not exist in this "
+        f"workspace -- create it first (scripts/ensure_review_groups.py, dev workspace only) or "
+        f"correct the REVIEW_*_GROUPS setting that names it."
+        for name in missing
+    ]
 
 
 def _render_app_yaml(env_vars: dict[str, str]) -> str:
@@ -645,6 +698,15 @@ def main(argv: list[str] | None = None) -> int:
 
         w = WorkspaceClient()
         warehouse_id, http_path = _resolve_warehouse(w, settings)
+
+        # Independent review 2026-09-25 item 3: fails the deploy loudly,
+        # before the App is redeployed, when REVIEW_ROLE_SOURCE=
+        # workspace_groups names a group that does not exist in this
+        # workspace -- see _check_review_groups_exist's own docstring.
+        group_problems = _check_review_groups_exist(w, settings)
+        if group_problems:
+            listed = "\n".join(f"  - {p}" for p in group_problems)
+            raise SystemExit(f"Cannot deploy -- review workflow group configuration problem(s):\n{listed}")
 
         # CLAUDE.md §11 "Paused runs across a code deploy" / independent
         # review 2026-09-24 gap #11: a warning, not a gate -- see

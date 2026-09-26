@@ -98,18 +98,39 @@ def connected_app_url(tmp_path_factory):
     path a developer runs locally (README / CLAUDE.md build brief)."""
     external = os.environ.get("APP_URL")
     if external:
+        # A real deployed App: REVIEW_* is whatever that deployment is
+        # configured with (CLAUDE.md §11 "Development workspace: labelled
+        # mode" for the dev workspace) -- this test does not set it.
         base = external.rstrip("/")
         _wait_for_http_200(base + "/", timeout=30.0)
         yield base
         return
 
     port = _free_port()
-    db_path = tmp_path_factory.mktemp("orch") / "orchestrator.db"
+    tmp = tmp_path_factory.mktemp("orch")
+    db_path = tmp / "orchestrator.db"
+    # P7 review workflow (docs/specs/P7_mapping_authoring_design.md §3.5-3.6):
+    # this test drives the whole prepare -> review -> sign-off sequence
+    # through ONE browser identity (no X-Forwarded-Email header is set
+    # anywhere in this file, so `_request_actor` falls back to the literal
+    # "local-user" the local backend alone permits). The code default
+    # (REVIEW_SOD_MODE=enforced, REVIEW_ROLE_SOURCE=workspace_groups) would
+    # either refuse the second and third step (one actor cannot hold two
+    # roles once enforced) or fail outright (no real workspace to resolve
+    # SCIM groups against in this sandboxed subprocess) -- "config" +
+    # "labelled" is exactly the development-workspace setting CLAUDE.md §11
+    # records for this same situation, matching
+    # app/tests/e2e_local/conftest.py's own `running_app` fixture.
+    review_roles_path = tmp / "review_roles.yaml"
+    review_roles_path.write_text("local-user: [preparer, reviewer, approver]\n")
     env = dict(os.environ)
     env["PORT"] = str(port)
     env["ORCH_BACKEND"] = "local"
     env["ORCH_LOCAL_DB"] = str(db_path)
     env["ORCH_LOCAL_DATA_ROOT"] = str(REPO_ROOT / "synthetic_data")
+    env["REVIEW_SOD_MODE"] = "labelled"
+    env["REVIEW_ROLE_SOURCE"] = "config"
+    env["REVIEW_ROLE_ASSIGNMENTS"] = str(review_roles_path)
 
     proc = subprocess.Popen(
         [sys.executable, str(REPO_ROOT / "app" / "app.py")],
@@ -203,11 +224,6 @@ def test_full_playbook_run_via_home_to_signoff_to_workspace(watched_page, connec
 
     assert not has_error_overlay(page)
 
-    # Poll the run page through to awaiting_signoff (skipping plan review —
-    # "review plan first" was left unchecked, so Playbook auto-confirms).
-    def _reached_signoff() -> bool:
-        return page.locator("#run-signoff-open-btn").count() > 0
-
     def _tick():
         # "load" rather than "networkidle": app.py's external_stylesheets
         # pulls Bootstrap from a CDN, and this sandbox's outbound network
@@ -220,7 +236,47 @@ def test_full_playbook_run_via_home_to_signoff_to_workspace(watched_page, connec
         # delay even a same-process static response.
         page.reload(wait_until="load", timeout=120_000)
 
-    _poll_until(page, _reached_signoff, timeout_s=_PIPELINE_TIMEOUT_S, on_tick=_tick)
+    # Poll the run page through to whichever gate appears first. Playbook
+    # auto-confirms and skips straight past awaiting_confirmation UNLESS
+    # this deployment declares a column mapping/parameter for SKILL-001
+    # (CLAUDE.md §11 "column mapping at run setup" forces plan confirmation
+    # even in Playbook -- orchestrator.service.start_audit_run's own
+    # has_run_inputs check); this deployment declares none today, so
+    # waiting for either button only guards against that changing later.
+    def _reached_confirmation_or_signoff_gate() -> bool:
+        return (page.locator("#run-confirm-plan-btn").count() > 0
+                or page.locator("#run-mark-prepared-btn").count() > 0)
+
+    _poll_until(page, _reached_confirmation_or_signoff_gate, timeout_s=_PIPELINE_TIMEOUT_S, on_tick=_tick)
+
+    if page.locator("#run-confirm-plan-btn").count() > 0:
+        # UI-M1 (docs/specs/P7_mapping_authoring_design.md §1.4): a run with
+        # declared inputs lists them here before confirmation -- not
+        # asserted on since this deployment has none, but the click itself
+        # is the same real user gesture either way.
+        page.locator("#run-confirm-plan-btn").click()
+
+        def _reached_signoff_gate() -> bool:
+            return page.locator("#run-mark-prepared-btn").count() > 0
+
+        _poll_until(page, _reached_signoff_gate, timeout_s=_PIPELINE_TIMEOUT_S, on_tick=_tick)
+
+    # P7 review workflow (docs/specs/P7_mapping_authoring_design.md §3.3):
+    # awaiting_signoff no longer shows "Sign off findings" directly -- a run
+    # defaults to review stage 'preparation' and walks preparer -> reviewer
+    # -> approver before the sign-off button appears. Each of these two
+    # steps is a synchronous RunState write (orchestrator.runs.
+    # prepare_findings / mark_reviewed), not a pipeline node, so the click's
+    # own callback response updates the DOM directly -- no reload/poll
+    # needed, matching app/tests/e2e_local/test_review_ui.py's own pattern
+    # for the same two steps. connected_app_url's own REVIEW_SOD_MODE=
+    # labelled / REVIEW_ROLE_SOURCE=config setup (CLAUDE.md §11 "Development
+    # workspace: labelled mode") is what lets this single browser identity
+    # hold every role.
+    page.locator("#run-mark-prepared-btn").click()
+    page.wait_for_selector("#run-mark-reviewed-btn")
+    page.locator("#run-mark-reviewed-btn").click()
+    page.wait_for_selector("#run-signoff-open-btn")
 
     # Single click: opens the native confirm() dialog, auto-accepted by the
     # page.on("dialog", ...) handler registered above, which fires
