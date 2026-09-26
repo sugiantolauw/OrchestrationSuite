@@ -516,20 +516,24 @@ def narrate_candidates(
 
     for row in rows:
         table = {name: all_metrics_table[name] for name in row["metrics_cited"] if name in all_metrics_table}
+        allowed = allowed_identifiers_for_cited_metrics(row["metrics_cited"], metrics, test_ident)
         runner._persist(
             rc, target_kind="candidate", target_id=row["candidate_id"], field="observation", origin=outcome.origin,
             table=table, text=row["observation"], call_ids=outcome.call_ids,
             served_model_version=outcome.served_model_version, violations_payload=outcome.violations_payload,
+            allowed_identifiers=allowed,
         )
         runner._persist(
             rc, target_kind="candidate", target_id=row["candidate_id"], field="recommendation", origin=outcome.origin,
             table=table, text=row["recommendation"], call_ids=outcome.call_ids,
             served_model_version=outcome.served_model_version, violations_payload=outcome.violations_payload,
+            allowed_identifiers=allowed,
         )
         runner._persist(
             rc, target_kind="candidate", target_id=row["candidate_id"], field="management_questions",
             origin=outcome.origin, table=table, list_text=row["management_questions"], call_ids=outcome.call_ids,
             served_model_version=outcome.served_model_version, violations_payload=outcome.violations_payload,
+            allowed_identifiers=allowed,
         )
 
     return rows, superseded_count

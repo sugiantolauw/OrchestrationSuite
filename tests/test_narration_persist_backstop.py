@@ -1,17 +1,27 @@
-"""BUG-R5-1 backstop (independent review 2026-09-26): `_persist` must never
-store `origin='model'/'model_repaired'` text that does not actually render
-against the `table` it is persisting alongside -- regardless of what
-`validate_fn` decided moments earlier. This is defence in depth for the
-root cause fixed in `build_profile_payload` (tests/test_narration_payloads.
-py's `test_build_profile_payload_slug_disambiguation_is_independent_of_
-dict_order`): any future path where the validated table and the persisted
-table diverge must degrade to the labelled fallback, never crash and never
-store an unfilled `{class:name}` placeholder."""
+"""BUG-R5-1/BUG-P2-3 backstop (independent review 2026-09-26): `_persist`
+must never store `origin='model'/'model_repaired'` text that does not
+actually render against the `table` it is persisting alongside, OR that
+fails any field-scoped rule (the length cap chief among them) `validate_fn`
+already checked moments ago -- regardless of what that earlier check
+decided. This is defence in depth for the root cause fixed in
+`build_profile_payload` (tests/test_narration_payloads.py's
+`test_build_profile_payload_slug_disambiguation_is_independent_of_dict_
+order`): any future path where the validated table/text and the persisted
+one diverge must degrade to the labelled fallback, never crash and never
+store an unfilled `{class:name}` placeholder or an over-length paragraph
+(live test 2.4: a stored `question` at 332 characters, over the
+250-character cap). `test_persist_downgrades_every_validator_field_when_
+over_its_length_cap` below exercises every (target_kind, field) pair
+`VALIDATOR_FIELD_FOR` maps -- every narration task and field, not only the
+one BUG-R5-1 happened to surface on."""
 
 from __future__ import annotations
 
+import pytest
+
+from orchestrator.narration.lexicon import FIELD_LENGTH_CAPS
 from orchestrator.narration.placeholders import PlaceholderEntry
-from orchestrator.narration.runner import RunnerContext, _persist
+from orchestrator.narration.runner import VALIDATOR_FIELD_FOR, RunnerContext, _persist
 
 
 class _FakePersistence:
@@ -86,3 +96,30 @@ def test_persist_still_stores_valid_model_text_normally():
     assert row["template_text"] == text
     assert row["sources"]
     assert rc.origin_counts.get("model") == 1
+
+
+@pytest.mark.parametrize(("target_kind", "field"), sorted(VALIDATOR_FIELD_FOR))
+def test_persist_downgrades_every_validator_field_when_over_its_length_cap(target_kind, field):
+    """A field's own N-L1 cap is the exact shape live test 2.4 hit
+    ('question' at 332 characters, over the 250-character cap, stored as
+    model output): confirms `_persist`'s backstop catches it for EVERY
+    (target_kind, field) `VALIDATOR_FIELD_FOR` maps, list-shaped fields
+    included, not only the one bug happened to surface on."""
+    persistence = _FakePersistence()
+    rc = _rc(persistence)
+    validator_field = VALIDATOR_FIELD_FOR[(target_kind, field)]
+    cap = FIELD_LENGTH_CAPS[validator_field]
+    over_length_text = "word " * (cap // len("word ") + 5)
+    assert len(over_length_text) > cap
+    is_list = field in ("management_questions", "review_observations", "profile", "exec_summary")
+
+    _persist(
+        rc, target_kind=target_kind, target_id="TARGET-1", field=field, origin="model_repaired", table={},
+        text=None if is_list else over_length_text, list_text=[over_length_text] if is_list else None,
+        call_ids=["call-1"], served_model_version="v1", violations_payload=None,
+    )
+
+    row = persistence.rows[0]
+    assert row["origin"] == "fallback_invalid", (target_kind, field, row.get("violations"))
+    assert row["template_text"] is None
+    assert any(v["rule_id"] == "N-L1" for v in row["violations"])

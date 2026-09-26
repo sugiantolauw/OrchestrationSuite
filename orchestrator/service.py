@@ -2905,31 +2905,11 @@ def decide_candidate(
 # title|summary|root_cause|review_observations|rationale|remediation|
 # exec_summary|caption|profile") -> the validator's own field taxonomy
 # (`orchestrator.narration.lexicon.FIELD_LENGTH_CAPS`/`OBSERVATION_TYPE_
-# FIELDS`/`TITLE_FIELDS`/`RATIONALE_FIELD`) -- the SAME mapping
-# `orchestrator.narration.runner`'s per-task `narrate_*` functions apply when
-# they first validate the model's own output (e.g. `narrate_remediation`
-# reuses the "recommendation" field's rules, its own comment says so), kept
-# here rather than imported so this module never has to import runner.py's
-# node-scoped internals for one small lookup table.
-_VALIDATOR_FIELD_FOR: dict[tuple[str, str], str] = {
-    ("finding", "observation"): "observation",
-    ("finding", "recommendation"): "recommendation",
-    ("finding", "management_questions"): "question",
-    ("finding", "rationale"): "rationale",
-    ("finding", "remediation"): "recommendation",
-    ("candidate", "observation"): "observation",
-    ("candidate", "recommendation"): "recommendation",
-    ("candidate", "management_questions"): "question",
-    ("candidate", "title"): "candidate_title",
-    ("candidate", "rationale"): "rationale",
-    ("theme", "title"): "theme_title",
-    ("theme", "summary"): "theme_summary",
-    ("theme", "root_cause"): "root_cause",
-    ("theme", "review_observations"): "review_observation",
-    ("run", "exec_summary"): "exec_paragraph",
-    ("chart", "caption"): "caption",
-    ("profile", "profile"): "profile_paragraph",
-}
+# FIELDS`/`TITLE_FIELDS`/`RATIONALE_FIELD`) -- BUG-P2-3 (independent review
+# 2026-09-26) moved this into `orchestrator.narration.runner` itself (one
+# source of truth) so `_persist`'s own backstop can use the SAME mapping;
+# this module now imports it rather than keeping a second copy.
+from orchestrator.narration.runner import VALIDATOR_FIELD_FOR as _VALIDATOR_FIELD_FOR
 # §3.2's list-shaped fields -- `narratives.template_text` for these holds a
 # JSON array (`orchestrator.narration.runner._persist`'s `list_text` path),
 # so an edit's `new_text` may be either a single replacement string (treated
