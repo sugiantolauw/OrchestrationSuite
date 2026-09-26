@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import flask
 import pytest
+from dash import no_update
 
 import fake_service
 from src import run_status
@@ -330,3 +331,120 @@ def test_signoff_text_omits_the_revision_note_when_absent():
     run = {"signoff": {"approver": "auditor@example.com", "timestamp": "2026-09-24T00:00:00Z"}}
     text = run_status._signoff_text(run)
     assert "computed under" not in text
+
+
+# ── Independent review 2026-09-25: the run-page freeze after Confirm plan /
+# Sign off / Resume / Regenerate. Each of those callbacks calls a service
+# function that starts executor work (moving the run into queued/running),
+# so run-poll's own `disabled` Output has to flip back to False in the SAME
+# round trip -- _poll's own tick cannot fire again once disabled. These
+# callbacks are exercised in isolation (adapters.* monkeypatched) rather
+# than through fake_service, because fake_service resolves confirm_plan/
+# sign_off/resume_run synchronously straight to a terminal status, which
+# would make `disabled=True` correct regardless of whether the fix is
+# present -- it cannot distinguish the bug from the fix. ────────────────────
+
+
+def _register_run_status_callbacks():
+    class _FakeApp:
+        def __init__(self):
+            self.callbacks: dict[str, callable] = {}
+
+        def callback(self, *_args, **_kwargs):
+            def decorator(fn):
+                self.callbacks[fn.__name__] = fn
+                return fn
+
+            return decorator
+
+    app = _FakeApp()
+    run_status.register_callbacks(app)
+    return app.callbacks
+
+
+def _call_with_identity(fn, *args, actor: str = "auditor@example.com"):
+    with _probe_app.test_request_context("/", headers={"X-Forwarded-Email": actor}):
+        return fn(*args)
+
+
+def test_confirm_plan_re_enables_polling_when_the_run_becomes_queued(monkeypatch):
+    run_id = _new_run(review_plan_first=True)
+    monkeypatch.setattr(adapters, "confirm_plan", lambda rid, actor: "STATE-SENTINEL")
+    monkeypatch.setattr(
+        adapters, "get_run_and_narration_from_state",
+        lambda rid, state: ({"run_id": rid, "status": "queued", "queue_note": None}, None),
+    )
+    callbacks = _register_run_status_callbacks()
+    _body, disabled = _call_with_identity(callbacks["_confirm_plan"], 1, run_id)
+    assert disabled is False
+
+
+def test_confirm_plan_missing_identity_leaves_poll_state_untouched(monkeypatch):
+    """The error path never calls the adapter, so nothing about the run's
+    status changed -- run-poll's disabled state is left exactly as it was
+    (no_update), not guessed at. Forces the "deployed backend" branch of
+    _request_actor (same technique as
+    test_request_actor_blocks_on_deployed_backend_with_no_identity_header
+    above) so no identity header genuinely fails, rather than silently
+    falling back to "local-user"."""
+    monkeypatch.setattr(fake_service, "ready", lambda ctx: {"ready": True, "backend": "uc", "detail": None})
+    run_id = _new_run(review_plan_first=True)
+    callbacks = _register_run_status_callbacks()
+    with _probe_app.test_request_context("/"):
+        body, disabled = callbacks["_confirm_plan"](1, run_id)
+    assert disabled is no_update
+    assert "MissingIdentityHeader" in str(body)
+
+
+def test_confirm_signoff_re_enables_polling_when_the_run_becomes_queued(monkeypatch):
+    run_id = _new_run()
+    monkeypatch.setattr(adapters, "sign_off", lambda rid, actor: "STATE-SENTINEL")
+    monkeypatch.setattr(
+        adapters, "get_run_and_narration_from_state",
+        lambda rid, state: ({"run_id": rid, "status": "queued", "queue_note": None}, None),
+    )
+    callbacks = _register_run_status_callbacks()
+    body, disabled = _call_with_identity(callbacks["_confirm_signoff"], 1, run_id)
+    assert disabled is False
+
+
+def test_resume_re_enables_polling_when_the_run_becomes_running(monkeypatch):
+    run_id = _new_run()
+    ctx = adapters.get_context()
+    ctx.runs[run_id]["status"] = "interrupted"
+    monkeypatch.setattr(adapters, "resume_run", lambda rid, actor: "STATE-SENTINEL")
+    monkeypatch.setattr(
+        adapters, "get_run_and_narration_from_state",
+        lambda rid, state: ({"run_id": rid, "status": "running", "queue_note": None}, None),
+    )
+    callbacks = _register_run_status_callbacks()
+    body, disabled = _call_with_identity(callbacks["_resume"], 1, run_id)
+    assert disabled is False
+
+
+def test_confirm_regenerate_re_enables_polling_when_the_run_becomes_queued(monkeypatch):
+    run_id = _new_run()
+    monkeypatch.setattr(adapters, "regenerate_narration", lambda rid, actor: "STATE-SENTINEL")
+    monkeypatch.setattr(
+        adapters, "get_run_and_narration_from_state",
+        lambda rid, state: ({"run_id": rid, "status": "queued", "queue_note": None}, None),
+    )
+    callbacks = _register_run_status_callbacks()
+    body, disabled = _call_with_identity(callbacks["_confirm_regenerate"], 1, run_id)
+    assert disabled is False
+
+
+def test_confirm_plan_stays_disabled_when_the_run_lands_on_a_terminal_status(monkeypatch):
+    """A run that (rarely, e.g. an instantly-resolving fixture) lands
+    straight back on a terminal status needs no further polling -- the
+    fix recomputes the flag from the fresh run, it does not simply force
+    it False."""
+    run_id = _new_run(review_plan_first=True)
+    monkeypatch.setattr(adapters, "confirm_plan", lambda rid, actor: "STATE-SENTINEL")
+    monkeypatch.setattr(
+        adapters, "get_run_and_narration_from_state",
+        lambda rid, state: ({"run_id": rid, "status": "awaiting_signoff", "queue_note": None}, None),
+    )
+    callbacks = _register_run_status_callbacks()
+    body, disabled = _call_with_identity(callbacks["_confirm_plan"], 1, run_id)
+    assert disabled is True

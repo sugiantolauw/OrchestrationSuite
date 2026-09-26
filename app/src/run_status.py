@@ -693,6 +693,25 @@ def _refresh_from_state(run_id: str, state) -> html.Div:
     return _render_body(run, run_id, narration)
 
 
+def _refresh_from_state_and_poll(run_id: str, state) -> tuple[html.Div, bool]:
+    """Independent review 2026-09-25 (run-page freeze after Confirm plan /
+    Sign off / Resume / Regenerate): those four actions are the only ones
+    that call `ctx.executor.start` (orchestrator/service.py), moving the run
+    from a poll-disabling status (`awaiting_confirmation`/`awaiting_signoff`/
+    `interrupted`, see `_TERMINAL_STATUSES`) into `queued`/`running`. `_poll`'s
+    own `run-poll.disabled` Output only fires on the interval's OWN tick --
+    once that tick has stopped firing (which is exactly the state this page
+    was already in when one of those buttons became clickable), nothing
+    re-enables it unless the callback that caused the transition does so
+    itself, in the same round trip as its `run-page-body` update. Reuses
+    `_should_stop_polling` (n_intervals=0: none of its idle/queue-affinity
+    checks depend on how many polls have already elapsed on this tab, only on
+    the run dict this action just produced) so the decision is made exactly
+    the same way `_poll` itself would make it on its very next tick."""
+    run, narration = adapters.get_run_and_narration_from_state(run_id, state)
+    return _render_body(run, run_id, narration), _should_stop_polling(run, 0)
+
+
 def _stale_run_panel(exc: RunCodeRevisionStale) -> html.Div:
     return html.Div([
         _error_panel(exc),
@@ -718,6 +737,7 @@ def register_callbacks(app) -> None:
 
     @app.callback(
         Output("run-page-body", "children", allow_duplicate=True),
+        Output("run-poll", "disabled", allow_duplicate=True),
         Input("run-confirm-plan-btn", "n_clicks"),
         State("run-page-run-id", "data"),
         prevent_initial_call=True,
@@ -728,15 +748,19 @@ def register_callbacks(app) -> None:
         try:
             state = adapters.confirm_plan(run_id, _request_actor())
         except adapters.MissingIdentityHeader as exc:
-            return _error_panel(exc)
+            return _error_panel(exc), no_update
         except RunCodeRevisionStale as exc:
             # CLAUDE.md §11 "Paused runs across a code deploy" (independent
             # review 2026-09-24 gap #11): a run paused before its execute
             # phase completed cannot continue on new code -- one click
             # starts a fresh run with the same parameters (_restart_stale
             # below), never a silent run under a different setup.
-            return _stale_run_panel(exc)
-        return _refresh_from_state(run_id, state)
+            return _stale_run_panel(exc), no_update
+        # Confirm plan moves the run into `queued` for the execute phase
+        # (orchestrator.service.confirm_plan calls ctx.executor.start) --
+        # run-poll must resume so the page shows progress without a reload
+        # (independent review 2026-09-25).
+        return _refresh_from_state_and_poll(run_id, state)
 
     # "Sign off findings" only opens the native confirm dialog (a single-
     # Input callback writing a single, ALWAYS-mounted component's own prop --
@@ -755,6 +779,7 @@ def register_callbacks(app) -> None:
 
     @app.callback(
         Output("run-page-body", "children", allow_duplicate=True),
+        Output("run-poll", "disabled", allow_duplicate=True),
         Input("run-signoff-confirm-dialog", "submit_n_clicks"),
         State("run-page-run-id", "data"),
         prevent_initial_call=True,
@@ -770,11 +795,15 @@ def register_callbacks(app) -> None:
             # errors.py); UI-R6: ReviewActionRefused's own `reason` is one of
             # the exact strings the UI names -- both rendered verbatim, never
             # re-worded here.
-            return _error_panel(exc)
-        return _refresh_from_state(run_id, state)
+            return _error_panel(exc), no_update
+        # Sign-off moves the run into `queued` for the export phase
+        # (orchestrator.service.sign_off calls ctx.executor.start) -- resume
+        # polling so the export shows up without a reload.
+        return _refresh_from_state_and_poll(run_id, state)
 
     @app.callback(
         Output("run-page-body", "children", allow_duplicate=True),
+        Output("run-poll", "disabled", allow_duplicate=True),
         Input("run-resume-btn", "n_clicks"),
         State("run-page-run-id", "data"),
         prevent_initial_call=True,
@@ -785,8 +814,8 @@ def register_callbacks(app) -> None:
         try:
             state = adapters.resume_run(run_id, _request_actor())
         except adapters.MissingIdentityHeader as exc:
-            return _error_panel(exc)
-        return _refresh_from_state(run_id, state)
+            return _error_panel(exc), no_update
+        return _refresh_from_state_and_poll(run_id, state)
 
     @app.callback(
         Output("run-download-xlsx", "data"),
@@ -891,6 +920,7 @@ def register_callbacks(app) -> None:
 
     @app.callback(
         Output("run-page-body", "children", allow_duplicate=True),
+        Output("run-poll", "disabled", allow_duplicate=True),
         Input("run-regenerate-confirm-dialog", "submit_n_clicks"),
         State("run-page-run-id", "data"),
         prevent_initial_call=True,
@@ -902,8 +932,13 @@ def register_callbacks(app) -> None:
             state = adapters.regenerate_narration(run_id, _request_actor())
         except (adapters.MissingIdentityHeader, NarrationDisabled, NarrationNodeUnavailable,
                 RunNotAwaitingSignoff, ReviewActionRefused) as exc:
-            return _error_panel(exc)
-        return _refresh_from_state(run_id, state)
+            return _error_panel(exc), no_update
+        # Regenerate re-enters the execute phase at `narrate` (`queued`,
+        # orchestrator.service.regenerate_narration calls ctx.executor.start)
+        # before returning to awaiting_signoff -- resume polling so the
+        # in-progress state and the eventual new narration both show up
+        # without a reload.
+        return _refresh_from_state_and_poll(run_id, state)
 
     # ── P7 review workflow (docs/specs/P7_mapping_authoring_design.md §3.8:
     # UI-R2/R3/R4) ────────────────────────────────────────────────────────

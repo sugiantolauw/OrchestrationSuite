@@ -181,25 +181,20 @@ def test_mapped_run_shows_ui_m1_lines_and_confirm_completes(mapped_run_app, page
 
     page.click("#run-confirm-plan-btn")
 
-    # The awaiting_confirmation status this page was rendering already
-    # stopped run-poll's own dcc.Interval (it stops polling on every
-    # _TERMINAL_STATUSES member, including awaiting_confirmation, CLAUDE.md
-    # P3 cost fix) -- clicking Confirm re-renders run-page-body once with
-    # whatever the click callback's own synchronous return is (typically
-    # still "queued", since the executor's pipeline pass runs in the
-    # background) but does not itself re-enable the interval. A real
-    # browser tab is in the same position; reloading is what a human does
-    # to see progress, so this test does the same rather than waiting on a
-    # poll that this page's own design does not resume here.
-    deadline = time.time() + 60
-    found = False
-    while time.time() < deadline:
-        page.reload(wait_until="networkidle")
-        if page.locator("text=Findings are ready for sign-off").count() > 0:
-            found = True
-            break
-        time.sleep(1)
-    if not found:
+    # Independent review 2026-09-25 (run-page freeze after Confirm plan /
+    # Sign off / Resume / Regenerate, app/src/run_status.py): confirm_plan
+    # moves the run into `queued` for the execute phase, and the SAME
+    # callback round trip that renders that now re-enables run-poll's own
+    # dcc.Interval (it was disabled while this page sat on the
+    # awaiting_confirmation gate, CLAUDE.md P3 cost fix) -- so the page
+    # reaches "Findings are ready for sign-off" on its own, from the
+    # background poll alone, with NO reload. This is the regression test
+    # for that freeze: before the fix, this would time out here exactly the
+    # way the reload-based workaround this test used to need proves the bug
+    # existed.
+    try:
+        page.wait_for_selector("text=Findings are ready for sign-off", timeout=60_000)
+    except Exception:
         proc = mapped_run_app["proc"]
         proc.terminate()
         try:
@@ -207,6 +202,6 @@ def test_mapped_run_shows_ui_m1_lines_and_confirm_completes(mapped_run_app, page
         except Exception:
             out = "<no output captured>"
         raise AssertionError(
-            f"page text after confirm click + reload polling: {page.inner_text('body')!r}\n\n"
+            f"page text after confirm click, no reload: {page.inner_text('body')!r}\n\n"
             f"server output:\n{out}"
         )
