@@ -83,6 +83,32 @@ def test_edit_with_mismatched_number_is_refused_and_names_it(local_persistence, 
     assert h.persistence.list_narrative_edits(run_id) == []
 
 
+def test_additive_edit_next_to_the_findings_own_control_id_is_accepted(local_persistence, tmp_path, clock):
+    """BUG-P2-2 (independent review 2026-09-26): a stored, valid observation
+    that legitimately names this finding's own control id (allowed under
+    N-D1 at generation, `orchestrator.narration.payloads.identifiers_for_
+    findings`) must accept a purely additive edit that never touches that
+    id -- `_narrative_allowed_identifiers` must be the SAME identifier
+    source `edit_narrative`'s N-H1 check validates against, one source of
+    truth with generation."""
+    h, ctx_app, state = harness_at_awaiting_signoff(local_persistence, tmp_path, clock)
+    run_id = state.run_id
+    row = _t1_observation_row(h.persistence, run_id)
+    metrics = h.persistence.get_run_metrics(run_id)
+    hv_count = int(metrics["hv_count"]["value"])
+    original = f"Per control CTL-1, {hv_count} high-value claim(s) exceed the threshold."
+    h.persistence.upsert_narrative({**row, "template_text": original, "origin": "model"})
+
+    additive = original + " A brand new sentence with no numbers here."
+    updated = service.edit_narrative(ctx_app, run_id, row["narrative_id"], additive, actor="alice")
+    assert updated["template_text"] == additive
+
+    changed = original.replace(f"{hv_count} high-value", f"{hv_count + 1} high-value")
+    with pytest.raises(NarrativeEditRejected) as exc:
+        service.edit_narrative(ctx_app, run_id, row["narrative_id"], changed, actor="alice")
+    assert any(v["rule_id"] == "N-H1" for v in exc.value.violations)
+
+
 def test_edit_unknown_narrative_id_raises(local_persistence, tmp_path, clock):
     h, ctx_app, state = harness_at_awaiting_signoff(local_persistence, tmp_path, clock)
     with pytest.raises(NarrativeNotFound):

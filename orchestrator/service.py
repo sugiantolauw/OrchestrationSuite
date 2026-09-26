@@ -3127,6 +3127,7 @@ def edit_narrative(ctx: AppContext, run_id: str, narrative_id: str, new_text, *,
         raise NarrativeTargetNotFound(narrative_id, row["target_kind"], field)
 
     table = _narrative_table(ctx, state, row)
+    allowed = _narrative_allowed_identifiers(ctx, state, row)
 
     is_list = field in _LIST_NARRATIVE_FIELDS
     if is_list:
@@ -3138,7 +3139,7 @@ def edit_narrative(ctx: AppContext, run_id: str, narrative_id: str, new_text, *,
 
     violations: list = []
     for item in items:
-        result = validate_human_edit(item, table, field=validator_field)
+        result = validate_human_edit(item, table, field=validator_field, allowed_identifiers=allowed)
         violations.extend(result.violations)
     if violations:
         raise NarrativeEditRejected(
