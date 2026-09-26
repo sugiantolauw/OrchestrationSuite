@@ -164,6 +164,7 @@ class LLMGateway:
         ctx: CallContext,
         prompt_template_id: str | None = None,
         prompt_template_version: str | None = None,
+        schema_retry: bool = True,
     ) -> LLMResult:
         role = self.node_models.get(task)
         if not role:
@@ -174,6 +175,7 @@ class LLMGateway:
         result = self._attempt(
             task=task, seq=seq, role=role, messages=messages, desired_params=desired_params,
             schema=schema, ctx=ctx, prompt_template_id=ptid, prompt_template_version=ptver,
+            schema_retry=schema_retry,
         )
         if result.status == "unavailable":
             # CLAUDE.md §6 fallback rule (docs/specs/P6_narration_design.md
@@ -191,6 +193,7 @@ class LLMGateway:
                         task=task, seq=seq, role=fallback_role, messages=messages,
                         desired_params=desired_params, schema=schema, ctx=ctx,
                         prompt_template_id=ptid, prompt_template_version=ptver,
+                        schema_retry=schema_retry,
                     )
         return result
 
@@ -199,7 +202,7 @@ class LLMGateway:
 
     def _attempt(
         self, *, task, seq, role, messages, desired_params, schema, ctx,
-        prompt_template_id, prompt_template_version,
+        prompt_template_id, prompt_template_version, schema_retry=True,
     ) -> LLMResult:
         endpoint = getattr(self.settings, role, None)
 
@@ -327,6 +330,7 @@ class LLMGateway:
             params_sent=sent, params_dropped=dropped, ctx=ctx, prompt_sha256=prompt_sha256,
             params_json=params_json, schema=schema, transport_attempt=1,
             prompt_template_id=prompt_template_id, prompt_template_version=prompt_template_version,
+            schema_retry=schema_retry,
         )
 
     # ── §3.6 step 5: which served version a cache hit must match ───────────
@@ -360,7 +364,7 @@ class LLMGateway:
     def _call_live(
         self, *, task, seq, role, endpoint, messages, params_sent, params_dropped, ctx,
         prompt_sha256, params_json, schema, transport_attempt,
-        prompt_template_id, prompt_template_version,
+        prompt_template_id, prompt_template_version, schema_retry=True,
     ) -> LLMResult:
         common = dict(
             task=task, seq=seq, role=role, endpoint=endpoint, messages=messages,
@@ -432,6 +436,7 @@ class LLMGateway:
                 prompt_sha256=prompt_sha256, params_json=params_json, schema=schema,
                 transport_attempt=transport_attempt + 1,
                 prompt_template_id=prompt_template_id, prompt_template_version=prompt_template_version,
+                schema_retry=schema_retry,
             )
         except TruncatedOutput as exc:
             return self._log_and_return(
@@ -460,7 +465,20 @@ class LLMGateway:
         if schema is not None:
             parsed, err = _parse_and_validate(resp.text, schema)
             if err is not None:
-                if transport_attempt < 2:
+                # Explorer perf review 2026-09-26 (BUG item 2): `schema_retry`
+                # lets a caller with its OWN downstream, feedback-informed
+                # repair round (plan_explorer -> plan_repair,
+                # orchestrator.nodes.fieldwork._plan_explorer) skip this
+                # blind, same-messages retry -- observed live reproducing
+                # the identical schema violation on both attempts
+                # (RUN-52F85723B2E0: "'primitive' is a required property"
+                # on attempt 1 AND attempt 2), costing a full extra ~15-30s
+                # round trip that changed nothing, since the repair round
+                # runs regardless once the FINAL attempt is still invalid.
+                # A task with no repair mechanism of its own keeps the
+                # retry (schema_retry defaults True) -- this is strictly
+                # fewer wasted calls, never a looser schema check.
+                if transport_attempt < 2 and schema_retry:
                     self._log_and_return(
                         **common, transport_attempt=transport_attempt, outcome="invalid_output",
                         status="invalid_output", error_type="InvalidModelOutput", error_message=err,
@@ -476,6 +494,7 @@ class LLMGateway:
                         prompt_sha256=prompt_sha256, params_json=params_json, schema=schema,
                         transport_attempt=transport_attempt + 1,
                         prompt_template_id=prompt_template_id, prompt_template_version=prompt_template_version,
+                        schema_retry=schema_retry,
                     )
                 return self._log_and_return(
                     **common, transport_attempt=transport_attempt, outcome="invalid_output",

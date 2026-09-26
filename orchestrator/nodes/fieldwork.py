@@ -423,6 +423,16 @@ def _plan_explorer(ctx: NodeContext, state: RunState) -> RunState:
         task="plan_explorer", seq=1, messages=prompts.render("explorer/planner", **payload),
         desired_params=TASK_PROFILES["plan_explorer"].desired_params, schema=PLAN_PROPOSAL_SCHEMA,
         ctx=call_ctx,
+        # Explorer perf review 2026-09-26 (BUG item 2): plan_explorer
+        # already has its OWN downstream repair round below (task=
+        # "plan_repair", fed this attempt's actual validation errors) --
+        # the gateway's generic blind, same-messages schema retry adds a
+        # second ~15-30s round trip that, observed live, just reproduces
+        # the same schema violation and changes nothing the repair round
+        # was not already going to fix. schema_retry=False skips straight
+        # to repair on an invalid first attempt; never a third planner call
+        # either way (the repair round is still exactly one call).
+        schema_retry=False,
     )
     if r1.status == "unavailable":
         plan_payload = {
