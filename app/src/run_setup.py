@@ -368,7 +368,7 @@ def _is_recent_upload(uploaded_at: str | None) -> bool:
     return 0 <= age_s <= _RECENT_UPLOAD_WINDOW_S
 
 
-def _auto_bind(skill_id: str) -> tuple[dict[str, str], list[str]]:
+def _auto_bind(skill_id: str, *, owner: str | None = None) -> tuple[dict[str, str], list[str]]:
     """The prototype's landing page has no binding step at all: a run always
     used whichever fixed demo data was already loaded. A real run needs a
     concrete source per contract entry, so this binds by EXACT name match
@@ -409,7 +409,13 @@ def _auto_bind(skill_id: str) -> tuple[dict[str, str], list[str]]:
     # start_audit_run resolves it the same way from the same config.
     not_supplied = adapters.not_supplied_sources(skill_id)
 
-    current_owner = _request_owner()
+    # BUG-STARTRUN-2 (independent review round 5, "Start -> run page takes
+    # 6.05s"): `owner` lets a caller running on pending_runs' background
+    # worker (app/src/run_setup.py's start_run) pass the owner it already
+    # captured synchronously via flask.request, rather than this function
+    # calling _request_owner() itself -- flask.request does not exist on
+    # that thread once the callback that created it has returned.
+    current_owner = owner if owner is not None else _request_owner()
     uploads_by_stem: dict[str, dict] = {}
     for row in adapters.list_uploaded_files(engagement_id=_DEFAULT_ENGAGEMENT_ID):
         if row.get("status") != "Ready" or row.get("uploaded_by") != current_owner:
@@ -841,22 +847,24 @@ def register_callbacks(app) -> None:
         skill_id = selected_skill_id or _DEFAULT_SKILL_ID
 
         try:
-            # _auto_bind and _request_owner still run synchronously, here,
-            # before anything is submitted to the background worker:
-            # _request_owner() reads flask.request, which only exists
-            # inside this request -- it would raise RuntimeError if called
-            # from the background thread after this callback has returned.
-            # Both are already fast (no multi-write run creation), so
-            # deferring them would buy nothing; a bad binding or an
-            # unverified identity is shown in THIS response, exactly as
-            # before, never deferred to the run page (independent review
-            # 2026-09-24 item 7 -- it scopes uploads to the current user).
-            bindings, missing = _auto_bind(skill_id)
-            if missing:
-                raise ValueError(
-                    "no governed table or uploaded file matches contract source(s) "
-                    f"{', '.join(missing)} by exact name."
-                )
+            # BUG-STARTRUN-2 (independent review round 5, "Start -> run page
+            # takes 6.05s", target ~1-2s): _request_owner() is the only
+            # thing that must still run synchronously here -- it reads
+            # flask.request, which only exists inside THIS request and would
+            # raise RuntimeError if called from the background worker after
+            # this callback has returned. _auto_bind (get_skill,
+            # suggest_bindings, list_uploaded_files -- each a real Delta
+            # round trip) no longer does: it moves into the SAME background
+            # closure as adapters.start_audit_run, below. A bad binding is
+            # therefore no longer shown in THIS response (superseding
+            # independent review 2026-09-24 item 7's "never deferred to the
+            # run page") -- it is a creation failure, and CLAUDE.md §11 "Run
+            # start opens the run page at once" already requires exactly
+            # this: "A creation failure (contract, bindings, fingerprint)
+            # must still reach the user visibly on that page. It is never
+            # silent" -- pending_runs.start's existing exception handling is
+            # what /run/<id> already reads for a start_audit_run failure;
+            # nothing new was needed for _auto_bind's to land there too.
             run_owner = _request_owner()
         except Exception as exc:  # NN14: fail loudly and visibly, never a silent default
             return no_update, html.Div([
@@ -868,9 +876,8 @@ def register_callbacks(app) -> None:
                 ]),
             ], className="panel", style={"marginTop": 12})
 
-        run_kwargs = dict(
+        form_kwargs = dict(
             skill_id=skill_id,
-            bindings=bindings,
             audit_period=(start_date, end_date),
             objective=(objective or "").strip(),
             run_owner=run_owner,
@@ -884,19 +891,28 @@ def register_callbacks(app) -> None:
         # A genuine double-click / resubmit (same auditor, same form state,
         # before the first click's background write has finished) reuses
         # that click's own pending run_id instead of starting a second run
-        # -- "the button can't fire twice for one id".
+        # -- "the button can't fire twice for one id". Keyed on the form
+        # inputs themselves now (bindings are a deterministic function of
+        # them), so this dedupe check needs no Delta round trip either.
         dedupe_key = hashlib.sha256(
-            json.dumps(run_kwargs, sort_keys=True, default=str).encode("utf-8")
+            json.dumps(form_kwargs, sort_keys=True, default=str).encode("utf-8")
         ).hexdigest()
         existing = pending_runs.find_pending(dedupe_key)
         if existing:
             return f"/run/{existing}", no_update
 
         run_id = adapters.generate_run_id()
-        pending_runs.start(
-            run_id, dedupe_key,
-            lambda: adapters.start_audit_run(run_id=run_id, **run_kwargs),
-        )
+
+        def _create_run() -> None:
+            bindings, missing = _auto_bind(skill_id, owner=run_owner)
+            if missing:
+                raise ValueError(
+                    "no governed table or uploaded file matches contract source(s) "
+                    f"{', '.join(missing)} by exact name."
+                )
+            adapters.start_audit_run(run_id=run_id, bindings=bindings, **form_kwargs)
+
+        pending_runs.start(run_id, dedupe_key, _create_run)
         return f"/run/{run_id}", no_update
 
     @app.callback(

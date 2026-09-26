@@ -254,7 +254,7 @@ def _patch_full_bindings(monkeypatch):
     instead of also crafting a matching upload fixture per test."""
     monkeypatch.setattr(
         run_setup, "_auto_bind",
-        lambda skill_id: (
+        lambda skill_id, owner=None: (
             {"expense_report": "test_catalog.tne_source.expense_report",
              "attendee_validity": "test_catalog.tne_source.attendee_validity"},
             [],
@@ -289,6 +289,41 @@ def test_start_run_navigates_immediately_even_when_start_audit_run_is_slow(monke
     assert pending_runs.status(run_id) is not None or adapters.get_run(run_id) is not None
     pending_runs._wait_until_settled(run_id)
     assert adapters.get_run(run_id) is not None
+
+
+def test_start_run_navigates_immediately_even_when_auto_bind_is_slow(monkeypatch):
+    # BUG-STARTRUN-2 (independent review round 5, "Start -> run page takes
+    # 6.05s"): _auto_bind (get_skill, suggest_bindings, list_uploaded_files
+    # -- each a real Delta round trip) must run on pending_runs' background
+    # worker, not synchronously before navigation, the same way
+    # start_audit_run already does. This patches the REAL _auto_bind (not
+    # _patch_full_bindings' fast stand-in) with a slow one and asserts the
+    # callback still returns fast.
+    real_auto_bind = run_setup._auto_bind
+
+    def slow_auto_bind(skill_id, owner=None):
+        time.sleep(0.3)
+        return real_auto_bind(skill_id, owner=owner)
+
+    monkeypatch.setattr(run_setup, "_auto_bind", slow_auto_bind)
+    fn = _start_run_fn()
+
+    with _probe_app.test_request_context("/", headers={"X-Forwarded-Email": "auditor@example.com"}):
+        started = time.monotonic()
+        pathname, summary = _call_start_run(fn)
+        elapsed = time.monotonic() - started
+
+    assert elapsed < 0.15, (
+        f"start_run took {elapsed:.3f}s -- _auto_bind must run in the background, not before navigation"
+    )
+    assert summary is dash.no_update
+    assert pathname.startswith("/run/RUN-")
+    run_id = pathname[len("/run/"):]
+    # Only the CALLBACK's own latency is under test here -- the background
+    # job's outcome (fake_service's SKILL-001 contract may or may not fully
+    # auto-bind) is exercised elsewhere; settling without hanging is enough.
+    settled = pending_runs._wait_until_settled(run_id)
+    assert settled is None or settled[0] in ("failed", "pending")
 
 
 def test_start_run_uses_the_pre_generated_run_id_for_the_real_call(monkeypatch):
