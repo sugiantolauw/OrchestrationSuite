@@ -1,0 +1,587 @@
+{
+  "assumptions": [],
+  "controls": [
+    {
+      "description": "Vendor should be recorded on each expense claim.",
+      "key": "ctrl_missing_vendor",
+      "risk_key": "risk_expense_accuracy",
+      "title": "Missing vendor information",
+      "type": "detective"
+    },
+    {
+      "description": "Expense amounts should not be negative unless authorised.",
+      "key": "ctrl_negative_amount",
+      "risk_key": "risk_negative_amounts",
+      "title": "Negative expense amounts",
+      "type": "detective"
+    },
+    {
+      "description": "Identifying duplicate expense submissions.",
+      "key": "ctrl_duplicate_claims",
+      "risk_key": "risk_duplicate_claims",
+      "title": "Duplicate expense claims",
+      "type": "detective"
+    },
+    {
+      "description": "Detecting expense claims that are split across multiple lines.",
+      "key": "ctrl_split_claims",
+      "risk_key": "risk_split_claims",
+      "title": "Split expense claims",
+      "type": "detective"
+    },
+    {
+      "description": "Payment type must be one of the approved codes.",
+      "key": "ctrl_invalid_payment_type",
+      "risk_key": "risk_invalid_payment_type",
+      "title": "Invalid payment type codes",
+      "type": "detective"
+    }
+  ],
+  "data_gaps": [
+    {
+      "affects_test_keys": [],
+      "description": "Optus Opex CC column is entirely null, limiting any analysis that might rely on it."
+    },
+    {
+      "affects_test_keys": [],
+      "description": "Profile OPEX Centre Code column is entirely null, limiting any analysis that might rely on it."
+    }
+  ],
+  "domain": "Expense",
+  "findings": [],
+  "populations": [
+    {
+      "description": "Expense report rows within the audit period.",
+      "filters": [
+        {
+          "between_audit_period": {
+            "column": "Transaction Date"
+          }
+        }
+      ],
+      "key": "exp_pop",
+      "source": "expense_report"
+    }
+  ],
+  "risks": [
+    {
+      "description": "Ensuring that expense claims are accurate, complete and comply with policy.",
+      "key": "risk_expense_accuracy",
+      "title": "Expense claim accuracy"
+    },
+    {
+      "description": "Preventing duplicate reimbursement of the same expense.",
+      "key": "risk_duplicate_claims",
+      "title": "Duplicate expense claims"
+    },
+    {
+      "description": "Detecting claims that are artificially divided to bypass thresholds.",
+      "key": "risk_split_claims",
+      "title": "Split expense claims"
+    },
+    {
+      "description": "Ensuring payment type codes conform to the approved list.",
+      "key": "risk_invalid_payment_type",
+      "title": "Invalid payment type"
+    },
+    {
+      "description": "Identifying negative expense amounts that may represent refunds or errors.",
+      "key": "risk_negative_amounts",
+      "title": "Negative expense amounts"
+    }
+  ],
+  "schema_version": "explorer-plan/1",
+  "skill_name": "ExpenseReportExplorer",
+  "sources": [
+    {
+      "amount_column": "Expense Amount (reimbursement currency)",
+      "date_column": "Transaction Date",
+      "entry_key": null,
+      "source": "expense_report"
+    }
+  ],
+  "summary": "Audit of expense report data for the audit period.",
+  "tests": [
+    {
+      "assertion": "operating",
+      "control_key": "ctrl_missing_vendor",
+      "control_objective": "Vendor should be recorded on each expense claim.",
+      "findings": [
+        {
+          "key": "F_missing_vendor",
+          "management_questions": [
+            "What process gaps lead to missing vendor data?"
+          ],
+          "metrics_cited": [
+            "missing_vendor_count"
+          ],
+          "monetary_basis": "none",
+          "observation": "{missing_vendor_count} expense lines lack vendor information.",
+          "recommendation": "Require vendor entry on all expense submissions and remediate existing gaps.",
+          "severity": [
+            {
+              "then": "High",
+              "when": "missing_vendor_count > thresholds.missing_vendor_high"
+            },
+            {
+              "then": "Low",
+              "when": null
+            }
+          ],
+          "test_key": "test_missing_vendor",
+          "thresholds_cited": [
+            "missing_vendor_high"
+          ],
+          "title": "Missing vendor information",
+          "trigger": "missing_vendor_count > 0"
+        }
+      ],
+      "key": "test_missing_vendor",
+      "name": "missing_vendor",
+      "params": {
+        "column": "Vendor",
+        "condition": "is_null",
+        "kind": "attribute_missing",
+        "metrics": [
+          {
+            "column": null,
+            "key": null,
+            "kind": "count",
+            "name": "missing_vendor_count",
+            "unit": "count",
+            "where": {
+              "column": "Vendor",
+              "op": "eq",
+              "value": null
+            }
+          }
+        ],
+        "population": "exp_pop",
+        "value": null
+      },
+      "primitive": "attribute_missing",
+      "rationale": "Ensures that all expense lines have a documented vendor for audit traceability.",
+      "risk_hypothesis": "Missing vendor data may indicate incomplete documentation.",
+      "risk_key": "risk_expense_accuracy"
+    },
+    {
+      "assertion": "operating",
+      "control_key": "ctrl_negative_amount",
+      "control_objective": "Expense amounts should be non\u2011negative unless specially authorised.",
+      "findings": [
+        {
+          "key": "F_negative_amount",
+          "management_questions": [
+            "Do any negative amounts represent legitimate refunds?"
+          ],
+          "metrics_cited": [
+            "negative_amount_count",
+            "negative_amount_sum"
+          ],
+          "monetary_basis": "spend",
+          "observation": "{negative_amount_count} expense lines have negative amounts totalling {negative_amount_sum}.",
+          "recommendation": "Investigate negative amounts to confirm they are authorised refunds or correct data errors.",
+          "severity": [
+            {
+              "then": "High",
+              "when": "negative_amount_count > thresholds.negative_amount_high"
+            },
+            {
+              "then": "Medium",
+              "when": null
+            }
+          ],
+          "test_key": "test_negative_amount",
+          "thresholds_cited": [
+            "negative_amount_high"
+          ],
+          "title": "Negative expense amounts",
+          "trigger": "negative_amount_count > 0"
+        }
+      ],
+      "key": "test_negative_amount",
+      "name": "negative_amount",
+      "params": {
+        "aggregate": null,
+        "column": "Expense Amount (reimbursement currency)",
+        "direction": "below",
+        "exclude": null,
+        "group_by": null,
+        "kind": "threshold_exceedance",
+        "limit": {
+          "threshold": "negative_amount_high"
+        },
+        "metrics": [
+          {
+            "column": "Expense Amount (reimbursement currency)",
+            "key": null,
+            "kind": "count",
+            "name": "negative_amount_count",
+            "unit": "count",
+            "where": {
+              "column": "Expense Amount (reimbursement currency)",
+              "op": "lt",
+              "value": 0
+            }
+          },
+          {
+            "column": "Expense Amount (reimbursement currency)",
+            "key": null,
+            "kind": "sum",
+            "name": "negative_amount_sum",
+            "unit": "currency",
+            "where": {
+              "column": "Expense Amount (reimbursement currency)",
+              "op": "lt",
+              "value": 0
+            }
+          }
+        ],
+        "population": "exp_pop"
+      },
+      "primitive": "threshold_exceedance",
+      "rationale": "Identify expense lines that have negative monetary values.",
+      "risk_hypothesis": "Negative amounts may represent refunds or data errors.",
+      "risk_key": "risk_negative_amounts"
+    },
+    {
+      "assertion": "operating",
+      "control_key": "ctrl_duplicate_claims",
+      "control_objective": "Prevent duplicate reimbursement of the same expense.",
+      "findings": [
+        {
+          "key": "F_duplicate_claims",
+          "management_questions": [
+            "How many of these duplicates have already been rectified?"
+          ],
+          "metrics_cited": [
+            "duplicate_groups",
+            "duplicate_lines",
+            "duplicate_amount"
+          ],
+          "monetary_basis": "excess",
+          "observation": "{duplicate_groups} duplicate groups covering {duplicate_lines} lines totalling {duplicate_amount} are identified.",
+          "recommendation": "Review each duplicate group and recover any over\u2011paid amounts.",
+          "severity": [
+            {
+              "then": "High",
+              "when": "duplicate_groups > thresholds.duplicate_high_count"
+            },
+            {
+              "then": "Medium",
+              "when": null
+            }
+          ],
+          "test_key": "test_duplicate_claims",
+          "thresholds_cited": [
+            "duplicate_high_count"
+          ],
+          "title": "Potential duplicate expense claims",
+          "trigger": "duplicate_groups > 0"
+        }
+      ],
+      "key": "test_duplicate_claims",
+      "name": "duplicate_claims",
+      "params": {
+        "amount_column": null,
+        "exclude_within": [
+          "Parent Key"
+        ],
+        "key_columns": [
+          "Employee ID",
+          "Transaction Date",
+          "Vendor",
+          "Expense Amount (reimbursement currency)"
+        ],
+        "kind": "duplicate_detection",
+        "metrics": [
+          {
+            "column": null,
+            "key": null,
+            "kind": "groups",
+            "name": "duplicate_groups",
+            "unit": "count",
+            "where": {
+              "column": "Employee ID",
+              "op": "ne",
+              "value": ""
+            }
+          },
+          {
+            "column": null,
+            "key": null,
+            "kind": "rows",
+            "name": "duplicate_lines",
+            "unit": "count",
+            "where": {
+              "column": "Employee ID",
+              "op": "ne",
+              "value": ""
+            }
+          },
+          {
+            "column": "Expense Amount (reimbursement currency)",
+            "key": null,
+            "kind": "sum",
+            "name": "duplicate_amount",
+            "unit": "currency",
+            "where": {
+              "column": "Employee ID",
+              "op": "ne",
+              "value": ""
+            }
+          }
+        ],
+        "population": "exp_pop"
+      },
+      "primitive": "duplicate_detection",
+      "rationale": "Find groups of expense lines that share all key attributes.",
+      "risk_hypothesis": "Duplicate submissions may lead to over\u2011payment.",
+      "risk_key": "risk_duplicate_claims"
+    },
+    {
+      "assertion": "operating",
+      "control_key": "ctrl_split_claims",
+      "control_objective": "Detect claims that are split to stay under approval thresholds.",
+      "findings": [
+        {
+          "key": "F_split_claims",
+          "management_questions": [
+            "Do any split groups reflect policy\u2011compliant expense structuring?"
+          ],
+          "metrics_cited": [
+            "split_groups",
+            "split_same_day_groups",
+            "split_window_groups",
+            "split_lines",
+            "split_amount"
+          ],
+          "monetary_basis": "spend",
+          "observation": "{split_groups} split\u2011claim groups were identified ({split_same_day_groups} same\u2011day, {split_window_groups} rolling\u2011window), covering {split_lines} lines totalling {split_amount}.",
+          "recommendation": "Investigate flagged split claims to confirm legitimate justification and adjust controls if needed.",
+          "severity": [
+            {
+              "then": "High",
+              "when": "split_groups > thresholds.split_high_count"
+            },
+            {
+              "then": "Medium",
+              "when": null
+            }
+          ],
+          "test_key": "test_split_claims",
+          "thresholds_cited": [
+            "split_high_count"
+          ],
+          "title": "Split expense claim groups",
+          "trigger": "split_groups > 0"
+        }
+      ],
+      "key": "test_split_claims",
+      "name": "split_claims",
+      "params": {
+        "aggregate_threshold": {
+          "threshold": "split_aggregate_threshold"
+        },
+        "amount_column": "Expense Amount (reimbursement currency)",
+        "date_column": "Transaction Date",
+        "group_keys": [
+          "Employee ID",
+          "Vendor",
+          "Expense Type"
+        ],
+        "kind": "split_detection",
+        "max_line": {
+          "threshold": "high_value_limit"
+        },
+        "metrics": [
+          {
+            "column": null,
+            "key": "split_groups",
+            "kind": "value",
+            "name": "split_groups",
+            "unit": "count",
+            "where": {
+              "column": "Expense Amount (reimbursement currency)",
+              "op": "gt",
+              "value": 0
+            }
+          },
+          {
+            "column": null,
+            "key": "same_day_groups",
+            "kind": "value",
+            "name": "split_same_day_groups",
+            "unit": "count",
+            "where": {
+              "column": "Expense Amount (reimbursement currency)",
+              "op": "gt",
+              "value": 0
+            }
+          },
+          {
+            "column": null,
+            "key": "window_groups",
+            "kind": "value",
+            "name": "split_window_groups",
+            "unit": "count",
+            "where": {
+              "column": "Expense Amount (reimbursement currency)",
+              "op": "gt",
+              "value": 0
+            }
+          },
+          {
+            "column": null,
+            "key": "split_lines",
+            "kind": "value",
+            "name": "split_lines",
+            "unit": "count",
+            "where": {
+              "column": "Expense Amount (reimbursement currency)",
+              "op": "gt",
+              "value": 0
+            }
+          },
+          {
+            "column": "Expense Amount (reimbursement currency)",
+            "key": "split_amount",
+            "kind": "value",
+            "name": "split_amount",
+            "unit": "currency",
+            "where": {
+              "column": "Expense Amount (reimbursement currency)",
+              "op": "gt",
+              "value": 0
+            }
+          }
+        ],
+        "population": "exp_pop",
+        "window_days": {
+          "threshold": "split_window_days"
+        }
+      },
+      "primitive": "split_detection",
+      "rationale": "Identify groups of expense lines that together exceed an aggregate limit while each line remains below a per\u2011line ceiling.",
+      "risk_hypothesis": "Split claims may be used to circumvent spend limits.",
+      "risk_key": "risk_split_claims"
+    },
+    {
+      "assertion": "operating",
+      "control_key": "ctrl_invalid_payment_type",
+      "control_objective": "Payment type must be an approved code.",
+      "findings": [
+        {
+          "key": "F_invalid_payment_type",
+          "management_questions": [
+            "Are any of the unapproved payment types required for specific business cases?"
+          ],
+          "metrics_cited": [
+            "invalid_payment_type_count"
+          ],
+          "monetary_basis": "none",
+          "observation": "{invalid_payment_type_count} expense lines use payment types outside the approved list.",
+          "recommendation": "Update processing rules to reject or correct unapproved payment type entries.",
+          "severity": [
+            {
+              "then": "High",
+              "when": "invalid_payment_type_count > thresholds.invalid_payment_type_high"
+            },
+            {
+              "then": "Low",
+              "when": null
+            }
+          ],
+          "test_key": "test_invalid_payment_type",
+          "thresholds_cited": [
+            "invalid_payment_type_high"
+          ],
+          "title": "Invalid payment type codes",
+          "trigger": "invalid_payment_type_count > 0"
+        }
+      ],
+      "key": "test_invalid_payment_type",
+      "name": "invalid_payment_type",
+      "params": {
+        "allowed_values": [
+          "Amex IBCP",
+          "Out of Pocket",
+          "ANZ Visa CBCP"
+        ],
+        "column": "Payment Type",
+        "kind": "list_membership",
+        "match": "exact",
+        "metrics": [
+          {
+            "column": "Payment Type",
+            "key": null,
+            "kind": "count",
+            "name": "invalid_payment_type_count",
+            "unit": "count",
+            "where": {
+              "column": "Payment Type",
+              "op": "ne",
+              "value": "Amex IBCP"
+            }
+          }
+        ],
+        "negate": false,
+        "population": "exp_pop"
+      },
+      "primitive": "list_membership",
+      "rationale": "Validate that payment type values conform to the approved list.",
+      "risk_hypothesis": "Unapproved payment types may indicate processing errors.",
+      "risk_key": "risk_invalid_payment_type"
+    }
+  ],
+  "thresholds": [
+    {
+      "description": "High count threshold for missing vendor entries.",
+      "id": "missing_vendor_high",
+      "unit": "count",
+      "value": 100
+    },
+    {
+      "description": "High count threshold for negative expense amounts.",
+      "id": "negative_amount_high",
+      "unit": "count",
+      "value": 50
+    },
+    {
+      "description": "High count threshold for duplicate claim groups.",
+      "id": "duplicate_high_count",
+      "unit": "count",
+      "value": 10
+    },
+    {
+      "description": "High count threshold for split\u2011claim groups.",
+      "id": "split_high_count",
+      "unit": "count",
+      "value": 20
+    },
+    {
+      "description": "Aggregate amount threshold for split\u2011claim detection.",
+      "id": "split_aggregate_threshold",
+      "unit": "currency",
+      "value": 5000
+    },
+    {
+      "description": "Number of days for the rolling\u2011window split detection.",
+      "id": "split_window_days",
+      "unit": "days",
+      "value": 3
+    },
+    {
+      "description": "Maximum allowed per\u2011line expense amount for split detection.",
+      "id": "high_value_limit",
+      "unit": "currency",
+      "value": 5000
+    },
+    {
+      "description": "High count threshold for payment type values outside the allowed list.",
+      "id": "invalid_payment_type_high",
+      "unit": "count",
+      "value": 30
+    }
+  ]
+}

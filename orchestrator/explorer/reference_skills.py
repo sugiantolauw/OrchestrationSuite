@@ -48,22 +48,22 @@ def _first_test_per_primitive(plan_tests: list[dict]) -> list[dict]:
 
 
 def _test_digest(skill: Skill, test: dict) -> dict:
+    """BUG-EXPLORER-PLAN-2 (independent review round 5, RUN-99373993B1E0):
+    `findings` used to sit NESTED inside this returned dict, one worked
+    example per test -- but PLAN_PROPOSAL_SCHEMA (wire_schema.py) puts
+    `findings` in a FLAT top-level array with a `test_key` back-reference
+    (§4.5). The planner prompt (planner_system.md rule 16) tells the model
+    to copy REFERENCE SKILLS' format exactly; shown a nested example, GPT-
+    OSS dutifully reproduced the nesting in its own proposal on every one
+    of the run's five tests, which then failed wire-schema validation
+    top-to-bottom ("Additional properties are not allowed") and left zero
+    valid tests. `findings` is now built separately, at the digest level,
+    in the schema's own flat/`test_key` shape (build_reference_skill_
+    digest) -- this function returns only the test's own fields."""
     test_id = test["test_id"]
 
     findings = [
-        {
-            "id": f["id"],
-            "trigger": f["trigger"],
-            "severity": f["severity"],
-            "metrics_cited": f.get("metrics_cited", []),
-            "thresholds_cited": f.get("thresholds_cited", []),
-            "monetary_basis": f.get("monetary_basis"),
-            "observation": f.get("observation"),
-            "recommendation": f.get("recommendation"),
-            "management_questions": f.get("management_questions", []),
-        }
-        for f in skill.findings.get("findings", [])
-        if f.get("test_id") == test_id
+        f for f in skill.findings.get("findings", []) if f.get("test_id") == test_id
     ]
 
     threshold_ids: set[str] = set()
@@ -123,31 +123,64 @@ def _test_digest(skill: Skill, test: dict) -> dict:
         "primitive": test.get("primitive"),
         "control_objective": test.get("control_objective"),
         "params": test.get("params", {}),
-        "findings": findings,
         "thresholds": thresholds,
         "contract_columns": columns,
         "populations": populations,
     }
 
 
+def _finding_digest(test_id: str, f: dict) -> dict:
+    """One reference finding in the wire schema's OWN flat shape (`key`,
+    `test_key`) -- see `_test_digest`'s docstring."""
+    return {
+        "key": f["id"],
+        "test_key": test_id,
+        "trigger": f["trigger"],
+        "severity": f["severity"],
+        "metrics_cited": f.get("metrics_cited", []),
+        "thresholds_cited": f.get("thresholds_cited", []),
+        "monetary_basis": f.get("monetary_basis"),
+        "observation": f.get("observation"),
+        "recommendation": f.get("recommendation"),
+        "management_questions": f.get("management_questions", []),
+    }
+
+
 def build_reference_skill_digest(skill: Skill) -> dict:
     """One reference Skill's digest (§4.4): id/version/status/content_hash,
     plus the first test in plan order for each distinct primitive the
-    Skill uses. Capped at 30,000 characters by dropping trailing tests
+    Skill uses, and (BUG-EXPLORER-PLAN-2) a FLAT `findings` array in the
+    wire schema's own `test_key`-linked shape -- never nested inside a
+    test, so a model copying this example's FORMAT (planner_system.md rule
+    16) produces a proposal that actually validates. Capped at 30,000
+    characters by dropping trailing tests, each with its own findings
     (deterministic: proposal/plan order, never re-sorted by size)."""
     plan_tests = [t for t in skill.plan.get("tests", []) if "not_testable" not in t]
     chosen = _first_test_per_primitive(plan_tests)
-    tests_digest = [_test_digest(skill, t) for t in chosen]
+    pairs = [
+        (
+            _test_digest(skill, t),
+            [
+                _finding_digest(t["test_id"], f)
+                for f in skill.findings.get("findings", [])
+                if f.get("test_id") == t["test_id"]
+            ],
+        )
+        for t in chosen
+    ]
 
     digest = {
         "id": skill.manifest.get("id"),
         "version": skill.manifest.get("version"),
         "status": skill.manifest.get("status"),
         "content_hash": skill.content_hash,
-        "tests": tests_digest,
+        "tests": [pair[0] for pair in pairs],
+        "findings": [f for pair in pairs for f in pair[1]],
     }
-    while len(_canonical_json(digest)) > _MAX_DIGEST_CHARS and digest["tests"]:
-        digest["tests"] = digest["tests"][:-1]
+    while len(_canonical_json(digest)) > _MAX_DIGEST_CHARS and pairs:
+        pairs = pairs[:-1]
+        digest["tests"] = [pair[0] for pair in pairs]
+        digest["findings"] = [f for pair in pairs for f in pair[1]]
     return digest
 
 
