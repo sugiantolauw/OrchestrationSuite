@@ -29,6 +29,8 @@ import urllib.request
 from collections import deque
 from pathlib import Path
 
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
 # A local copy, not `from conftest import ...` -- see test_runs_ui.py's own
 # module docstring for why: app/tests/conftest.py and this package's
 # conftest.py both load under the bare module name `conftest` (neither
@@ -77,6 +79,28 @@ def _poll_until_reload(page, base_url: str, path: str, condition, *, timeout_s: 
         goto(page, base_url, path, wait_until="networkidle")
     if not condition():
         raise AssertionError(f"condition not met within {timeout_s}s polling {path}")
+
+
+def _visible_soon(locator, *, timeout_ms: float = 3000.0):
+    """BUG-FLAKY-REVIEW-UI-1 (independent review round 5): `_poll_until_
+    reload`'s own `condition()` is typically `page.locator(...).count() > 0`
+    -- an instant, non-waiting DOM snapshot taken the moment `goto(...,
+    wait_until="networkidle")` returns. "networkidle" guarantees the
+    network settled, not that React has finished committing the DOM update
+    the settled response produced, and a Dash callback chain can leave a
+    brief further gap (a second, quieter round trip after the first burst)
+    that "networkidle" alone does not span. That gap is the observed 1-in-5
+    flake: the run had reached `completed` seconds earlier, but this
+    particular reload's snapshot landed inside the gap. Wrapping the same
+    locator in Playwright's own bounded, polling `wait_for` (never a fixed
+    sleep) absorbs exactly that gap without weakening the check -- it still
+    fails, and `_poll_until_reload` still raises after its own `timeout_s`,
+    if the element genuinely never appears."""
+    try:
+        locator.first.wait_for(state="visible", timeout=timeout_ms)
+        return True
+    except PlaywrightTimeoutError:
+        return False
 
 
 def _free_port() -> int:
@@ -222,16 +246,18 @@ def test_full_review_workflow_across_three_identities(running_app, identity_page
     # then runs asynchronously through the real ThreadExecutor. Polls via
     # page.goto() reload rather than trusting the page's own 3s dcc.Interval,
     # matching tests/e2e/test_connected_app.py's own established pattern for
-    # the same wait. The condition is locator-based (page.locator(...).count()),
-    # not page.content() -- content() can be read before Dash's client-side
-    # React render has caught up with a fresh reload, a real race found live
-    # while building this test; a locator properly waits for the live DOM.
+    # the same wait. The condition wraps the locator in `_visible_soon`
+    # (Playwright's own bounded `wait_for`, BUG-FLAKY-REVIEW-UI-1) rather
+    # than an instant `.count() > 0` snapshot -- `page.content()` has the
+    # same "read before React catches up" race `_visible_soon` avoids, and
+    # a bare `.count()` right after "networkidle" still had a narrower
+    # version of exactly that race, observed live as a 1-in-5 flake.
     # A generous timeout (matching tests/e2e/test_connected_app.py's own
     # _EXPORT_TIMEOUT_S=300 for the same wait): this sandbox's single-CPU
     # constraint (CLAUDE.md §2.5) makes real pipeline execution alongside
     # several concurrent browser contexts noticeably variable run to run.
     _poll_until_reload(
-        approver, base_url, f"/run/{run_id}", lambda: approver.locator("text=Run complete").count() > 0,
+        approver, base_url, f"/run/{run_id}", lambda: _visible_soon(approver.locator("text=Run complete")),
         timeout_s=300.0,
     )
     text = approver.content()

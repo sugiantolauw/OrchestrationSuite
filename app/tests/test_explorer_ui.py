@@ -836,9 +836,14 @@ def test_workflow_preview_renders_proposal_errors_from_every_producer_shape():
     same {"rule", "message"} shape rather than its former list[str]. A
     review carrying either -- or a bare string, for defence in depth -- must
     render through src.run_setup._explorer_workflow_children without a
-    TypeError, and the message text must actually appear (not just avoid a
-    crash), so the workflow-preview poll (app/src/run_setup.py ~671) never
-    500s once proposal_errors is non-empty."""
+    TypeError, so the workflow-preview poll (app/src/run_setup.py ~671)
+    never 500s once proposal_errors is non-empty.
+
+    BUG-EXPLORER-RAW-ERR-1 (independent review round 5): this panel no
+    longer renders the raw rule/message text itself -- that is internal
+    validator detail, not an auditor-facing message (logged instead to the
+    plan node's own trace event, orchestrator.nodes.fieldwork.
+    _plan_explorer). It renders a short, count-based summary instead."""
     from src.run_setup import _explorer_workflow_children
 
     for label, errors in [
@@ -850,8 +855,32 @@ def test_workflow_preview_renders_proposal_errors_from_every_producer_shape():
             "tests": [], "n_valid": 0, "n_total": 0, "plan_status": "proposed",
             "llm_unavailable": False, "label": None, "proposal_errors": errors,
         }
-        children = _explorer_workflow_children(review)
+        children = _explorer_workflow_children(review)  # must not raise
         rendered = "\n".join(str(c) for c in children)
         for e in errors:
-            expected = e["message"] if isinstance(e, dict) else e
-            assert expected in rendered, (label, expected, rendered)
+            raw = e["message"] if isinstance(e, dict) else e
+            assert raw not in rendered, (label, raw, rendered)
+        assert "1 proposed item could not be used" in rendered, (label, rendered)
+
+
+def test_proposal_errors_summary_is_short_and_never_leaks_raw_validator_text():
+    """BUG-EXPLORER-RAW-ERR-1 (independent review round 5, RUN-52F85723B2E0):
+    the panel previously showed the raw jsonschema/validator dump
+    ("risks[0].key = 'R_EXP' is not a valid key ('[a-z][a-z0-9_]{1,31}$')...
+    schema-only dry run failed (V-T7): ..."). _proposal_errors_summary
+    replaces it with one short, count-based sentence, whatever the
+    underlying rule code."""
+    from src.run_setup import _proposal_errors_summary
+
+    raw = "risks[0].key = 'R_EXP' is not a valid key ('[a-z][a-z0-9_]{1,31}$')"
+    errors = [{"rule": "V-S2", "message": raw}]
+    summary = _proposal_errors_summary(errors)
+    assert raw not in summary
+    assert "[a-z" not in summary
+    assert summary == (
+        "1 proposed item could not be used: the proposal did not follow a "
+        "required naming or structure rule."
+    )
+
+    many = [{"rule": "V-C2", "message": "amount_column 'Foo' is not numeric"}] * 3
+    assert _proposal_errors_summary(many).startswith("3 proposed items could not be used:")

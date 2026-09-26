@@ -33,6 +33,23 @@ def _drop_none(d: dict) -> dict:
     return {k: v for k, v in d.items() if v is not None}
 
 
+def _normalize_key(v: Any) -> Any:
+    """BUG-EXPLORER-B-ZERO-TESTS / BUG-EXPLORER-RAW-ERR-1 (independent
+    review round 5): a model-proposed key that is otherwise well-formed
+    but merely upper-case ('R1', 'T1_high_value') fails V-S2's
+    ^[a-z][a-z0-9_]{1,31}$ pattern for no reason an auditor could act on.
+    Observed live (RUN-20E8643022BB): this alone triggered a repair round
+    whose model response DROPPED the test/finding entirely rather than
+    fixing the casing -- turning one harmless format violation into zero
+    proposed tests. Lower-casing here, deterministically, before V-S2 ever
+    runs, is safe (it changes nothing else about the key -- length,
+    character set and uniqueness are unaffected) and applied uniformly to
+    every place the SAME string is used as a definition or a cross-
+    reference, so risks/controls/tests/findings still resolve to each
+    other correctly."""
+    return v.lower() if isinstance(v, str) else v
+
+
 def _canonical_condition(cond: dict) -> dict:
     return _drop_none({"column": cond.get("column"), "op": cond.get("op"), "value": cond.get("value")})
 
@@ -98,12 +115,12 @@ def _canonical_params(params: dict) -> dict:
 
 def _canonical_test(t: dict) -> dict:
     return {
-        "key": t["key"],
+        "key": _normalize_key(t["key"]),
         "name": t["name"],
         "primitive": t["primitive"],
         "params": _canonical_params(t.get("params") or {}),
-        "control_key": t["control_key"],
-        "risk_key": t["risk_key"],
+        "control_key": _normalize_key(t["control_key"]),
+        "risk_key": _normalize_key(t["risk_key"]),
         "assertion": t["assertion"],
         "control_objective": t["control_objective"],
         "risk_hypothesis": t["risk_hypothesis"],
@@ -135,8 +152,8 @@ def _canonical_severity(rules: list[dict]) -> tuple[list[dict], list[str]]:
 def _canonical_finding(f: dict) -> tuple[dict, list[str]]:
     severity, errors = _canonical_severity(f.get("severity") or [])
     out = {
-        "key": f["key"],
-        "test_key": f["test_key"],
+        "key": _normalize_key(f["key"]),
+        "test_key": _normalize_key(f["test_key"]),
         "title": f["title"],
         "trigger": f["trigger"],
         "severity": severity,
@@ -160,8 +177,11 @@ def to_canonical(wire: dict) -> dict:
         "summary": wire.get("summary"),
         "sources": [_canonical_source(s) for s in (wire.get("sources") or [])],
         "populations": [_canonical_population(p) for p in (wire.get("populations") or [])],
-        "risks": [dict(r) for r in (wire.get("risks") or [])],
-        "controls": [dict(c) for c in (wire.get("controls") or [])],
+        "risks": [{**r, "key": _normalize_key(r.get("key"))} for r in (wire.get("risks") or [])],
+        "controls": [
+            {**c, "key": _normalize_key(c.get("key")), "risk_key": _normalize_key(c.get("risk_key"))}
+            for c in (wire.get("controls") or [])
+        ],
         "thresholds": [dict(th) for th in (wire.get("thresholds") or [])],
         "tests": [_canonical_test(t) for t in (wire.get("tests") or [])],
         "data_gaps": [dict(g) for g in (wire.get("data_gaps") or [])],

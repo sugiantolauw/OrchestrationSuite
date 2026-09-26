@@ -2532,6 +2532,15 @@ def update_management_action(
     caller mistake."""
     if status not in _MANAGEMENT_ACTION_STATUSES:
         raise ValueError(f"unknown management action status: {status!r}")
+    # BUG-ACTIONS-EDIT-OWNER-1: an empty-string target_date means "no date
+    # set", never a literal "" to persist -- target_date is a DATE column
+    # on Delta (STRING/TEXT on the sqlite backend), and Delta raises
+    # CAST_INVALID_INPUT on an empty-string DATE cast, failing the whole
+    # UPDATE (owner and every other field in the same edit included) with
+    # no partial write. Normalized here, at the one place every caller of
+    # this function goes through, rather than relying on each caller to
+    # remember it.
+    target_date = target_date or None
     now = ctx.clock()
     row = ctx.persistence.update_management_action(
         action_id, owner=owner, status=status, target_date=target_date, response=response,

@@ -113,3 +113,37 @@ def test_sources_drop_null_optional_fields():
 def test_is_deterministic():
     wire = _minimal_wire(findings=[_wire_finding([{"when": None, "then": "Low"}])])
     assert to_canonical(wire) == to_canonical(wire)
+
+
+def test_upper_case_keys_are_lowercased_consistently():
+    """BUG-EXPLORER-B-ZERO-TESTS (independent review round 5, RUN-20E8643022BB):
+    the planner proposed a schema-valid, otherwise-correct test/finding
+    using upper-case keys ("R1", "C1", "T1_high_value", "F1_high_value").
+    V-S2's ^[a-z][a-z0-9_]{1,31}$ pattern rejected all four, and the
+    repair round that followed dropped the test/finding entirely rather
+    than fixing the casing -- a real proposal ended with zero tests.
+    to_canonical must lower-case every key/cross-reference the SAME way,
+    so a proposal like this canonicalizes straight into something V-S2
+    accepts and cross-references still resolve."""
+    wire = _minimal_wire(
+        risks=[{"key": "R1", "title": "t", "description": "d"}],
+        controls=[{"key": "C1", "risk_key": "R1", "title": "t", "description": "d", "type": "detective"}],
+        tests=[{
+            "key": "T1_high_value", "name": "n", "primitive": "threshold_exceedance", "params": {},
+            "control_key": "C1", "risk_key": "R1", "assertion": "operating",
+            "control_objective": "o", "risk_hypothesis": "h", "rationale": "r",
+        }],
+        findings=[_wire_finding([{"when": None, "then": "Low"}])],
+    )
+    wire["findings"][0]["key"] = "F1_high_value"
+    wire["findings"][0]["test_key"] = "T1_high_value"
+    canonical = to_canonical(wire)
+
+    assert canonical["risks"][0]["key"] == "r1"
+    assert canonical["controls"][0]["key"] == "c1"
+    assert canonical["controls"][0]["risk_key"] == "r1"
+    assert canonical["tests"][0]["key"] == "t1_high_value"
+    assert canonical["tests"][0]["control_key"] == "c1"
+    assert canonical["tests"][0]["risk_key"] == "r1"
+    assert canonical["findings"][0]["key"] == "f1_high_value"
+    assert canonical["findings"][0]["test_key"] == "t1_high_value"

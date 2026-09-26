@@ -879,6 +879,46 @@ def test_update_management_action_persists_and_is_reflected_by_list(tmp_path):
         ctx.executor.stop()
 
 
+def test_update_management_action_owner_only_edit_with_empty_target_date(tmp_path):
+    """BUG-ACTIONS-EDIT-OWNER-1 (independent review round 5, RUN-DE56A9DED2DB):
+    the /workspace/tne modal's target_date State comes back "" (not None)
+    when the auditor edits ONLY the owner and never touches the date field
+    -- workspace_tne._save_action's own `target_date = target_date or None`
+    normalizes this before calling adapters.update_management_action, but
+    this exercises the service function directly with the SAME "" a caller
+    that forgot that normalization would send, so the guarantee lives here
+    too, not only in the UI callback."""
+    ctx = _build_ctx(tmp_path)
+    ctx.executor.start()
+    try:
+        bindings = service.suggest_bindings(ctx, "SKILL-MINI")
+        run_id = service.start_audit_run(
+            ctx, skill_id="SKILL-MINI", bindings=bindings,
+            audit_period=("2026-01-01", "2026-02-28"), objective="local run test",
+            run_owner="tester",
+        )
+        _wait_for_status(ctx, run_id, {"awaiting_signoff", "failed"})
+        service.sign_off(ctx, run_id, "approver")
+        _wait_for_status(ctx, run_id, {"completed", "failed"})
+
+        actions = service.list_management_actions(ctx, filters={"run_id": run_id})
+        assert actions, "the mini Skill's findings should have drafted management actions"
+        action_id = actions[0]["action_id"]
+        before = ctx.persistence.list_management_actions(filters={"run_id": run_id})[0]
+
+        updated = service.update_management_action(
+            ctx, action_id, owner="Owner Only Edit", status=before["status"], target_date="",
+            response=before.get("description"), actor="reviewer@example.com",
+        )
+        assert updated["owner"] == "Owner Only Edit"
+
+        reread = next(a for a in service.list_management_actions(ctx, filters={"run_id": run_id})
+                      if a["action_id"] == action_id)
+        assert reread["owner"] == "Owner Only Edit"
+    finally:
+        ctx.executor.stop()
+
+
 def test_update_management_action_rejects_an_unrecognised_status(tmp_path):
     ctx = _build_ctx(tmp_path)
     with pytest.raises(ValueError):

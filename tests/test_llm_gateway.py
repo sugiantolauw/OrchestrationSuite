@@ -495,6 +495,32 @@ def test_schema_violating_json_is_also_invalid_output():
     assert result.status == "invalid_output"
 
 
+def test_schema_retry_false_skips_the_blind_retry():
+    """Explorer perf review 2026-09-26 (BUG item 2): plan_explorer passes
+    schema_retry=False because it has its OWN downstream, feedback-informed
+    repair round (orchestrator.nodes.fieldwork._plan_explorer's plan_repair
+    call) -- the gateway's generic blind, same-messages retry on a schema
+    violation is pure wasted latency for that caller (observed live
+    reproducing the identical violation on both attempts). With
+    schema_retry=False, one invalid response gives up immediately -- a
+    single call, not two -- while a task that never passes it (the
+    default) keeps the existing one-retry behaviour unchanged."""
+    persistence = _persistence()
+    client = FakeModelClient(responses={
+        "databricks-gpt-oss-120b": [_resp(text="not json at all"), _resp(text='{"x": 2}')]
+    })
+    gw = _gateway(client, persistence=persistence)
+    result = gw.call(
+        task="classify", seq=1, messages=[], desired_params={}, schema=SCHEMA, ctx=_ctx(),
+        schema_retry=False,
+    )
+    assert result.status == "invalid_output"
+    assert len(client.calls) == 1  # no second, blind attempt
+    rows = persistence.list_llm_calls("RUN-1")
+    assert len(rows) == 1
+    assert rows[0]["outcome"] == "invalid_output"
+
+
 # ── BUG-EXPLORER-2 (independent review round 2): actionable anyOf messages ──
 # PLAN_PROPOSAL_SCHEMA's tests[].params is exactly the kind of anyOf-over-8-
 # branches shape whose raw jsonschema message is a useless dump -- these
