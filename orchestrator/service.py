@@ -2706,6 +2706,13 @@ def clear_review_note(ctx: AppContext, run_id: str, note_id: str, actor: str) ->
     )
 
 
+def get_review_notes(ctx: AppContext, run_id: str) -> list[dict]:
+    """UI-R4 (docs/specs/P7_mapping_authoring_design.md §3.8): review notes
+    live in their own table, not on RunState -- run_status.py fetches them
+    separately, the same way it already fetches narration."""
+    return ctx.persistence.list_review_notes(run_id)
+
+
 _CANDIDATE_DECISIONS = ("accepted", "rejected")
 
 

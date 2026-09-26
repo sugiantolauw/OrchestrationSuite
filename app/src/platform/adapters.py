@@ -571,6 +571,37 @@ def regenerate_narration(run_id: str, actor: str):
     return service.regenerate_narration(get_context(), run_id, actor)
 
 
+# ── P7 review workflow (docs/specs/P7_mapping_authoring_design.md §3) ───────
+
+
+def prepare_findings(run_id: str, actor: str):
+    return service.prepare_findings(get_context(), run_id, actor)
+
+
+def mark_reviewed(run_id: str, actor: str):
+    return service.mark_reviewed(get_context(), run_id, actor)
+
+
+def return_to_preparer(run_id: str, actor: str, reason: str):
+    return service.return_to_preparer(get_context(), run_id, actor, reason)
+
+
+def raise_review_note(run_id: str, actor: str, body: str, finding_id: str | None) -> dict:
+    return service.raise_review_note(get_context(), run_id, actor, body, finding_id)
+
+
+def respond_to_review_note(run_id: str, note_id: str, actor: str, response: str) -> dict:
+    return service.respond_to_review_note(get_context(), run_id, note_id, actor, response)
+
+
+def clear_review_note(run_id: str, note_id: str, actor: str) -> dict:
+    return service.clear_review_note(get_context(), run_id, note_id, actor)
+
+
+def get_review_notes(run_id: str) -> list[dict]:
+    return service.get_review_notes(get_context(), run_id)
+
+
 def restart_stale_run(run_id: str, actor: str) -> str:
     return service.restart_stale_run(get_context(), run_id, actor)
 

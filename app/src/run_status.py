@@ -37,6 +37,7 @@ from orchestrator.errors import (
     NarrativeEditRejected,
     NarrativeNotFound,
     NarrativeTargetNotFound,
+    ReviewActionRefused,
     RunCodeRevisionStale,
     RunNotAwaitingSignoff,
 )
@@ -88,7 +89,17 @@ def _signoff_text(run: dict) -> str:
     signoff = run.get("signoff")
     if not signoff:
         return "Not yet signed off."
-    text = f"Signed off by {signoff['approver']} at {signoff['timestamp']}"
+    # UI-R5 (docs/specs/P7_mapping_authoring_design.md §3.8): "Prepared by P,
+    # reviewed by R, signed off by A at T" once a signoff carries prepared_by
+    # (the P7-gated path) -- a legacy signoff keeps its original sentence,
+    # unchanged (§3.7 "Existing runs").
+    if signoff.get("prepared_by") is not None:
+        text = (
+            f"Prepared by {signoff.get('prepared_by')}, reviewed by {signoff.get('reviewed_by')}, "
+            f"signed off by {signoff['approver']} at {signoff['timestamp']}"
+        )
+    else:
+        text = f"Signed off by {signoff['approver']} at {signoff['timestamp']}"
     if signoff.get("self_approved"):
         text += " (self-approved — segregation of duties not enforced)"
     # CLAUDE.md §11 "Paused runs across a code deploy" / independent review
@@ -342,6 +353,94 @@ def _candidates_panel(narration: dict) -> html.Div:
     return html.Div(children, className="panel", style={"marginTop": 16})
 
 
+# ── P7 review workflow (docs/specs/P7_mapping_authoring_design.md §3.8):
+# UI-R1 to UI-R6, all on /run/<id>'s awaiting_signoff block. Existing
+# prototype pages change nothing (§3.8's own closing line).
+
+
+def _review_stage_text(review: dict) -> str:
+    """UI-R1: one P.sub line naming whose turn it is."""
+    stage = review.get("stage", "preparation")
+    if stage == "review":
+        prepared = review.get("prepared") or {}
+        return f"Prepared by {prepared.get('actor', '—')} at {prepared.get('at', '—')} — awaiting review"
+    if stage == "approval":
+        reviewed = review.get("reviewed") or {}
+        return f"Reviewed by {reviewed.get('actor', '—')} at {reviewed.get('at', '—')} — awaiting sign-off"
+    return "Review stage: preparation"
+
+
+def _review_note_item(note: dict, findings_by_id: dict) -> html.Div:
+    """UI-R4: a chip (Open/Responded/Cleared), the body, "Raised by X (role)
+    at T · on finding <title>", a response line once responded, and
+    Respond/Clear controls while still open."""
+    if note.get("state") == "cleared":
+        status_text = "Cleared"
+    elif note.get("response"):
+        status_text = "Responded"
+    else:
+        status_text = "Open"
+
+    target = ""
+    finding_id = note.get("finding_id")
+    if finding_id:
+        title = (findings_by_id.get(finding_id) or {}).get("title") or finding_id
+        target = f" · on finding {title}"
+
+    children = [
+        html.Div([html.Span(status_text, className="chip", style={"fontSize": 10.5})],
+                 style={"display": "flex", "gap": 6, "marginBottom": 6}),
+        html.P(note.get("body"), style={"margin": "0 0 4px", "fontSize": 13, "lineHeight": 1.5}),
+        html.P(f"Raised by {note.get('raised_by')} ({note.get('raised_role')}) at "
+               f"{note.get('raised_at')}{target}", className="sub", style={"fontSize": 11.5}),
+    ]
+    if note.get("response"):
+        children.append(html.P(
+            f"Response by {note.get('responded_by')}: {note.get('response')}",
+            className="sub", style={"fontSize": 11.5},
+        ))
+    if note.get("state") != "cleared":
+        note_id = note["note_id"]
+        children.append(html.Div([
+            dcc.Input(
+                id={"type": "review-note-response-input", "index": note_id}, type="text",
+                placeholder="Response", style={"width": 260, "marginRight": 8},
+            ),
+            html.Button("Respond", id={"type": "review-note-respond-btn", "index": note_id},
+                        className="ghost", style={"width": "auto", "padding": "6px 16px", "marginRight": 6}),
+            html.Button("Clear", id={"type": "review-note-clear-btn", "index": note_id},
+                        className="ghost", style={"width": "auto", "padding": "6px 16px"}),
+        ], style={"display": "flex", "alignItems": "center", "flexWrap": "wrap", "gap": 6, "marginTop": 8}))
+    return html.Div(children, className="panel", style={"marginTop": 10})
+
+
+def _review_notes_panel(review_notes: list[dict], findings: list[dict], stage: str) -> html.Div:
+    """UI-R4: the "Review notes" panel, plus a raise row (a finding dropdown
+    with "Whole run", a body input and a "Raise note" button) shown only
+    during review/approval -- notes may only be raised then (§3.3)."""
+    findings_by_id = {f["finding_id"]: f for f in findings}
+    children = [html.H3("Review notes", style={"margin": "0 0 10px"})]
+    if not review_notes:
+        children.append(html.P("No review notes on this run.", className="sub"))
+    else:
+        children.extend(_review_note_item(n, findings_by_id) for n in review_notes)
+    if stage in ("review", "approval"):
+        options = [{"label": "Whole run", "value": "__run__"}] + [
+            {"label": f.get("title") or f["finding_id"], "value": f["finding_id"]} for f in findings
+        ]
+        children.append(html.Div([
+            dcc.Dropdown(
+                id="review-note-raise-target", options=options, value="__run__", clearable=False,
+                style={"width": 240, "display": "inline-block", "marginRight": 8, "verticalAlign": "top"},
+            ),
+            dcc.Input(id="review-note-raise-body", type="text", placeholder="Note",
+                      style={"width": 300, "marginRight": 8}),
+            html.Button("Raise note", id="review-note-raise-btn", className="ghost",
+                        style={"width": "auto", "padding": "6px 16px"}),
+        ], style={"display": "flex", "alignItems": "center", "flexWrap": "wrap", "gap": 6, "marginTop": 12}))
+    return html.Div(children, className="panel", style={"marginTop": 16})
+
+
 def _render_body(run: dict | None, run_id: str, narration: dict | None = None) -> html.Div:
     if run is None:
         return html.Div([
@@ -372,14 +471,48 @@ def _render_body(run: dict | None, run_id: str, narration: dict | None = None) -
     elif status == "awaiting_signoff":
         findings = run.get("findings", [])
         n_high = sum(1 for f in findings if f.get("severity") == "High")
-        blocks.append(html.Div([
+        # UI-R1/R2: review is None for a run that has not yet been touched by
+        # this page (it defaults to 'preparation', exactly the stage
+        # orchestrator.runs.prepare/mark_reviewed/sign_off themselves default
+        # an absent RunState.review to -- CLAUDE.md §11 "Runs waiting at
+        # sign-off when this ships enter the workflow at preparation").
+        review = run.get("review") or {}
+        stage = review.get("stage", "preparation")
+        if stage == "preparation":
+            action_button = html.Button(
+                "Mark as prepared", id="run-mark-prepared-btn", className="btn-generate",
+                style={"width": "auto", "padding": "10px 24px"},
+            )
+        elif stage == "review":
+            action_button = html.Button(
+                "Mark as reviewed", id="run-mark-reviewed-btn", className="btn-generate",
+                style={"width": "auto", "padding": "10px 24px"},
+            )
+        else:
+            action_button = html.Button(
+                "Sign off findings", id="run-signoff-open-btn", className="btn-generate",
+                style={"width": "auto", "padding": "10px 24px"},
+            )
+
+        panel_children = [
             html.H3("Findings are ready for sign-off", style={"margin": "0 0 6px"}),
             html.P(f"{len(findings)} finding(s), {n_high} High. Sign-off is required before export "
                    "— this is the control that matters for a defensible workpaper.",
                    className="sub"),
-            html.Button("Sign off findings", id="run-signoff-open-btn", className="btn-generate",
-                        style={"width": "auto", "padding": "10px 24px"}),
-        ], className="panel", style={"marginTop": 16}))
+            html.P(_review_stage_text(review), className="sub"),
+            action_button,
+        ]
+        if stage in ("review", "approval"):
+            # UI-R3: a reviewer (stage 'review') or approver (stage
+            # 'approval') may send the run back to the preparer.
+            panel_children.append(html.Div([
+                dcc.Input(id="run-return-reason-input", type="text", placeholder="Reason for returning",
+                          style={"width": 300, "marginRight": 8}),
+                html.Button("Return to preparer", id="run-return-btn", className="ghost",
+                            style={"width": "auto", "padding": "10px 24px"}),
+            ], style={"display": "flex", "alignItems": "center", "flexWrap": "wrap", "gap": 6, "marginTop": 10}))
+        blocks.append(html.Div(panel_children, className="panel", style={"marginTop": 16}))
+
         if narration is not None:
             blocks.append(_narration_review_panel(narration))
             blocks.append(_candidates_panel(narration))
@@ -387,6 +520,10 @@ def _render_body(run: dict | None, run_id: str, narration: dict | None = None) -
                 html.Button("Regenerate narration", id="run-regenerate-btn", className="ghost",
                             style={"width": "auto", "padding": "10px 24px"}),
             ], className="panel", style={"marginTop": 16}))
+
+        # UI-R4: shown on every awaiting_signoff render, regardless of
+        # whether narration is on -- review notes are a P7 feature, not a P6 one.
+        blocks.append(_review_notes_panel(adapters.get_review_notes(run_id), findings, stage))
 
     elif status == "queued":
         # P3 gate review item 4: run.get("queue_note") is None for an ordinary
@@ -587,10 +724,11 @@ def register_callbacks(app) -> None:
             raise PreventUpdate
         try:
             state = adapters.sign_off(run_id, _request_actor())
-        except (adapters.MissingIdentityHeader, CandidatesUndecided) as exc:
+        except (adapters.MissingIdentityHeader, CandidatesUndecided, ReviewActionRefused) as exc:
             # UI-3: CandidatesUndecided's own message is exactly "decide
             # every AI-proposed finding before sign-off" (orchestrator/
-            # errors.py) -- _error_panel renders it verbatim, never
+            # errors.py); UI-R6: ReviewActionRefused's own `reason` is one of
+            # the exact strings the UI names -- both rendered verbatim, never
             # re-worded here.
             return _error_panel(exc)
         return _refresh_from_state(run_id, state)
@@ -643,7 +781,7 @@ def register_callbacks(app) -> None:
                 decided_severity=severity, actor=_request_actor(),
             )
         except (adapters.MissingIdentityHeader, CandidateSeverityRequired, CandidateAlreadyDecided,
-                CandidateSuperseded, CandidateNotFound, RunNotAwaitingSignoff) as exc:
+                CandidateSuperseded, CandidateNotFound, RunNotAwaitingSignoff, ReviewActionRefused) as exc:
             return _error_panel(exc)
         return _refresh(run_id)
 
@@ -666,7 +804,7 @@ def register_callbacks(app) -> None:
                 decided_severity=None, actor=_request_actor(),
             )
         except (adapters.MissingIdentityHeader, CandidateReasonRequired, CandidateAlreadyDecided,
-                CandidateSuperseded, CandidateNotFound, RunNotAwaitingSignoff) as exc:
+                CandidateSuperseded, CandidateNotFound, RunNotAwaitingSignoff, ReviewActionRefused) as exc:
             return _error_panel(exc)
         return _refresh(run_id)
 
@@ -690,10 +828,12 @@ def register_callbacks(app) -> None:
         try:
             adapters.edit_narrative(run_id, narrative_id, new_text, _request_actor())
         except (adapters.MissingIdentityHeader, NarrativeEditRejected, NarrativeEditNotAllowed,
-                NarrativeEditConflict, NarrativeNotFound, NarrativeTargetNotFound) as exc:
+                NarrativeEditConflict, NarrativeNotFound, NarrativeTargetNotFound,
+                ReviewActionRefused) as exc:
             # UI-1: NarrativeEditRejected's own message names the mismatched
-            # number (orchestrator/errors.py's own N-H1 violation text) --
-            # _error_panel renders it verbatim.
+            # number (orchestrator/errors.py's own N-H1 violation text);
+            # UI-R6: ReviewActionRefused's "ask the reviewer to return the
+            # run" text (D-P7-10) -- both rendered verbatim.
             return _error_panel(exc)
         return _refresh(run_id)
 
@@ -721,9 +861,115 @@ def register_callbacks(app) -> None:
         try:
             state = adapters.regenerate_narration(run_id, _request_actor())
         except (adapters.MissingIdentityHeader, NarrationDisabled, NarrationNodeUnavailable,
-                RunNotAwaitingSignoff) as exc:
+                RunNotAwaitingSignoff, ReviewActionRefused) as exc:
             return _error_panel(exc)
         return _refresh_from_state(run_id, state)
+
+    # ── P7 review workflow (docs/specs/P7_mapping_authoring_design.md §3.8:
+    # UI-R2/R3/R4) ────────────────────────────────────────────────────────
+
+    @app.callback(
+        Output("run-page-body", "children", allow_duplicate=True),
+        Input("run-mark-prepared-btn", "n_clicks"),
+        State("run-page-run-id", "data"),
+        prevent_initial_call=True,
+    )
+    def _mark_prepared(n_clicks, run_id):
+        if not n_clicks:
+            raise PreventUpdate
+        try:
+            state = adapters.prepare_findings(run_id, _request_actor())
+        except (adapters.MissingIdentityHeader, CandidatesUndecided, ReviewActionRefused,
+                RunNotAwaitingSignoff) as exc:
+            # UI-R6: ReviewActionRefused's own `reason` is one of the exact
+            # strings the UI names (role, SoD, open notes, stage) --
+            # _error_panel renders it verbatim, never re-worded here.
+            return _error_panel(exc)
+        return _refresh_from_state(run_id, state)
+
+    @app.callback(
+        Output("run-page-body", "children", allow_duplicate=True),
+        Input("run-mark-reviewed-btn", "n_clicks"),
+        State("run-page-run-id", "data"),
+        prevent_initial_call=True,
+    )
+    def _mark_reviewed(n_clicks, run_id):
+        if not n_clicks:
+            raise PreventUpdate
+        try:
+            state = adapters.mark_reviewed(run_id, _request_actor())
+        except (adapters.MissingIdentityHeader, ReviewActionRefused, RunNotAwaitingSignoff) as exc:
+            return _error_panel(exc)
+        return _refresh_from_state(run_id, state)
+
+    @app.callback(
+        Output("run-page-body", "children", allow_duplicate=True),
+        Input("run-return-btn", "n_clicks"),
+        State("run-return-reason-input", "value"),
+        State("run-page-run-id", "data"),
+        prevent_initial_call=True,
+    )
+    def _return_to_preparer(n_clicks, reason, run_id):
+        if not n_clicks:
+            raise PreventUpdate
+        try:
+            state = adapters.return_to_preparer(run_id, _request_actor(), reason)
+        except (adapters.MissingIdentityHeader, ReviewActionRefused, RunNotAwaitingSignoff) as exc:
+            return _error_panel(exc)
+        return _refresh_from_state(run_id, state)
+
+    @app.callback(
+        Output("run-page-body", "children", allow_duplicate=True),
+        Input("review-note-raise-btn", "n_clicks"),
+        State("review-note-raise-target", "value"),
+        State("review-note-raise-body", "value"),
+        State("run-page-run-id", "data"),
+        prevent_initial_call=True,
+    )
+    def _raise_note(n_clicks, target, body, run_id):
+        if not n_clicks:
+            raise PreventUpdate
+        finding_id = None if not target or target == "__run__" else target
+        try:
+            adapters.raise_review_note(run_id, _request_actor(), body or "", finding_id)
+        except (adapters.MissingIdentityHeader, ReviewActionRefused, RunNotAwaitingSignoff) as exc:
+            return _error_panel(exc)
+        return _refresh(run_id)
+
+    @app.callback(
+        Output("run-page-body", "children", allow_duplicate=True),
+        Input({"type": "review-note-respond-btn", "index": ALL}, "n_clicks"),
+        State({"type": "review-note-response-input", "index": ALL}, "value"),
+        State({"type": "review-note-response-input", "index": ALL}, "id"),
+        State("run-page-run-id", "data"),
+        prevent_initial_call=True,
+    )
+    def _respond_note(n_clicks_list, responses, response_ids, run_id):
+        if not any(n for n in n_clicks_list if n) or not ctx.triggered_id:
+            raise PreventUpdate
+        note_id = ctx.triggered_id["index"]
+        response = next((v for v, i in zip(responses, response_ids) if i["index"] == note_id), None)
+        try:
+            adapters.respond_to_review_note(run_id, note_id, _request_actor(), response or "")
+        except (adapters.MissingIdentityHeader, ReviewActionRefused, RunNotAwaitingSignoff) as exc:
+            return _error_panel(exc)
+        return _refresh(run_id)
+
+    @app.callback(
+        Output("run-page-body", "children", allow_duplicate=True),
+        Input({"type": "review-note-clear-btn", "index": ALL}, "n_clicks"),
+        State("run-page-run-id", "data"),
+        prevent_initial_call=True,
+    )
+    def _clear_note(n_clicks_list, run_id):
+        if not any(n for n in n_clicks_list if n) or not ctx.triggered_id:
+            raise PreventUpdate
+        note_id = ctx.triggered_id["index"]
+        try:
+            adapters.clear_review_note(run_id, note_id, _request_actor())
+        except (adapters.MissingIdentityHeader, ReviewActionRefused, RunNotAwaitingSignoff) as exc:
+            return _error_panel(exc)
+        return _refresh(run_id)
 
     # ── Stale-confirm restart ─────────────────────────────────────────────
 

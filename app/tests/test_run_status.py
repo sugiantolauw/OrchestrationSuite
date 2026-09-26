@@ -113,11 +113,29 @@ def test_render_body_awaiting_confirmation_shows_confirm_button():
     assert "run-confirm-plan-btn" in str(body)
 
 
-def test_render_body_awaiting_signoff_shows_signoff_button():
+def test_render_body_awaiting_signoff_shows_mark_prepared_button():
+    # P7 review workflow (docs/specs/P7_mapping_authoring_design.md UI-R2):
+    # a run that has not yet been through the workflow starts at stage
+    # 'preparation' -- "Sign off findings" no longer shows until stage
+    # 'approval'.
     run_id = _new_run()
     run = adapters.get_run(run_id)
     body = run_status._render_body(run, run_id)
-    assert "run-signoff-open-btn" in str(body)
+    text = str(body)
+    assert "run-mark-prepared-btn" in text
+    assert "run-signoff-open-btn" not in text
+
+
+def test_render_body_awaiting_signoff_shows_signoff_button_at_approval_stage():
+    run_id = _new_run()
+    adapters.prepare_findings(run_id, "auditor@example.com")
+    adapters.mark_reviewed(run_id, "auditor@example.com")
+    run = adapters.get_run(run_id)
+    body = run_status._render_body(run, run_id)
+    text = str(body)
+    assert "run-signoff-open-btn" in text
+    assert "run-mark-prepared-btn" not in text
+    assert "run-mark-reviewed-btn" not in text
 
 
 def test_render_body_completed_shows_workspace_link_and_download():
