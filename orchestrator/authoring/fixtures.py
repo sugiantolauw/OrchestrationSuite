@@ -9,16 +9,56 @@ fixtures too, §2.3)."""
 from __future__ import annotations
 
 import hashlib
+import json
 import random
 from datetime import date, timedelta
 from pathlib import Path
 
+import jsonschema
 import pandas as pd
 import yaml
+
+_SCHEMAS_DIR = Path(__file__).resolve().parent.parent / "schemas"
+_PLANTS_SCHEMA: dict = json.loads((_SCHEMAS_DIR / "plants.schema.json").read_text())
 
 
 class FixtureGenerationError(Exception):
     pass
+
+
+def load_plants_validated(plants_path: str | Path) -> dict:
+    """BUG-P2-1 (independent review 2026-09-26): `generate-fixtures` against
+    `tests/fixtures/tne_planted/plants.yaml` (SKILL-001's own legacy sidecar
+    -- its own docstring says it is materialised by `tests/fixtures/
+    tne_planted/generate.py` and scored by `orchestrator.eval.surface2`, a
+    different shape entirely: `background` is `{source: count}`, not this
+    generator's `{source: {count, template, vary}}`, and there is no
+    `natural_id_column` at all) raised a bare `KeyError: 'natural_id_
+    column'` -- CLAUDE.md's own "never a bare KeyError" rule for exactly
+    this kind of caller mistake. Validates the loaded document against
+    `orchestrator/schemas/plants.schema.json` FIRST (the one schema this
+    generator's own `plants.yaml` shape is defined by) and raises
+    `FixtureGenerationError` naming the missing/invalid key, plus a pointer
+    to the legacy sidecar's own tools, whenever the shape does not match --
+    shared by `generate_fixtures` and `orchestrator.authoring.score.
+    score_fixtures`, so both fail the same clear way, never a KeyError from
+    either."""
+    path = Path(plants_path)
+    try:
+        plants = yaml.safe_load(path.read_text()) or {}
+    except yaml.YAMLError as exc:
+        raise FixtureGenerationError(f"{path}: could not parse YAML: {exc}") from exc
+    try:
+        jsonschema.validate(plants, _PLANTS_SCHEMA)
+    except jsonschema.ValidationError as exc:
+        raise FixtureGenerationError(
+            f"{path}: does not match orchestrator/schemas/plants.schema.json "
+            f"at {list(exc.absolute_path) or ['<document root>']}: {exc.message}. "
+            "If this is SKILL-001's own tests/fixtures/tne_planted/plants.yaml, note that file is a "
+            "legacy sidecar with a different shape -- materialised by tests/fixtures/tne_planted/"
+            "generate.py and scored by orchestrator/eval/surface2.py, not this generator."
+        ) from exc
+    return plants
 
 
 def _seed_for(seed: int, *parts: str) -> int:
@@ -103,7 +143,7 @@ def generate_fixtures(skill_dir: str | Path, plants_path: str | Path, out_dir: s
     or a test's own `fields`) -- undeclared is a FixtureGenerationError,
     never a silent default."""
     skill_dir = Path(skill_dir)
-    plants = yaml.safe_load(Path(plants_path).read_text())
+    plants = load_plants_validated(plants_path)
     seed = plants["seed"]
     natural_id_column = plants["natural_id_column"]
     contract_sources = yaml.safe_load((skill_dir / "contract.yaml").read_text())["sources"]

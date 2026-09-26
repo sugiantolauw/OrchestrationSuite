@@ -54,6 +54,58 @@ def test_undeclared_non_nullable_column_is_a_generator_error(tmp_path: Path):
         generate_fixtures(dest, plants_path, tmp_path / "data")
 
 
+# ── BUG-P2-1 (independent review 2026-09-26): the legacy SKILL-001 sidecar
+# (tests/fixtures/tne_planted/plants.yaml, a different shape entirely --
+# scored by orchestrator.eval.surface2, not this generator) must never
+# raise a bare KeyError; it fails schema validation with a clear message
+# naming what is missing and where the legacy sidecar's own tools live ─────
+
+
+def test_generate_fixtures_against_the_legacy_skill001_sidecar_names_the_missing_key(tmp_path: Path):
+    dest = _copy_mini(tmp_path)
+    with pytest.raises(FixtureGenerationError) as exc:
+        generate_fixtures(dest, TNE_PLANTS, tmp_path / "data")
+    message = str(exc.value)
+    assert "natural_id_column" in message
+    assert "surface2.py" in message
+    assert not isinstance(exc.value, KeyError)
+
+
+def test_score_fixtures_against_the_legacy_skill001_sidecar_names_the_missing_key(tmp_path: Path):
+    dest = _copy_mini(tmp_path)
+    with pytest.raises(FixtureGenerationError) as exc:
+        score_fixtures(dest, TNE_PLANTS, tmp_path)
+    message = str(exc.value)
+    assert "natural_id_column" in message
+    assert "surface2.py" in message
+
+
+def test_generate_fixtures_cli_reports_the_error_without_a_traceback(tmp_path: Path):
+    result = subprocess.run(
+        [sys.executable, "-m", "orchestrator.authoring", "generate-fixtures",
+         str(MINI), "--plants", str(TNE_PLANTS), "--out", str(tmp_path / "data")],
+        cwd=REPO_ROOT, capture_output=True, text=True, timeout=60,
+    )
+    assert result.returncode != 0
+    assert "Traceback" not in result.stderr
+    assert "natural_id_column" in result.stderr
+    assert "surface2.py" in result.stderr
+
+
+def test_undeclared_non_nullable_column_is_a_generator_error_via_real_schema_valid_plants(tmp_path: Path):
+    # A well-formed plants.yaml (this generator's own schema) with a genuine
+    # data problem still reports the ORIGINAL, specific error -- schema
+    # validation must not mask a real generation-time failure.
+    dest = _copy_mini(tmp_path)
+    plants = yaml.safe_load(MINI_PLANTS.read_text())
+    del plants["background"]["claims"]["template"]["Vendor"]
+    plants_path = dest / "plants.yaml"
+    plants_path.write_text(yaml.safe_dump(plants))
+
+    with pytest.raises(FixtureGenerationError, match="Vendor"):
+        generate_fixtures(dest, plants_path, tmp_path / "data")
+
+
 def test_generated_output_passes_validate_contract(tmp_path: Path):
     written = generate_fixtures(MINI, MINI_PLANTS, tmp_path / "data")
     assert set(written) == {"claims", "register"}
