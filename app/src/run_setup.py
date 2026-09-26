@@ -511,7 +511,14 @@ def _explorer_workflow_children(review: dict) -> list:
     tests = review.get("tests", [])
     n_valid, n_total = review.get("n_valid", 0), review.get("n_total", 0)
 
-    if review.get("llm_unavailable"):
+    if review.get("run_status") == "failed":
+        # BUG-EXPLORER-PLAN-1 (independent review round 5, RUN-B68ACB9ED712):
+        # a node exception (e.g. plan) must reach this panel visibly (NN14)
+        # -- the prior fall-through ("Profiling data and proposing tests…")
+        # rendered a genuinely dead run as if it were still in progress,
+        # with no error anywhere the auditor could see.
+        plan_detail = review.get("status_reason") or "The run failed — see /trace for details."
+    elif review.get("llm_unavailable"):
         plan_detail = review.get("label") or "LLM unavailable — deterministic output only"
     elif review.get("plan_status") == "proposed":
         plan_detail = f"{n_valid} test(s) proposed · {n_total - n_valid} greyed"

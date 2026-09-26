@@ -370,6 +370,14 @@ def test_repair_config_error_fails_the_run_cleanly_through_the_real_pipeline(loc
     assert reloaded.status == "failed"
     assert reloaded.state_version == final.state_version
 
+    # BUG-EXPLORER-PLAN-1 (independent review round 5, RUN-B68ACB9ED712): the
+    # workflow-preview panel reads get_explorer_review, which must surface
+    # WHY the run failed -- not just run_status="failed" with no reason
+    # anywhere the auditor can see (NN14).
+    review = service.get_explorer_review(ctx, state.run_id)
+    assert review["run_status"] == "failed"
+    assert "LLMConfigError" in (review["status_reason"] or "")
+
 
 # ── planner cannot emit code (node level) ──────────────────────────────────
 
